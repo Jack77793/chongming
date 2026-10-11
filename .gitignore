@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Build and tooling output
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Runtime output
+logs/
+*.log
+tmp/
+temp/
+output/
+results/
+
+# Large media and generated recordings
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.h264
+*.hevc
+*.onnx
+*.bin
