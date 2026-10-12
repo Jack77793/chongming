@@ -33,6 +33,7 @@ from chongming.contracts.model import (
     LocalTrackId,
     Matrix2x2,
     Matrix3x3,
+    PixelFormat,
     ProcessingStatus,
     ProcessingTime,
     RayEvent,
@@ -332,7 +333,7 @@ class IlluminationSpec:
 class SensorArtifactSpec:
     """Explicit image-quality controls; values may be disabled in the baseline."""
 
-    output_pixel_format: str
+    output_pixel_format: PixelFormat
     sensor_noise_std_intensity: float
     intensity_min: float
     intensity_max: float
@@ -657,7 +658,15 @@ class CameraFrameTruth:
 
 @dataclass(frozen=True)
 class ImagingBatch:
+    """Ordinary camera frames; privileged frame truth is returned separately."""
+
     frames: tuple[CameraFrame, ...]
+
+
+@dataclass(frozen=True)
+class ImagingTruthBatch:
+    """Evaluation-only truth produced alongside an imaging batch."""
+
     frame_truth: tuple[CameraFrameTruth, ...]
 
 
@@ -760,11 +769,19 @@ class VirtualObservationRequest:
 
 @dataclass(frozen=True)
 class VirtualObservationBatch:
+    """Ordinary virtual events; truth correspondences are returned separately."""
+
     calibration_states: tuple[CalibrationState, ...]
     calibration_solutions: tuple[CalibrationSolution, ...]
     calibration_events: tuple[CalibrationStateEvent, ...]
     rays: tuple[RayEvent, ...]
     diagnostics: tuple[DiagnosticEvent, ...]
+
+
+@dataclass(frozen=True)
+class VirtualObservationTruthBatch:
+    """Evaluation-only mapping for a virtual observation batch."""
+
     truth_correspondences: tuple[OnlineTruthCorrespondence, ...]
 
 

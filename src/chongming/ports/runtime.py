@@ -83,7 +83,14 @@ class SystemRunner(Protocol):
         ...
 
     def step(self, step: ScenarioStep, now: ProcessingTime) -> SystemStepResult:
-        """Run both branches, dispatch one to center; truth only to evaluation/monitoring."""
+        """Route all three exits while keeping truth outside every online port.
+
+        Video frames go only to their station device pipelines. Device events are
+        submitted on IMAGE_PIPELINE; ordinary scenario packets are submitted on
+        VIRTUAL_RAYS. Both paths run and are recorded, while center_input selects
+        the delivered transport batch passed to fusion. Truth goes only to
+        evaluation, monitoring and evidence storage.
+        """
         ...
 
     def run(self, spec: ScenarioSpec) -> RunSummary:

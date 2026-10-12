@@ -242,10 +242,10 @@ def architecture_specs(
             logic_step_ns=1_000_000,
         ),
         imaging=scene.ImagingSpec(
-            color_space="linear-rgb",
+            color_space="linear-gray",
             exposure_samples=1,
             sensor_artifacts=scene.SensorArtifactSpec(
-                output_pixel_format="rgb8",
+                output_pixel_format=model.PixelFormat.GRAY8,
                 sensor_noise_std_intensity=0.0,
                 intensity_min=0.0,
                 intensity_max=1.0,

@@ -21,10 +21,14 @@ from chongming.composition.graph import ArchitectureAssembly, declare_assembly
 from chongming.contracts.fusion import CandidateMethod
 from chongming.contracts.runtime import EventPath
 from chongming.contracts.scene import (
+    ImagingBatch,
+    ImagingTruthBatch,
     ScenarioPacketOutput,
     ScenarioStep,
     ScenarioTruthOutput,
     ScenarioVideoOutput,
+    VirtualObservationBatch,
+    VirtualObservationTruthBatch,
 )
 from chongming.modules import base
 from chongming.modules.base import ModuleShell
@@ -74,6 +78,17 @@ class ArchitectureStructureTests(unittest.TestCase):
         self.assertNotIn("truth_object_id", video_types)
         self.assertNotIn("truth_object_id", packet_types)
         self.assertIn("online_correspondences", truth_types)
+
+    def test_generation_batches_keep_online_and_truth_data_separate(self) -> None:
+        self.assertEqual(tuple(field.name for field in fields(ImagingBatch)), ("frames",))
+        self.assertEqual(tuple(field.name for field in fields(ImagingTruthBatch)), ("frame_truth",))
+        self.assertNotIn(
+            "truth_correspondences", {field.name for field in fields(VirtualObservationBatch)}
+        )
+        self.assertEqual(
+            tuple(field.name for field in fields(VirtualObservationTruthBatch)),
+            ("truth_correspondences",),
+        )
 
     def test_every_constructed_shell_is_bound_once_in_resolvable_dag(self) -> None:
         assembly, constructed = _construct()

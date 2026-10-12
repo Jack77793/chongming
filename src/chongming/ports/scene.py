@@ -18,6 +18,7 @@ from chongming.contracts.scene import (
     ExperimentPerturbations,
     ImageGenerationRequest,
     ImagingBatch,
+    ImagingTruthBatch,
     KinematicState,
     LandmarkVisibilityTruth,
     LogicalSceneSnapshot,
@@ -36,6 +37,7 @@ from chongming.contracts.scene import (
     TrajectorySpec,
     VirtualObservationBatch,
     VirtualObservationRequest,
+    VirtualObservationTruthBatch,
     VisibilityQuery,
 )
 
@@ -92,14 +94,16 @@ class SceneLogic(Protocol):
 
 
 class CameraImager(Protocol):
-    def render(self, request: ImageGenerationRequest) -> ImagingBatch:
-        """Render main/auxiliary pixels from authoritative exposure samples."""
+    def render(self, request: ImageGenerationRequest) -> tuple[ImagingBatch, ImagingTruthBatch]:
+        """Render ordinary frames and a separate privileged frame-truth batch."""
         ...
 
 
 class VirtualObservationGenerator(Protocol):
-    def generate(self, request: VirtualObservationRequest) -> VirtualObservationBatch:
-        """Emit ordinary virtual online events and a separate privileged ID mapping."""
+    def generate(
+        self, request: VirtualObservationRequest
+    ) -> tuple[VirtualObservationBatch, VirtualObservationTruthBatch]:
+        """Emit ordinary events and a separate privileged correspondence batch."""
         ...
 
 

@@ -84,7 +84,12 @@ class EvidenceWriterModule(ModuleShell):
 
 @dataclass(frozen=True, kw_only=True)
 class SystemRunnerModule:
-    """Own the startup barrier; this controller is not one of its managed modules."""
+    """Own startup and the three-exit router; it is not a managed module itself.
+
+    ``step`` must send video only to devices, submit device and virtual events on
+    their separate transport paths, and expose only the selected delivered path
+    to fusion. Scenario truth is confined to evaluation, monitoring and evidence.
+    """
 
     run_spec: RunSpec
     startup: StartupPlan

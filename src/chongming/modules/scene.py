@@ -17,6 +17,7 @@ from chongming.contracts.scene import (
     ExperimentPerturbations,
     ImageGenerationRequest,
     ImagingBatch,
+    ImagingTruthBatch,
     KinematicState,
     LandmarkVisibilityTruth,
     LogicalSceneSnapshot,
@@ -36,6 +37,7 @@ from chongming.contracts.scene import (
     TrajectorySpec,
     VirtualObservationBatch,
     VirtualObservationRequest,
+    VirtualObservationTruthBatch,
     VisibilityQuery,
 )
 from chongming.modules.base import ModuleShell
@@ -106,7 +108,7 @@ class SceneLogicModule(ModuleShell):
 
 
 class CameraImagingModule(ModuleShell):
-    def render(self, request: ImageGenerationRequest) -> ImagingBatch:
+    def render(self, request: ImageGenerationRequest) -> tuple[ImagingBatch, ImagingTruthBatch]:
         raise NotImplementedError(_TODO)
 
 
@@ -116,7 +118,9 @@ class VirtualObservationModule(ModuleShell):
     def __init__(self, sequencers: tuple[EventSequencer, ...]) -> None:
         self.sequencers = sequencers
 
-    def generate(self, request: VirtualObservationRequest) -> VirtualObservationBatch:
+    def generate(
+        self, request: VirtualObservationRequest
+    ) -> tuple[VirtualObservationBatch, VirtualObservationTruthBatch]:
         raise NotImplementedError(_TODO)
 
 
