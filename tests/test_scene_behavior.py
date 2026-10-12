@@ -3,17 +3,28 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from chongming.contracts.model import CameraRole
+from chongming.contracts.model import (
+    CameraRole,
+    CaptureTime,
+    ConfigDigest,
+    FrameId,
+    PixelFormat,
+    SessionId,
+)
 from chongming.contracts.scene import (
     CameraMetadata,
     CameraStateTruth,
     ClockDomainSpec,
     FlyingObjectTruth,
+    FrameImagingInput,
+    ImageGenerationRequest,
+    ImagingSpec,
     KinematicState,
     SceneCameraDistortion,
     SceneCameraIntrinsics,
     SceneDistortionModel,
     SegmentOcclusionTruth,
+    SensorArtifactSpec,
     SimulationTime,
     SphereGeometry,
     SurfaceAppearance,
@@ -30,6 +41,7 @@ from chongming.contracts.scene import (
     WorldObjectSpec,
 )
 from chongming.modules.scene import (
+    CameraImagingModule,
     CameraProjectionModule,
     ExperimentClockModule,
     SceneLogicModule,
@@ -196,6 +208,66 @@ class ScenePrimitiveTests(unittest.TestCase):
         self.assertEqual(len(snapshot.cameras), len(spec.scene_definition.cameras))
         self.assertEqual(snapshot.flying_objects, ())
         self.assertEqual(snapshot.target_visibility, ())
+
+    def test_imager_emits_deterministic_gray8_and_separate_truth(self) -> None:
+        spec, _ = architecture_specs()
+        logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
+        logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
+        snapshot = logic.sample(SimulationTime("structure-clock", 0, 0))
+        frame = FrameImagingInput(
+            station_id=spec.scene_definition.cameras[0].station_id,
+            station_session_id=SessionId("image-session"),
+            camera_role=spec.scene_definition.cameras[0].camera_role,
+            frame_id=FrameId("frame-0"),
+            capture_time=CaptureTime(
+                clock_domain_id="structure-clock",
+                exposure_start_ns=0,
+                exposure_end_ns=1_000_000,
+                clock_uncertainty_ns=0,
+                rolling_shutter_model="none",
+            ),
+            online_camera_config_digest=ConfigDigest("online"),
+            exposure_samples=(snapshot,),
+        )
+        imaging = ImagingSpec(
+            color_space="linear-gray",
+            exposure_samples=1,
+            sensor_artifacts=SensorArtifactSpec(
+                output_pixel_format=PixelFormat.GRAY8,
+                sensor_noise_std_intensity=0.0,
+                intensity_min=0.0,
+                intensity_max=1.0,
+                auto_exposure_enabled=False,
+                dynamic_range_stops=None,
+                saturation_level=None,
+                glare_enabled=False,
+                bloom_strength=None,
+            ),
+        )
+        request = ImageGenerationRequest("scenario", 7, imaging, (frame,))
+        ordinary, truth = CameraImagingModule().render(request)
+        ordinary_again, _ = CameraImagingModule().render(request)
+        self.assertEqual(ordinary.frames[0].image.pixel_format, PixelFormat.GRAY8)
+        self.assertEqual(ordinary.frames[0].image.pixels, ordinary_again.frames[0].image.pixels)
+        self.assertEqual(len(truth.frame_truth), 1)
+        self.assertNotIn(
+            "truth_object_id",
+            {field.name for field in __import__("dataclasses").fields(ordinary.frames[0])},
+        )
+
+    def test_scenario_source_runs_independent_camera_schedules(self) -> None:
+        spec, run = architecture_specs()
+        from chongming.composition.graph import declare_assembly
+
+        assembly = declare_assembly(spec, run)
+        steps = list(assembly.scene.scenario.generate(spec))
+        self.assertTrue(steps)
+        self.assertTrue(all(step.packets.rays == () for step in steps))
+        self.assertEqual(
+            [step.truth.sample_time.time_ns for step in steps],
+            sorted(step.truth.sample_time.time_ns for step in steps),
+        )
+        self.assertTrue(all(step.video.frames for step in steps))
 
 
 if __name__ == "__main__":

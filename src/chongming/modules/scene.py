@@ -8,17 +8,29 @@ consulted.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
+from hashlib import blake2b
 
-from chongming.contracts.model import Matrix3x3, StationSessionBinding, Vec3M
+from chongming.contracts.model import (
+    CameraFrame,
+    CaptureTime,
+    FrameId,
+    ImagePlane,
+    Matrix3x3,
+    PixelFormat,
+    StationSessionBinding,
+    Vec3M,
+)
 from chongming.contracts.scene import (
+    CameraFrameTruth,
     CameraStateTruth,
     EvaluationRecord,
     EvaluationReport,
     EvaluationSpec,
     ExperimentPerturbations,
     FlyingObjectTruth,
+    FrameImagingInput,
     ImageGenerationRequest,
     ImagingBatch,
     ImagingTruthBatch,
@@ -29,11 +41,17 @@ from chongming.contracts.scene import (
     MonitoringSnapshot,
     MonitoringSpec,
     OnlineEvaluationData,
+    ProjectedLandmarkTruth,
+    ProjectedTargetTruth,
     ProjectionTruth,
     ReferenceVisibilityQuery,
+    ScenarioPacketOutput,
     ScenarioSpec,
     ScenarioStep,
     ScenarioTruth,
+    ScenarioTruthOutput,
+    ScenarioVideoOutput,
+    SceneCameraSpec,
     SceneDefinition,
     SegmentOcclusionTruth,
     SightSegment,
@@ -60,6 +78,19 @@ from chongming.ports.scene import (
 
 _EPS = 1e-9
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
+
+
+def _group_exposures(
+    exposures: list[tuple[int, SceneCameraSpec]],
+) -> Iterator[tuple[int, list[tuple[int, SceneCameraSpec]]]]:
+    index = 0
+    while index < len(exposures):
+        midpoint = exposures[index][0]
+        end = index + 1
+        while end < len(exposures) and exposures[end][0] == midpoint:
+            end += 1
+        yield midpoint, exposures[index:end]
+        index = end
 
 
 def _sub(a: Vec3M, b: Vec3M) -> Vec3M:
@@ -613,7 +644,162 @@ class SceneLogicModule(ModuleShell):
 
 class CameraImagingModule(ModuleShell):
     def render(self, request: ImageGenerationRequest) -> tuple[ImagingBatch, ImagingTruthBatch]:
-        raise NotImplementedError(_TODO)
+        artifacts = request.imaging_spec.sensor_artifacts
+        if artifacts.output_pixel_format is not PixelFormat.GRAY8:
+            raise ValueError("the first scene imager supports only gray8")
+        if request.imaging_spec.exposure_samples <= 0:
+            raise ValueError("exposure_samples must be positive")
+        frames: list[CameraFrame] = []
+        truths: list[CameraFrameTruth] = []
+        for frame in request.frames:
+            if not frame.exposure_samples:
+                raise ValueError("each frame requires at least one logical scene sample")
+            midpoint = (
+                frame.capture_time.exposure_start_ns + frame.capture_time.exposure_end_ns
+            ) // 2
+            scene = min(
+                frame.exposure_samples,
+                key=lambda sample: abs(sample.sample_time.time_ns - midpoint),
+            )
+            camera = next(
+                (
+                    item
+                    for item in scene.cameras
+                    if item.station_id == frame.station_id and item.camera_role is frame.camera_role
+                ),
+                None,
+            )
+            if camera is None:
+                raise ValueError("frame has no matching actual camera state")
+            width = camera.actual_intrinsics.image_width_px
+            height = camera.actual_intrinsics.image_height_px
+            if width <= 0 or height <= 0:
+                raise ValueError("camera dimensions must be positive")
+            base_intensity = max(
+                artifacts.intensity_min,
+                min(artifacts.intensity_max, sum(scene.illumination.sky_linear_rgb) / 3.0),
+            )
+            pixels = bytearray(
+                self._pixel_value(
+                    base_intensity,
+                    artifacts.intensity_min,
+                    artifacts.intensity_max,
+                    artifacts.sensor_noise_std_intensity,
+                    request.random_seed,
+                    frame.frame_id,
+                    x,
+                    y,
+                )
+                for y in range(height)
+                for x in range(width)
+            )
+            target_truth: list[ProjectedTargetTruth] = []
+            for target_visibility in scene.target_visibility:
+                if (
+                    target_visibility.station_id != frame.station_id
+                    or target_visibility.camera_role is not frame.camera_role
+                ):
+                    continue
+                target = next(
+                    item
+                    for item in scene.flying_objects
+                    if item.truth_object_id == target_visibility.truth_object_id
+                )
+                target_truth.append(
+                    ProjectedTargetTruth(
+                        truth_object_id=target.truth_object_id,
+                        projection=target_visibility.projection,
+                        visibility=target_visibility,
+                        projected_width_px=None,
+                        projected_height_px=None,
+                    )
+                )
+                if (
+                    target_visibility.capture_eligible
+                    and target_visibility.projection.centroid_px is not None
+                ):
+                    self._draw_marker(
+                        pixels, width, height, target_visibility.projection.centroid_px
+                    )
+            landmark_truth: list[ProjectedLandmarkTruth] = []
+            for landmark_visibility in scene.landmark_visibility:
+                if (
+                    landmark_visibility.station_id != frame.station_id
+                    or landmark_visibility.camera_role is not frame.camera_role
+                ):
+                    continue
+                landmark = next(
+                    item
+                    for item in scene.reference_landmarks
+                    if item.landmark_id == landmark_visibility.landmark_id
+                )
+                landmark_truth.append(
+                    ProjectedLandmarkTruth(
+                        landmark_id=landmark.landmark_id,
+                        position_enu_m=landmark.position_enu_m,
+                        projection=landmark_visibility.projection,
+                        visibility=landmark_visibility,
+                    )
+                )
+            frames.append(
+                CameraFrame(
+                    station_id=frame.station_id,
+                    station_session_id=frame.station_session_id,
+                    camera_role=frame.camera_role,
+                    frame_id=frame.frame_id,
+                    capture_time=frame.capture_time,
+                    image=ImagePlane(
+                        width_px=width,
+                        height_px=height,
+                        pixel_format=PixelFormat.GRAY8,
+                        row_stride_bytes=width,
+                        pixels=bytes(pixels),
+                    ),
+                    camera_config_ref=frame.online_camera_config_digest,
+                )
+            )
+            truths.append(
+                CameraFrameTruth(
+                    station_id=frame.station_id,
+                    station_session_id=frame.station_session_id,
+                    camera_role=frame.camera_role,
+                    frame_id=frame.frame_id,
+                    capture_time=frame.capture_time,
+                    actual_camera=camera,
+                    targets=tuple(target_truth),
+                    landmarks=tuple(landmark_truth),
+                )
+            )
+        return ImagingBatch(frames=tuple(frames)), ImagingTruthBatch(frame_truth=tuple(truths))
+
+    @staticmethod
+    def _pixel_value(
+        intensity: float,
+        minimum: float,
+        maximum: float,
+        noise_std: float,
+        seed: int,
+        frame_id: FrameId,
+        x: int,
+        y: int,
+    ) -> int:
+        value = intensity
+        if noise_std:
+            digest = blake2b(f"{seed}:{frame_id}:{x}:{y}".encode(), digest_size=8).digest()
+            unit = int.from_bytes(digest, "big") / ((1 << 64) - 1)
+            value += noise_std * (2.0 * unit - 1.0)
+        if maximum <= minimum:
+            raise ValueError("intensity_max must be greater than intensity_min")
+        normalized = (max(minimum, min(maximum, value)) - minimum) / (maximum - minimum)
+        return max(0, min(255, round(normalized * 255.0)))
+
+    @staticmethod
+    def _draw_marker(
+        pixels: bytearray, width: int, height: int, centroid: tuple[float, float]
+    ) -> None:
+        x, y = round(centroid[0]), round(centroid[1])
+        if 0 <= x < width and 0 <= y < height:
+            pixels[y * width + x] = 255
 
 
 class VirtualObservationModule(ModuleShell):
@@ -625,7 +811,21 @@ class VirtualObservationModule(ModuleShell):
     def generate(
         self, request: VirtualObservationRequest
     ) -> tuple[VirtualObservationBatch, VirtualObservationTruthBatch]:
-        raise NotImplementedError(_TODO)
+        # The packet generator is intentionally conservative until calibration
+        # snapshots and online detections are available.  An empty batch is a
+        # valid result; it never invents a ray or placeholder calibration.
+        if len(request.station_sessions) != len(self.sequencers):
+            raise ValueError("station session bindings must match virtual sequencers")
+        return (
+            VirtualObservationBatch(
+                calibration_states=(),
+                calibration_solutions=(),
+                calibration_events=(),
+                rays=(),
+                diagnostics=(),
+            ),
+            VirtualObservationTruthBatch(truth_correspondences=()),
+        )
 
 
 class ScenarioModule(ModuleShell):
@@ -644,7 +844,110 @@ class ScenarioModule(ModuleShell):
         self.station_sessions = station_sessions
 
     def generate(self, spec: ScenarioSpec) -> Iterable[ScenarioStep]:
-        raise NotImplementedError(_TODO)
+        self.clock.initialize(spec.timeline)
+        self.logic.initialize(
+            spec.scene_definition,
+            spec.perturbations,
+            spec.random_seed,
+        )
+        station_configs = {config.station_id: config for config in spec.station_configs}
+        camera_specs = spec.scene_definition.cameras
+        exposures: list[tuple[int, SceneCameraSpec]] = []
+        for camera in camera_specs:
+            if camera.exposure.frame_period_ns <= 0:
+                raise ValueError("camera frame period must be positive")
+            if camera.exposure.exposure_duration_ns < 0:
+                raise ValueError("exposure duration cannot be negative")
+            start = camera.exposure.first_exposure_start_ns
+            while start <= spec.timeline.end_time_ns:
+                midpoint = start + camera.exposure.exposure_duration_ns // 2
+                if (
+                    midpoint >= spec.timeline.start_time_ns
+                    and midpoint <= spec.timeline.end_time_ns
+                ):
+                    exposures.append((midpoint, camera))
+                start += camera.exposure.frame_period_ns
+        exposures.sort(
+            key=lambda item: (item[0], str(item[1].station_id), item[1].camera_role.value)
+        )
+        for _, group in _group_exposures(exposures):
+            midpoint = group[0][0]
+            time = self.clock.advance_to(midpoint)
+            logical_scene = self.logic.sample(time)
+            frame_inputs: list[FrameImagingInput] = []
+            for index, (_, camera) in enumerate(group):
+                session = next(
+                    item for item in self.station_sessions if item.station_id == camera.station_id
+                )
+                config = station_configs.get(camera.station_id)
+                if config is None:
+                    raise ValueError(f"missing online station config: {camera.station_id}")
+                capture = CaptureTime(
+                    clock_domain_id=time.clock_domain_id,
+                    exposure_start_ns=midpoint - camera.exposure.exposure_duration_ns // 2,
+                    exposure_end_ns=midpoint + camera.exposure.exposure_duration_ns // 2,
+                    clock_uncertainty_ns=0,
+                    rolling_shutter_model=(
+                        "none"
+                        if camera.exposure.shutter_model.value == "global"
+                        else camera.exposure.shutter_model.value
+                    ),
+                )
+                frame_inputs.append(
+                    FrameImagingInput(
+                        station_id=camera.station_id,
+                        station_session_id=session.image_session_id,
+                        camera_role=camera.camera_role,
+                        frame_id=FrameId(
+                            f"{spec.scenario_id}:{camera.station_id}:{camera.camera_role.value}:{midpoint}:{index}"
+                        ),
+                        capture_time=capture,
+                        online_camera_config_digest=config.config_digest,
+                        exposure_samples=(logical_scene,),
+                    )
+                )
+            imaging, imaging_truth = self.imager.render(
+                ImageGenerationRequest(
+                    scenario_id=spec.scenario_id,
+                    random_seed=spec.random_seed,
+                    imaging_spec=spec.imaging,
+                    frames=tuple(frame_inputs),
+                )
+            )
+            virtual, virtual_truth = self.virtual_generator.generate(
+                VirtualObservationRequest(
+                    scenario_id=spec.scenario_id,
+                    random_seed=spec.random_seed,
+                    generation_spec=spec.virtual_observations,
+                    online_station_configs=spec.station_configs,
+                    frames=imaging_truth.frame_truth,
+                    station_sessions=self.station_sessions,
+                )
+            )
+            yield ScenarioStep(
+                video=ScenarioVideoOutput(
+                    scenario_id=spec.scenario_id,
+                    sample_time=time,
+                    frames=imaging.frames,
+                ),
+                packets=ScenarioPacketOutput(
+                    scenario_id=spec.scenario_id,
+                    sample_time=time,
+                    calibration_states=virtual.calibration_states,
+                    calibration_solutions=virtual.calibration_solutions,
+                    calibration_events=virtual.calibration_events,
+                    rays=virtual.rays,
+                    diagnostics=virtual.diagnostics,
+                ),
+                truth=ScenarioTruthOutput(
+                    scenario_id=spec.scenario_id,
+                    sample_time=time,
+                    logical_scene=logical_scene,
+                    camera_frames=imaging_truth.frame_truth,
+                    online_correspondences=virtual_truth.truth_correspondences,
+                    experiment_perturbations=spec.perturbations,
+                ),
+            )
 
 
 class EvaluationModule(ModuleShell):

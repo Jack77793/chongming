@@ -215,6 +215,9 @@ class ArchitectureStructureTests(unittest.TestCase):
             "CameraProjectionModule",
             "VisibilityModule",
             "SceneLogicModule",
+            "CameraImagingModule",
+            "VirtualObservationModule",
+            "ScenarioModule",
         }
         checked_methods = 0
         for source in module_directory.glob("*.py"):
@@ -225,7 +228,10 @@ class ArchitectureStructureTests(unittest.TestCase):
                 if declaration.name in implemented_scene:
                     continue
                 for method in declaration.body:
-                    if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
+                    if not isinstance(method, ast.FunctionDef) or method.name in {
+                        "__init__",
+                        "__new__",
+                    }:
                         continue
                     checked_methods += 1
                     with self.subTest(source=source.name, cls=declaration.name, method=method.name):
