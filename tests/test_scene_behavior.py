@@ -134,6 +134,18 @@ class ScenePrimitiveTests(unittest.TestCase):
         result = TrajectoryModule().sample(trajectory, SimulationTime("clock", 10, 0))
         self.assertEqual(result.position_enu_m, (10.0, 0.0, 0.0))
 
+    def test_cubic_trajectory_uses_hermite_velocity(self) -> None:
+        trajectory = TrajectorySpec(
+            TrajectoryInterpolation.CUBIC_HERMITE,
+            (
+                TrajectoryKnot(0, state((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))),
+                TrajectoryKnot(1_000_000_000, state((10.0, 0.0, 0.0), (0.0, 0.0, 0.0))),
+            ),
+        )
+        result = TrajectoryModule().sample(trajectory, SimulationTime("clock", 500_000_000, 0))
+        self.assertEqual(result.position_enu_m, (5.0, 0.0, 0.0))
+        self.assertEqual(result.velocity_enu_mps, (15.0, 0.0, 0.0))
+
     def test_projection_uses_actual_intrinsics_and_rejects_behind_camera(self) -> None:
         projector = CameraProjectionModule()
         visible = projector.project(camera(), (0.0, 0.0, 10.0))

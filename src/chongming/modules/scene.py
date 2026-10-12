@@ -309,6 +309,10 @@ class TrajectoryModule(ModuleShell):
             h10 = t3 - 2 * t2 + fraction
             h01 = -2 * t3 + 3 * t2
             h11 = t3 - t2
+            dh00 = 6 * t2 - 6 * fraction
+            dh10 = 3 * t2 - 4 * fraction + 1
+            dh01 = -6 * t2 + 6 * fraction
+            dh11 = 3 * t2 - 2 * fraction
             position: Vec3M = (
                 h00 * left.state.position_enu_m[0]
                 + h10 * dt * left.state.velocity_enu_mps[0]
@@ -323,12 +327,33 @@ class TrajectoryModule(ModuleShell):
                 + h01 * right.state.position_enu_m[2]
                 + h11 * dt * right.state.velocity_enu_mps[2],
             )
+            velocity: Vec3M = (
+                (
+                    dh00 * left.state.position_enu_m[0]
+                    + dh10 * dt * left.state.velocity_enu_mps[0]
+                    + dh01 * right.state.position_enu_m[0]
+                    + dh11 * dt * right.state.velocity_enu_mps[0]
+                )
+                / dt,
+                (
+                    dh00 * left.state.position_enu_m[1]
+                    + dh10 * dt * left.state.velocity_enu_mps[1]
+                    + dh01 * right.state.position_enu_m[1]
+                    + dh11 * dt * right.state.velocity_enu_mps[1]
+                )
+                / dt,
+                (
+                    dh00 * left.state.position_enu_m[2]
+                    + dh10 * dt * left.state.velocity_enu_mps[2]
+                    + dh01 * right.state.position_enu_m[2]
+                    + dh11 * dt * right.state.velocity_enu_mps[2]
+                )
+                / dt,
+            )
             return replace(
                 left.state,
                 position_enu_m=position,
-                velocity_enu_mps=_lerp(
-                    left.state.velocity_enu_mps, right.state.velocity_enu_mps, fraction
-                ),
+                velocity_enu_mps=velocity,
             )
         raise ValueError(f"unsupported trajectory interpolation: {trajectory.interpolation}")
 
