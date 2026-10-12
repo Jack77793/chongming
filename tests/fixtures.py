@@ -138,6 +138,15 @@ def architecture_specs(
         scene.SceneCameraSpec(
             station_id=config.station_id,
             camera_role=role,
+            metadata=scene.CameraMetadata(
+                camera_id=scene.CameraId(f"{config.station_id}-{role.value}-camera"),
+                display_name=f"{config.station_id}-{role.value}",
+                profile_id="structural-profile",
+                sensor_format="structural",
+                lens_focal_length_mm=3.0,
+                nominal_diagonal_fov_deg=60.0 if role is model.CameraRole.MAIN else 20.0,
+                nominal_frame_rate_hz=30.0,
+            ),
             actual_intrinsics=scene.SceneCameraIntrinsics(
                 image_width_px=64,
                 image_height_px=48,
@@ -179,6 +188,8 @@ def architecture_specs(
     )
     scenario = scene.ScenarioSpec(
         scenario_id="structure-only",
+        schema_version="structure-scenario-v1",
+        config_digest=model.ConfigDigest("structure-scenario-digest"),
         random_seed=0,
         world_frame_id=_WORLD,
         voxel_search=search,
@@ -186,6 +197,28 @@ def architecture_specs(
         scene_definition=scene.SceneDefinition(
             world=scene.ENUWorldSpec(
                 world_frame_id=_WORLD, geodetic_anchor=configs[0].geodetic_anchor
+            ),
+            terrain=scene.TerrainSpec(
+                terrain_id=scene.WorldObjectId("structure-terrain"),
+                model=scene.TerrainModel.FLAT,
+                base_elevation_m=0.0,
+                maximum_relief_m=0.0,
+                heightfield_asset_uri=None,
+                heightfield_asset_digest=None,
+                appearance=scene.SurfaceAppearance(
+                    linear_rgb=(0.2, 0.2, 0.2), diffuse_reflectance=0.5
+                ),
+                occludes_sight_lines=True,
+            ),
+            edge_devices=tuple(
+                scene.EdgeDeviceMetadata(
+                    station_id=config.station_id,
+                    display_name=f"{config.station_id}-device",
+                    hardware_model="structural-device",
+                    main_camera_id=scene.CameraId(f"{config.station_id}-main-camera"),
+                    auxiliary_camera_id=scene.CameraId(f"{config.station_id}-auxiliary-camera"),
+                )
+                for config in configs
             ),
             cameras=cameras,
             world_objects=(),
@@ -210,10 +243,18 @@ def architecture_specs(
         ),
         imaging=scene.ImagingSpec(
             color_space="linear-rgb",
-            sensor_noise_std_intensity=0.0,
-            intensity_min=0.0,
-            intensity_max=1.0,
             exposure_samples=1,
+            sensor_artifacts=scene.SensorArtifactSpec(
+                output_pixel_format="rgb8",
+                sensor_noise_std_intensity=0.0,
+                intensity_min=0.0,
+                intensity_max=1.0,
+                auto_exposure_enabled=False,
+                dynamic_range_stops=None,
+                saturation_level=None,
+                glare_enabled=False,
+                bloom_strength=None,
+            ),
         ),
         virtual_observations=scene.VirtualObservationSpec(
             detection_probability=1.0,
@@ -224,7 +265,14 @@ def architecture_specs(
             calibration_intervals=(),
         ),
         perturbations=scene.ExperimentPerturbations(
-            camera_pose=(), wind=None, clouds=(), vegetation=(), communication=()
+            camera_pose=(),
+            camera_jitter=(),
+            wind=None,
+            clouds=(),
+            fog=None,
+            rain=None,
+            vegetation=(),
+            communication=(),
         ),
     )
     policy = fusion.FusionPolicy(

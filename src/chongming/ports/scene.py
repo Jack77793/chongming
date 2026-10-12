@@ -105,7 +105,12 @@ class VirtualObservationGenerator(Protocol):
 
 class ScenarioSource(Protocol):
     def generate(self, spec: ScenarioSpec) -> Iterable[ScenarioStep]:
-        """Generate both branches with fresh, separate image/virtual sessions per run."""
+        """Generate synchronized video, packet and privileged truth outputs.
+
+        Video frames, ordinary virtual packets and truth are separate typed exits;
+        consumers must not infer or reconstruct one exit from another. Each run
+        uses fresh image/virtual sessions and deterministic scenario streams.
+        """
         ...
 
 

@@ -54,6 +54,9 @@ from chongming.contracts.model import (
 TruthObjectId = NewType("TruthObjectId", str)
 WorldObjectId = NewType("WorldObjectId", str)
 LandmarkId = NewType("LandmarkId", str)
+CameraId = NewType("CameraId", str)
+BehaviorId = NewType("BehaviorId", str)
+VegetationId = NewType("VegetationId", str)
 
 
 class TimeScale(StrEnum):
@@ -126,6 +129,21 @@ class TrajectorySpec:
 
 
 @dataclass(frozen=True)
+class FlightBehaviorSpec:
+    """Persistable reference to deterministic behavior code.
+
+    A callable is deliberately not stored in a scenario. The runtime registry
+    resolves behavior_id and implementation_version, then samples using only
+    the experiment time, these parameters and the named deterministic stream.
+    """
+
+    behavior_id: BehaviorId
+    implementation_version: str
+    parameters: tuple[tuple[str, str | int | float | bool], ...]
+    random_stream: str
+
+
+@dataclass(frozen=True)
 class SphereGeometry:
     radius_m: float
 
@@ -150,26 +168,68 @@ class SurfaceAppearance:
     diffuse_reflectance: float
 
 
+class TerrainModel(StrEnum):
+    FLAT = "flat"
+    HEIGHTFIELD = "heightfield"
+
+
+@dataclass(frozen=True)
+class TerrainSpec:
+    terrain_id: WorldObjectId
+    model: TerrainModel
+    base_elevation_m: float
+    maximum_relief_m: float
+    heightfield_asset_uri: str | None
+    heightfield_asset_digest: str | None
+    appearance: SurfaceAppearance
+    occludes_sight_lines: bool
+
+
 class WorldObjectKind(StrEnum):
     TERRAIN = "terrain"
     OBSTACLE = "obstacle"
+    STATIC_STRUCTURE = "static_structure"
     FIXED_REFERENCE = "fixed_reference"
 
 
 @dataclass(frozen=True)
 class WorldObjectSpec:
     object_id: WorldObjectId
+    display_name: str
     kind: WorldObjectKind
+    category: str
     pose: KinematicState
     geometry: GeometrySpec
     appearance: SurfaceAppearance
     occludes_sight_lines: bool
 
 
+class VegetationMotionModel(StrEnum):
+    STATIC = "static"
+    PERIODIC = "periodic"
+    WIND_DRIVEN = "wind_driven"
+
+
+@dataclass(frozen=True)
+class VegetationSpec:
+    """Dynamic vegetation is separate from static structures and terrain."""
+
+    vegetation_id: VegetationId
+    display_name: str
+    base_pose: KinematicState
+    geometry: GeometrySpec
+    appearance: SurfaceAppearance
+    motion_model: VegetationMotionModel
+    occludes_sight_lines: bool
+
+
 @dataclass(frozen=True)
 class FlyingObjectSpec:
     truth_object_id: TruthObjectId
+    display_name: str
+    model_name: str
     trajectory: TrajectorySpec
+    behavior: FlightBehaviorSpec | None
     geometry: GeometrySpec
     appearance: SurfaceAppearance
     center_reference_point_body_m: Vec3M
@@ -181,6 +241,26 @@ class ReferenceLandmarkSpec:
     world_object_id: WorldObjectId
     position_enu_m: Vec3M
     appearance: SurfaceAppearance
+
+
+@dataclass(frozen=True)
+class EdgeDeviceMetadata:
+    station_id: StationId
+    display_name: str
+    hardware_model: str
+    main_camera_id: CameraId
+    auxiliary_camera_id: CameraId
+
+
+@dataclass(frozen=True)
+class CameraMetadata:
+    camera_id: CameraId
+    display_name: str
+    profile_id: str
+    sensor_format: str | None
+    lens_focal_length_mm: float | None
+    nominal_diagonal_fov_deg: float
+    nominal_frame_rate_hz: float
 
 
 @dataclass(frozen=True)
@@ -234,6 +314,7 @@ class SceneCameraSpec:
 
     station_id: StationId
     camera_role: CameraRole
+    metadata: CameraMetadata
     actual_intrinsics: SceneCameraIntrinsics
     actual_distortion: SceneCameraDistortion
     optical_pose_trajectory: TrajectorySpec
@@ -248,13 +329,55 @@ class IlluminationSpec:
 
 
 @dataclass(frozen=True)
+class SensorArtifactSpec:
+    """Explicit image-quality controls; values may be disabled in the baseline."""
+
+    output_pixel_format: str
+    sensor_noise_std_intensity: float
+    intensity_min: float
+    intensity_max: float
+    auto_exposure_enabled: bool
+    dynamic_range_stops: float | None
+    saturation_level: float | None
+    glare_enabled: bool
+    bloom_strength: float | None
+
+
+@dataclass(frozen=True)
+class FogPerturbation:
+    visibility_range_m: float
+    extinction_per_m: float
+
+
+@dataclass(frozen=True)
+class RainPerturbation:
+    rate_mm_per_hour: float
+    visible_streak_probability: float
+
+
+@dataclass(frozen=True)
+class CameraJitterPerturbation:
+    """Deterministic high-frequency jitter, separate from pose drift."""
+
+    station_id: StationId
+    camera_role: CameraRole
+    angular_amplitude_rad: Vec3
+    pixel_amplitude_px: Vec2Px
+    frequency_hz: float
+    random_stream: str
+
+
+@dataclass(frozen=True)
 class SceneDefinition:
     world: ENUWorldSpec
+    terrain: TerrainSpec
+    edge_devices: tuple[EdgeDeviceMetadata, ...]
     cameras: tuple[SceneCameraSpec, ...]
     world_objects: tuple[WorldObjectSpec, ...]
     flying_objects: tuple[FlyingObjectSpec, ...]
     reference_landmarks: tuple[ReferenceLandmarkSpec, ...]
     illumination: IlluminationSpec
+    vegetation: tuple[VegetationSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -302,8 +425,11 @@ class ExperimentPerturbations:
     """Explicit future experiment settings, owned solely by generation/evaluation."""
 
     camera_pose: tuple[CameraPosePerturbation, ...]
+    camera_jitter: tuple[CameraJitterPerturbation, ...]
     wind: WindPerturbation | None
     clouds: tuple[CloudPerturbation, ...]
+    fog: FogPerturbation | None
+    rain: RainPerturbation | None
     vegetation: tuple[VegetationPerturbation, ...]
     communication: tuple[CommunicationPerturbation, ...]
 
@@ -311,10 +437,8 @@ class ExperimentPerturbations:
 @dataclass(frozen=True)
 class ImagingSpec:
     color_space: str
-    sensor_noise_std_intensity: float
-    intensity_min: float
-    intensity_max: float
     exposure_samples: int
+    sensor_artifacts: SensorArtifactSpec
 
 
 @dataclass(frozen=True)
@@ -349,7 +473,9 @@ class VirtualObservationSpec:
 
 @dataclass(frozen=True)
 class ScenarioSpec:
+    schema_version: str
     scenario_id: str
+    config_digest: ConfigDigest
     random_seed: int
     world_frame_id: WorldFrameId
     voxel_search: VoxelSearchSpec
@@ -365,6 +491,7 @@ class ScenarioSpec:
 class CameraStateTruth:
     station_id: StationId
     camera_role: CameraRole
+    metadata: CameraMetadata
     sample_time: SimulationTime
     optical_state: KinematicState
     actual_intrinsics: SceneCameraIntrinsics
@@ -374,6 +501,8 @@ class CameraStateTruth:
 @dataclass(frozen=True)
 class FlyingObjectTruth:
     truth_object_id: TruthObjectId
+    display_name: str
+    model_name: str
     sample_time: SimulationTime
     state: KinematicState
     center_reference_point_enu_m: Vec3M
@@ -415,7 +544,9 @@ class VisibilityQuery:
     camera: CameraStateTruth
     target: FlyingObjectTruth
     projection: ProjectionTruth
+    terrain: TerrainSpec
     world_objects: tuple[WorldObjectSpec, ...]
+    vegetation: tuple[VegetationSpec, ...]
 
 
 @dataclass(frozen=True)
@@ -424,7 +555,9 @@ class ReferenceVisibilityQuery:
     camera: CameraStateTruth
     landmark: ReferenceLandmarkSpec
     projection: ProjectionTruth
+    terrain: TerrainSpec
     world_objects: tuple[WorldObjectSpec, ...]
+    vegetation: tuple[VegetationSpec, ...]
 
 
 @dataclass(frozen=True)
@@ -458,7 +591,9 @@ class LogicalSceneSnapshot:
     world_frame_id: WorldFrameId
     cameras: tuple[CameraStateTruth, ...]
     flying_objects: tuple[FlyingObjectTruth, ...]
+    terrain: TerrainSpec
     world_objects: tuple[WorldObjectSpec, ...]
+    vegetation: tuple[VegetationSpec, ...]
     reference_landmarks: tuple[ReferenceLandmarkSpec, ...]
     target_visibility: tuple[TargetVisibilityTruth, ...]
     landmark_visibility: tuple[LandmarkVisibilityTruth, ...]
@@ -555,6 +690,40 @@ class OnlineScenarioStep:
 
 
 @dataclass(frozen=True)
+class ScenarioVideoOutput:
+    """The ordinary video出口; it contains no privileged truth metadata."""
+
+    scenario_id: str
+    sample_time: SimulationTime
+    frames: tuple[CameraFrame, ...]
+
+
+@dataclass(frozen=True)
+class ScenarioPacketOutput:
+    """The ordinary virtual packet出口; truth IDs and correspondences are absent."""
+
+    scenario_id: str
+    sample_time: SimulationTime
+    calibration_states: tuple[CalibrationState, ...]
+    calibration_solutions: tuple[CalibrationSolution, ...]
+    calibration_events: tuple[CalibrationStateEvent, ...]
+    rays: tuple[RayEvent, ...]
+    diagnostics: tuple[DiagnosticEvent, ...]
+
+
+@dataclass(frozen=True)
+class ScenarioTruthOutput:
+    """Privileged truth出口 for evaluation, monitoring and evidence only."""
+
+    scenario_id: str
+    sample_time: SimulationTime
+    logical_scene: LogicalSceneSnapshot
+    camera_frames: tuple[CameraFrameTruth, ...]
+    online_correspondences: tuple[OnlineTruthCorrespondence, ...]
+    experiment_perturbations: ExperimentPerturbations
+
+
+@dataclass(frozen=True)
 class OnlineTruthCorrespondence:
     """Evaluation-only mapping; a false alarm has truth_object_id=None.
 
@@ -614,8 +783,9 @@ class ScenarioTruth:
 
 @dataclass(frozen=True)
 class ScenarioStep:
-    online: OnlineScenarioStep
-    truth: ScenarioTruth
+    video: ScenarioVideoOutput
+    packets: ScenarioPacketOutput
+    truth: ScenarioTruthOutput
 
 
 @dataclass(frozen=True)

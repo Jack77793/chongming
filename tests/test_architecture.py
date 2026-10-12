@@ -11,7 +11,7 @@ import ast
 import inspect
 import unittest
 from collections import Counter
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import get_args, get_type_hints
@@ -20,6 +20,12 @@ from unittest.mock import patch
 from chongming.composition.graph import ArchitectureAssembly, declare_assembly
 from chongming.contracts.fusion import CandidateMethod
 from chongming.contracts.runtime import EventPath
+from chongming.contracts.scene import (
+    ScenarioPacketOutput,
+    ScenarioStep,
+    ScenarioTruthOutput,
+    ScenarioVideoOutput,
+)
 from chongming.modules import base
 from chongming.modules.base import ModuleShell
 from chongming.modules.fusion import DirectGeometryCandidateModule, VoxelCandidateModule
@@ -56,6 +62,19 @@ def _port_classes(module: ModuleType) -> tuple[type[object], ...]:
 
 
 class ArchitectureStructureTests(unittest.TestCase):
+    def test_scenario_step_has_three_explicit_typed_exits(self) -> None:
+        field_names = tuple(field.name for field in fields(ScenarioStep))
+        self.assertEqual(field_names, ("video", "packets", "truth"))
+        self.assertTrue(is_dataclass(ScenarioVideoOutput))
+        self.assertTrue(is_dataclass(ScenarioPacketOutput))
+        self.assertTrue(is_dataclass(ScenarioTruthOutput))
+        video_types = get_type_hints(ScenarioVideoOutput)
+        packet_types = get_type_hints(ScenarioPacketOutput)
+        truth_types = get_type_hints(ScenarioTruthOutput)
+        self.assertNotIn("truth_object_id", video_types)
+        self.assertNotIn("truth_object_id", packet_types)
+        self.assertIn("online_correspondences", truth_types)
+
     def test_every_constructed_shell_is_bound_once_in_resolvable_dag(self) -> None:
         assembly, constructed = _construct()
         constructed_ids = [id(module) for module in constructed]
