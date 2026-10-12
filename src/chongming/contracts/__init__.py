@@ -157,6 +157,7 @@ from .runtime import (
     StationRuntimeSpec,
     SystemStepResult,
     TransportBatch,
+    TransportDrainResult,
     TransportPolicy,
     TransportReceipt,
 )
@@ -442,6 +443,7 @@ __all__ = [
     "TrajectoryKnot",
     "TrajectorySpec",
     "TransportBatch",
+    "TransportDrainResult",
     "TransportPolicy",
     "TransportReceipt",
     "TriangleMeshGeometry",

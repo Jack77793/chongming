@@ -45,7 +45,11 @@ class MotionDetector(Protocol):
 
 class Tracker2D(Protocol):
     def update(self, candidates: Candidate2DBatch) -> Tracking2DResult:
-        """Retain local history, including missed frames; IDs are station-session scoped."""
+        """Retain local history, including missed frames; IDs are station-session scoped.
+
+        Only this frame's measured candidates may become observations. Predictions
+        and coasting remain track states and never become measured rays.
+        """
         ...
 
 
@@ -125,6 +129,12 @@ class RayBuilder(Protocol):
 
 
 class DevicePipeline(Protocol):
+    """Reject station/session/role/camera-config mismatches with explicit diagnostics.
+
+    Frame references must match the bound station, active image session and camera
+    configuration. A mismatched frame cannot update detections or calibration history.
+    """
+
     def process_main(self, frame: CameraFrame, now: ProcessingTime) -> DeviceFrameResult:
         """Process without waiting for current auxiliary output; complete negative frames too."""
         ...

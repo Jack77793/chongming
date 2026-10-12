@@ -113,11 +113,20 @@ class EventWindows(Protocol):
         ...
 
     def report_progress(self, progress: StationEventTimeProgress) -> WindowUpdate:
-        """Advance a processed empty batch without inventing an observation."""
+        """Advance a processed empty batch without inventing an observation.
+
+        When all registered streams end, seal through the last completed exposure
+        or buffered ray window using STREAMS_ENDED, even under HOLD. Zero-frame,
+        zero-ray runs do not fabricate windows; retain the finite final horizon.
+        """
         ...
 
     def advance(self, now: ProcessingTime) -> WindowUpdate:
-        """Check station health/deadlines and seal; late rays never reopen windows."""
+        """Check station health/deadlines and seal; late rays never reopen windows.
+
+        Emit sealed empty windows through the same eligible horizon, allowing the
+        tracker to consume time progress even when no accepted rays arrive.
+        """
         ...
 
 

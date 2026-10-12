@@ -18,6 +18,7 @@ from chongming.contracts.runtime import (
     StartupReport,
     SystemStepResult,
     TransportBatch,
+    TransportDrainResult,
     TransportPolicy,
     TransportReceipt,
 )
@@ -52,6 +53,11 @@ class EventTransportModule(ModuleShell):
     def collect(self, path: EventPath, now: ProcessingTime) -> TransportBatch:
         raise NotImplementedError(_TODO)
 
+    def drain(
+        self, path: EventPath, now: ProcessingTime, deadline: ProcessingTime
+    ) -> TransportDrainResult:
+        raise NotImplementedError(_TODO)
+
 
 @dataclass(frozen=True, kw_only=True)
 class EvidenceWriterModule(ModuleShell):
@@ -63,6 +69,12 @@ class EvidenceWriterModule(ModuleShell):
     def record_online(self, data: OnlineEvaluationData) -> None:
         raise NotImplementedError(_TODO)
 
+    def record_transport(self, batch: TransportBatch) -> None:
+        raise NotImplementedError(_TODO)
+
+    def record_drain(self, result: TransportDrainResult) -> None:
+        raise NotImplementedError(_TODO)
+
     def record_truth(self, truth: ScenarioTruth) -> None:
         raise NotImplementedError(_TODO)
 
@@ -71,7 +83,9 @@ class EvidenceWriterModule(ModuleShell):
 
 
 @dataclass(frozen=True, kw_only=True)
-class SystemRunnerModule(ModuleShell):
+class SystemRunnerModule:
+    """Own the startup barrier; this controller is not one of its managed modules."""
+
     run_spec: RunSpec
     startup: StartupPlan
     bindings: tuple[ModuleBinding, ...]

@@ -56,6 +56,7 @@ class OverflowAction(StrEnum):
 class TransportPolicy:
     maximum_pending_events: int
     overflow_action: OverflowAction
+    drain_timeout_ns: int
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -147,6 +148,8 @@ class TransportReceipt:
 
 @dataclass(frozen=True, kw_only=True)
 class ProgressSubmission:
+    """Transport sets progress.received_at to its actual downstream delivery time."""
+
     path: EventPath
     progress: StationEventTimeProgress
 
@@ -159,6 +162,27 @@ class TransportBatch:
     receipts: tuple[TransportReceipt, ...]
     # Progress never overtakes the event deliveries it describes. Apply configured
     # delay/drop/duplicate policies to progress too, rather than bypassing transport.
+
+
+@dataclass(frozen=True, kw_only=True)
+class TransportDrainResult:
+    """Account for delivery or discard; an empty collect batch is not completion.
+
+    Terminal stream progress is retained until all preceding submissions are
+    delivered or explicitly discarded. It is returned after those outcomes, even
+    when ordinary progress is perturbed. discarded_events have accepted=False;
+    each discarded progress record is preserved as evidence. complete requires
+    both pending counts to be zero. Failure must expose remaining counts/reasons.
+    """
+
+    batch: TransportBatch
+    completed_at: ProcessingTime
+    discarded_events: tuple[TransportReceipt, ...]
+    discarded_progress: tuple[StationEventTimeProgress, ...]
+    pending_event_count: int
+    pending_progress_count: int
+    complete: bool
+    reason_codes: tuple[str, ...]
 
 
 @dataclass(frozen=True, kw_only=True)

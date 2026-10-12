@@ -74,12 +74,20 @@ class Track2DState:
 
 @dataclass(frozen=True, kw_only=True)
 class Tracking2DResult:
+    """Observations use actual candidates from this frame only.
+
+    Coasting/predicted positions belong to tracks, never to observations. An empty
+    candidate batch cannot manufacture a detection or a downstream RayEvent.
+    """
+
     observations: tuple[Observation2D, ...]
     tracks: tuple[Track2DState, ...]
 
 
 @dataclass(frozen=True, kw_only=True)
 class MainDetectionResult:
+    """Keep measured detections and tracker state distinct, including negative frames."""
+
     detections: DetectionBatch
     tracks: tuple[Track2DState, ...]
 

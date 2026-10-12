@@ -216,6 +216,11 @@ class EventWindowPolicy:
     Exposure midpoint determines membership. Processing time only schedules health
     checks/deadlines through the explicit manifest clock mapping. A processed empty
     detection batch can advance a station through StationEventTimeProgress.
+
+    Once every registered stream has ended, STREAMS_ENDED seals remaining windows
+    through the window containing the latest completed exposure or buffered ray,
+    regardless of no_active_station_policy. With neither, create no window. The
+    transport drain deadline cannot extend this finite experiment-time horizon.
     """
 
     capture_clock_domain_id: str
@@ -324,18 +329,26 @@ class AdmissionOutcome:
 
 @dataclass(frozen=True, kw_only=True)
 class StationEventTimeProgress:
-    """Completed device processing, including a genuinely empty detection batch."""
+    """Completed device processing, including a genuinely empty detection batch.
+
+    A capture time is required for ordinary progress. Only stream_ended may carry
+    None, for a stream that stopped without a completed frame; never invent an
+    exposure to report startup failure or zero samples. Stream end retires this
+    session from future watermark participation after its transport is accounted for.
+    """
 
     station_id: StationId
     station_session_id: SessionId
     station_config_digest: ConfigDigest
-    completed_capture_time: CaptureTime
+    completed_capture_time: CaptureTime | None
     received_at: ProcessingTime
     stream_ended: bool
 
 
 @dataclass(frozen=True, kw_only=True)
 class StationProgress:
+    """Retain maximum exposure when ENDED; None remains valid for a zero-frame stream."""
+
     station_id: StationId
     station_session_id: SessionId | None
     maximum_seen_exposure_midpoint_ns: int | None
@@ -372,7 +385,11 @@ class WindowReceipt:
 
 @dataclass(frozen=True, kw_only=True)
 class SealedObservationWindow:
-    """Each ray belongs to at most one sealed window; no revision exists in v1."""
+    """Each ray belongs to at most one sealed window; no revision exists in v1.
+
+    Empty windows are sealed too so consumed event-time progress can drive track
+    coasting/deletion without any measurement. Their support_exposure_span_ns is 0.
+    """
 
     key: WindowKey
     reference_time_ns: int

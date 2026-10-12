@@ -17,7 +17,10 @@ def declare_run(
     snapshots/progress to the center. Send rejected/late events to evidence/evaluation.
     Negative frames still report progress; no camera sample still calls device/center
     ticks. Advance simulation only here through ScenarioSource, never on monitor
-    refresh. On end/failure always drain, seal, finalize and stop all initialized nodes.
+    refresh. On end/failure close both paths, submit terminal progress (no invented
+    exposure for zero-frame stations), then drain with a finite policy deadline.
+    Account for all deliveries/discards, seal final windows, finalize and stop all
+    initialized nodes, including after drain failure.
     """
 
     raise NotImplementedError("TODO(stage-3): implement scenario-driven complete-system execution")
