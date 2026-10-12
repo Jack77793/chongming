@@ -269,6 +269,9 @@ class ScenePrimitiveTests(unittest.TestCase):
         )
         self.assertTrue(all(step.video.frames for step in steps))
 
+        repeat = list(assembly.scene.scenario.generate(spec))
+        self.assertEqual(steps, repeat)
+
 
 if __name__ == "__main__":
     unittest.main()

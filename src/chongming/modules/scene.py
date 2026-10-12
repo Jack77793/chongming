@@ -14,6 +14,7 @@ from hashlib import blake2b
 
 from chongming.contracts.model import (
     CameraFrame,
+    CameraRole,
     CaptureTime,
     FrameId,
     ImagePlane,
@@ -531,6 +532,12 @@ class SceneLogicModule(ModuleShell):
         device_stations = {device.station_id for device in scene.edge_devices}
         if camera_stations != device_stations:
             raise ValueError("camera and edge-device station sets must match")
+        for station_id in camera_stations:
+            roles = {
+                camera.camera_role for camera in scene.cameras if camera.station_id == station_id
+            }
+            if roles != {CameraRole.MAIN, CameraRole.AUXILIARY}:
+                raise ValueError(f"station {station_id} must define main and auxiliary cameras")
         self._scene = scene
         self._perturbations = perturbations
         self._random_seed = random_seed
