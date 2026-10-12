@@ -209,11 +209,20 @@ class ArchitectureStructureTests(unittest.TestCase):
 
     def test_stage_two_shell_business_methods_only_raise(self) -> None:
         module_directory = Path(inspect.getfile(base)).parent
+        implemented_scene = {
+            "ExperimentClockModule",
+            "TrajectoryModule",
+            "CameraProjectionModule",
+            "VisibilityModule",
+            "SceneLogicModule",
+        }
         checked_methods = 0
         for source in module_directory.glob("*.py"):
             tree = ast.parse(source.read_text(), filename=str(source))
             for declaration in tree.body:
                 if not isinstance(declaration, ast.ClassDef):
+                    continue
+                if declaration.name in implemented_scene:
                     continue
                 for method in declaration.body:
                     if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
