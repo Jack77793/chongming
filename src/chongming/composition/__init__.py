@@ -1,5 +1,17 @@
-"""Dependency assembly declarations for the architecture skeleton."""
+"""All-module dependency and startup declarations."""
 
-from .graph import ArchitectureAssembly, declare_assembly
+from .graph import (
+    ArchitectureAssembly,
+    CenterAssembly,
+    SceneAssembly,
+    StationAssembly,
+    declare_assembly,
+)
 
-__all__ = ["ArchitectureAssembly", "declare_assembly"]
+__all__ = [
+    "ArchitectureAssembly",
+    "CenterAssembly",
+    "SceneAssembly",
+    "StationAssembly",
+    "declare_assembly",
+]
