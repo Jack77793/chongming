@@ -221,7 +221,7 @@ class ScenePrimitiveTests(unittest.TestCase):
         self.assertEqual(snapshot.flying_objects, ())
         self.assertEqual(snapshot.target_visibility, ())
 
-    def test_imager_emits_deterministic_gray8_and_separate_truth(self) -> None:
+    def test_imager_emits_deterministic_rgb8_and_separate_truth(self) -> None:
         spec, _ = architecture_specs()
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
@@ -242,10 +242,10 @@ class ScenePrimitiveTests(unittest.TestCase):
             exposure_samples=(snapshot,),
         )
         imaging = ImagingSpec(
-            color_space="linear-gray",
+            color_space="linear-rgb",
             exposure_samples=1,
             sensor_artifacts=SensorArtifactSpec(
-                output_pixel_format=PixelFormat.GRAY8,
+                output_pixel_format=PixelFormat.RGB8,
                 sensor_noise_std_intensity=0.0,
                 intensity_min=0.0,
                 intensity_max=1.0,
@@ -259,7 +259,11 @@ class ScenePrimitiveTests(unittest.TestCase):
         request = ImageGenerationRequest("scenario", 7, imaging, (frame,))
         ordinary, truth = CameraImagingModule().render(request)
         ordinary_again, _ = CameraImagingModule().render(request)
-        self.assertEqual(ordinary.frames[0].image.pixel_format, PixelFormat.GRAY8)
+        self.assertEqual(ordinary.frames[0].image.pixel_format, PixelFormat.RGB8)
+        self.assertEqual(
+            len(ordinary.frames[0].image.pixels),
+            ordinary.frames[0].image.width_px * ordinary.frames[0].image.height_px * 3,
+        )
         self.assertEqual(ordinary.frames[0].image.pixels, ordinary_again.frames[0].image.pixels)
         self.assertEqual(len(truth.frame_truth), 1)
         self.assertNotIn(

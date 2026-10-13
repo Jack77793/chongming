@@ -12,30 +12,30 @@
 <header><div><h1>重明 <span style="color:var(--dim);font-weight:400">/ 虚拟场景</span></h1><div class="subtitle">世界物体 · 摄像机 · 飞行物</div></div><div class="controls"><span id="state" class="status" role="status">正在启动…</span><button id="play" disabled>暂停</button><button id="step" disabled>单步</button><button id="restart" disabled>回到起点</button></div></header>
 <main>
 <div id="error" role="alert"></div>
-<div class="metrics"><div class="metric"><span>实验时间</span><strong id="time">—</strong></div><div class="metric"><span>播放轮次 / 步数</span><strong id="progress">—</strong></div><div class="metric"><span>场景对象</span><strong id="counts">—</strong></div><div class="metric"><span>生成耗时</span><strong id="render">—</strong></div><div class="metric"><span>相机配置</span><strong id="profile" style="font-size:14px">—</strong></div></div>
+<div class="metrics"><div class="metric"><span>实验时间</span><strong id="time">—</strong></div><div class="metric"><span>播放轮次 / 步数</span><strong id="progress">—</strong></div><div class="metric"><span>场景对象</span><strong id="counts">—</strong></div><div class="metric"><span>生成 / PNG 编码</span><strong id="render" style="font-size:14px">—</strong></div><div class="metric"><span>GPU / 其余成像</span><strong id="gpu" style="font-size:14px">—</strong></div><div class="metric"><span>请求 / JSON 解析</span><strong id="request" style="font-size:14px" title="请求含服务端按需编码、等待及传输；JSON 不含图像解码">—</strong></div><div class="metric"><span>浏览器解码 / 绘制调用</span><strong id="browser" style="font-size:14px" title="绘制调用不含完整 GPU 合成及屏幕呈现">—</strong></div><div class="metric"><span>相机配置</span><strong id="profile" style="font-size:14px">—</strong></div></div>
 <div class="layout">
 <section class="panel"><div class="panel-head"><h2>相机视频流</h2><div class="controls"><select id="station" aria-label="选择摄像站"></select><label><input id="overlay" type="checkbox">真值叠加</label></div></div><div id="videos" class="videos"></div></section>
 <div><section class="panel"><div class="panel-head"><h2>场景总览</h2><button id="viewReset">重置视角</button></div><canvas id="world" tabindex="0" aria-label="三维场景总览，可拖动旋转、滚轮缩放，方向键旋转">三维场景总览需要支持 Canvas 的浏览器。</canvas><div class="world-hint">拖动旋转 · 滚轮缩放 · 方向键调整视角</div><div class="legend"><span><i class="dot" style="background:#8294a9"></i>世界物体</span><span><i class="dot" style="background:#67c9ed"></i>摄像机 / 视锥</span><span><i class="dot" style="background:#edb173"></i>飞行物</span></div></section>
 <section class="panel" style="margin-top:16px"><div class="panel-head"><h2>飞行物状态</h2><span class="hint">ENU / 米</span></div><div class="table-wrap"><table><thead><tr><th>对象</th><th>位置 E / N / U</th><th>速度 m/s</th><th>主相机捕获</th></tr></thead><tbody id="objects"></tbody></table></div></section></div>
 </div>
-<div class="notice">视频是渲染器输出的原始灰度帧；真值标签只在预览中叠加。绿色线段表示可捕获的目标中心，红色线段表示被遮挡，绿色箭头表示速度。<br>默认使用实验预览配置。24 秒场景自动循环；暂停后可单步检查。页面刷新与多个预览窗口不会改变实验采样。</div>
+<div class="notice">视频是 Metal GPU 渲染器输出的 RGB8 帧；真值标签只在预览中叠加。绿色线段表示可捕获的目标中心，红色线段表示被遮挡，绿色箭头表示速度。<br>默认使用实验预览配置。24 秒场景自动循环；暂停后可单步检查。页面刷新与多个预览窗口不会改变实验采样。</div>
 </main><footer>本地虚拟场景预览 · 平面地形 / 基础光照 / 确定性轨迹</footer>
 <script>
 'use strict';
-const $=id=>document.getElementById(id);let latest=null,lastSequence=-1,lastState='',videoImages=new Map(),yaw=-.55,tilt=.65,zoom=5,drag=null,closed=false;
+const $=id=>document.getElementById(id);let latest=null,lastSequence=-1,lastState='',videoImages=new Map(),yaw=-.55,tilt=.65,zoom=5,drag=null,closed=false,decodeMs=0;
 const add=(a,b)=>a.map((v,i)=>v+b[i]),mul=(a,s)=>a.map(v=>v*s),rotate=(r,p)=>r.map(row=>row.reduce((s,v,i)=>s+v*p[i],0));
 const text=(id,value)=>{$(id).textContent=value};
 function error(message){$('error').style.display=message?'block':'none';$('error').textContent=message||''}
 async function control(action){try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});if(!r.ok)throw Error('控制请求失败');}catch(e){error(e.message)}}
 $('play').onclick=()=>control(lastState==='paused'?'play':'pause');$('step').onclick=()=>control('step');$('restart').onclick=()=>control('restart');
-$('station').onchange=()=>{drawVideo();drawWorld();drawTable()};$('overlay').onchange=drawVideo;
+$('station').onchange=()=>{lastSequence=-1;drawWorld();drawTable()};$('overlay').onchange=drawVideo;
 $('viewReset').onclick=()=>{yaw=-.55;tilt=.65;zoom=5;drawWorld()};
 function selectedStation(){return $('station').value}
 function drawVideo(){
- if(!latest)return;const frames=latest.video.filter(f=>f.station_id===selectedStation());const host=$('videos');host.replaceChildren();
+ if(!latest)return;const started=performance.now(),frames=latest.video.filter(f=>f.station_id===selectedStation());const host=$('videos');host.replaceChildren();
  for(const f of frames.sort((a,b)=>a.role==='main'?-1:b.role==='main'?1:0)){
   const card=document.createElement('article');card.className='video-card '+f.role;
-  const head=document.createElement('div');head.className='video-head';head.textContent=`${f.role==='main'?'主相机':'辅助相机'} · ${f.station_id}     ${f.width} × ${f.height} · gray8`;
+  const head=document.createElement('div');head.className='video-head';head.textContent=`${f.role==='main'?'主相机':'辅助相机'} · ${f.station_id}     ${f.width} × ${f.height} · rgb8`;
   const c=document.createElement('canvas');c.width=f.width;c.height=f.height;c.setAttribute('aria-label',`${f.station_id} ${f.role==='main'?'主':'辅助'}相机视频`);const ctx=c.getContext('2d');
   const image=videoImages.get(f.station_id+'/'+f.role);if(image)ctx.drawImage(image,0,0);
   if($('overlay').checked){const truth=latest.monitor.frame_truth.find(t=>t.station_id===f.station_id&&t.camera_role===f.role);ctx.font=`${Math.max(11,f.width/55)}px system-ui`;ctx.lineWidth=Math.max(1,f.width/600);
@@ -43,6 +43,7 @@ function drawVideo(){
   const meta=document.createElement('div');meta.className='frame-meta';meta.textContent=`曝光 ${(f.capture.exposure_start_ns/1e9).toFixed(6)} — ${(f.capture.exposure_end_ns/1e9).toFixed(6)} s · ${f.frame_id}`;
   card.append(head,c,meta);host.append(card);
  }
+ text('browser',`${decodeMs.toFixed(1)} / ${(performance.now()-started).toFixed(1)} ms`);
 }
 function drawTable(){if(!latest)return;$('objects').replaceChildren();for(const item of latest.monitor.flying_objects){const tr=document.createElement('tr');const visibility=latest.monitor.visibility.find(v=>v.station_id===selectedStation()&&v.camera_role==='main'&&v.truth_object_id===item.truth_object_id);const speed=Math.hypot(...item.state.velocity_enu_mps);const values=[item.display_name,item.state.position_enu_m.map(v=>v.toFixed(1)).join(' / '),speed.toFixed(2),visibility?.capture_eligible?'可见':visibility?.occlusions.length?'遮挡':'视场外'];values.forEach((value,index)=>{const td=document.createElement('td');td.textContent=value;if(index===3)td.className=visibility?.capture_eligible?'visible':'hidden';tr.append(td)});$('objects').append(tr)}}
 function drawWorld(){
@@ -66,12 +67,12 @@ function drawWorld(){
 }
 $('world').addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];$('world').setPointerCapture(e.pointerId)});$('world').addEventListener('pointerup',()=>drag=null);$('world').addEventListener('pointercancel',()=>drag=null);$('world').addEventListener('pointermove',e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.007;tilt=Math.max(.15,Math.min(1.4,tilt+(e.clientY-drag[1])*.005));drag=[e.clientX,e.clientY];drawWorld()});$('world').addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(1.5,Math.min(12,zoom*Math.exp(-e.deltaY*.001)));drawWorld()},{passive:false});$('world').addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();yaw+=(e.key==='ArrowLeft'?-.1:e.key==='ArrowRight'?.1:0);tilt=Math.max(.15,Math.min(1.4,tilt+(e.key==='ArrowUp'?.05:e.key==='ArrowDown'?-.05:0)));drawWorld()});window.addEventListener('resize',drawWorld);
 async function poll(){
- try{const r=await fetch('/api/preview');if(!r.ok)throw Error('预览服务不可用');const data=await r.json();lastState=data.state;text('state',data.state==='failed'?'生成失败':data.state==='paused'?'已暂停':'播放中');text('play',data.state==='paused'?'播放':'暂停');text('profile',data.profile==='baseline-v1'?'基线 · 30 fps':'实验预览');error(data.error);for(const id of ['play','step','restart'])$(id).disabled=data.state==='failed';
-  if(data.snapshot&&data.snapshot.sequence!==lastSequence){const snap=data.snapshot;const decoded=await Promise.all(snap.video.map(async f=>{const im=new Image();im.src='data:image/png;base64,'+f.png;await im.decode();return [f.station_id+'/'+f.role,im]}));latest=snap;videoImages=new Map(decoded);lastSequence=snap.sequence;
+ try{const station=selectedStation(),requested=performance.now();const r=await fetch('/api/preview?station='+encodeURIComponent(station)+'&after='+lastSequence);if(!r.ok)throw Error('预览服务不可用');const body=await r.text(),received=performance.now();const data=JSON.parse(body),parsed=performance.now();if(station!==selectedStation())return;text('request',`${(received-requested).toFixed(1)} / ${(parsed-received).toFixed(1)} ms`);lastState=data.state;text('state',data.state==='failed'?'生成失败':data.state==='paused'?'已暂停':'播放中');text('play',data.state==='paused'?'播放':'暂停');text('profile',data.profile==='baseline-v1'?'基线 · 30 fps':'实验预览');error(data.error);for(const id of ['play','step','restart'])$(id).disabled=data.state==='failed';
+  if(data.snapshot&&data.snapshot.sequence!==lastSequence){const snap=data.snapshot;const decodeStarted=performance.now();const decoded=await Promise.all(snap.video.map(async f=>{const im=new Image();im.src='data:image/png;base64,'+f.png;await im.decode();return [f.station_id+'/'+f.role,im]}));if(station!==selectedStation())return;decodeMs=performance.now()-decodeStarted;latest=snap;videoImages=new Map(decoded);lastSequence=snap.sequence;
    const stations=[...new Set(snap.monitor.cameras.map(c=>c.station_id))];if($('station').options.length!==stations.length){$('station').replaceChildren(...stations.map(id=>{const option=document.createElement('option');option.value=option.textContent=id;return option}))}
-   text('time',(snap.time_ns/1e9).toFixed(3)+' s');text('progress',`${snap.loop} / ${snap.step_no}`);text('counts',`${snap.monitor.world_objects.length} 地物 · ${snap.monitor.cameras.length} 相机 · ${snap.monitor.flying_objects.length} 飞行物`);text('render',snap.render_ms+' ms');drawVideo();drawWorld();drawTable();
+   text('time',(snap.time_ns/1e9).toFixed(3)+' s');text('progress',`${snap.loop} / ${snap.step_no}`);text('counts',`${snap.monitor.world_objects.length} 地物 · ${snap.monitor.cameras.length} 相机 · ${snap.monitor.flying_objects.length} 飞行物`);text('render',`${snap.render_ms} / ${snap.png_encode_ms} ms`);$('render').title=`场景逻辑与事件 ${snap.scene_logic_ms} ms；生成含元数据，不含 PNG`;text('gpu',`${snap.gpu_render_ms??'—'} / ${snap.imager_overhead_ms??'—'} ms`);drawVideo();drawWorld();drawTable();
   }
  }catch(e){text('state','连接中断');error(e.message+'，正在重试…')}
- if(!closed)setTimeout(poll,60);
+ finally{if(!closed)setTimeout(poll,60)}
 }window.addEventListener('pagehide',()=>closed=true);poll();
 </script></body></html>

@@ -362,10 +362,10 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
             1_000_000,
         ),
         s.ImagingSpec(
-            "linear-gray",
+            "linear-rgb",
             1,
             s.SensorArtifactSpec(
-                m.PixelFormat.GRAY8, 0.0, 0.0, 1.0, False, None, None, False, None
+                m.PixelFormat.RGB8, 0.0, 0.0, 1.0, False, None, None, False, None
             ),
         ),
         s.VirtualObservationSpec(

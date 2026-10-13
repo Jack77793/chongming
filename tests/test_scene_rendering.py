@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import threading
 import time
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -24,9 +26,14 @@ from chongming.modules.scene import (
     TrajectoryModule,
     VisibilityModule,
 )
-from chongming.preview import PreviewRuntime, preview_payload, preview_server
-from chongming.rendering.geometry import surface_hits
-from chongming.rendering.software import optical_rays, quantize, render_surfaces
+from chongming.preview import PreviewRuntime, encode_video, preview_payload, preview_server
+from chongming.rendering.geometry import optical_rays, surface_hits
+from chongming.rendering.metal import (
+    MetalRenderer,
+    projected_footprints,
+    quantize_rgb8,
+    render_rgb8,
+)
 from chongming.scenarios.demo import demo_source, demo_spec, optical_rotation, state
 from tests.fixtures import architecture_specs
 
@@ -60,7 +67,34 @@ def snapshot(spec: s.ScenarioSpec, time_ns: int = 500_000) -> s.LogicalSceneSnap
     return logic.sample(s.SimulationTime("structure-clock", time_ns, 0))
 
 
+def render_gpu(
+    scene: s.LogicalSceneSnapshot, camera: s.CameraStateTruth
+) -> tuple[np.ndarray, dict[str, tuple[float, float]]]:
+    raw, _ = render_rgb8(scene, camera)
+    i = camera.actual_intrinsics
+    image = np.frombuffer(raw, dtype=np.uint8).reshape(i.image_height_px, i.image_width_px, 3)
+    return image, projected_footprints(scene, camera)
+
+
 class SurfaceRenderingTests(unittest.TestCase):
+    def test_renderer_survives_parent_terminal_signals_and_closes_cleanly(self) -> None:
+        renderer = MetalRenderer()
+        self.addCleanup(renderer.close)
+        process = renderer._process
+        assert process is not None
+        self.assertNotEqual(os.getpgid(process.pid), os.getpgrp())
+        scene = snapshot(test_scene(s.SphereGeometry(1.0)))
+        raw, _ = renderer.render(scene, scene.cameras[0])
+        self.assertEqual(len(raw), 64 * 48 * 3)
+        renderer.close()
+        renderer.close()
+        self.assertEqual(process.poll(), 0)
+        self.assertTrue(
+            all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        )
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            renderer.render(scene, scene.cameras[0])
+
     def test_sphere_box_and_mesh_have_nontrivial_projected_footprints(self) -> None:
         geometries = (
             s.SphereGeometry(1.0),
@@ -72,8 +106,8 @@ class SurfaceRenderingTests(unittest.TestCase):
         for geometry in geometries:
             with self.subTest(geometry=type(geometry).__name__):
                 scene = snapshot(test_scene(geometry))
-                pixels, footprints = render_surfaces(scene, scene.cameras[0])
-                self.assertGreater(np.count_nonzero(pixels < 0.5), 100)
+                pixels, footprints = render_gpu(scene, scene.cameras[0])
+                self.assertGreater(np.count_nonzero(pixels.mean(axis=2) < 128), 100)
                 self.assertGreater(footprints["target"][0], 10)
                 self.assertGreater(footprints["target"][1], 10)
 
@@ -81,13 +115,13 @@ class SurfaceRenderingTests(unittest.TestCase):
         areas = []
         for distance in (10.0, 20.0):
             scene = snapshot(test_scene(s.SphereGeometry(1.0), (0.0, 0.0, distance)))
-            pixels, _ = render_surfaces(scene, scene.cameras[0])
-            areas.append(np.count_nonzero(pixels < 0.5))
+            pixels, _ = render_gpu(scene, scene.cameras[0])
+            areas.append(np.count_nonzero(pixels.mean(axis=2) < 128))
         self.assertGreater(areas[0], 3.5 * areas[1])
         scene = snapshot(test_scene(s.SphereGeometry(1.0), (3.7, 0.0, 10.0)))
         self.assertFalse(scene.target_visibility[0].capture_eligible)
-        pixels, _ = render_surfaces(scene, scene.cameras[0])
-        self.assertGreater(np.count_nonzero(pixels < 0.5), 0)
+        pixels, _ = render_gpu(scene, scene.cameras[0])
+        self.assertGreater(np.count_nonzero(pixels.mean(axis=2) < 128), 0)
 
     def test_depth_hides_target_and_preserves_partial_silhouette(self) -> None:
         spec = test_scene(s.SphereGeometry(1.0))
@@ -107,8 +141,8 @@ class SurfaceRenderingTests(unittest.TestCase):
             )
         )
         self.assertFalse(full.target_visibility[0].capture_eligible)
-        image, _ = render_surfaces(full, full.cameras[0])
-        self.assertEqual(np.count_nonzero(image < 0.5), 0)
+        image, _ = render_gpu(full, full.cameras[0])
+        self.assertEqual(np.count_nonzero(image.mean(axis=2) < 128), 0)
         wall = replace(
             obstacle, pose=state((-0.5, 0.0, 5.0)), geometry=s.BoxGeometry((0.5, 1.0, 0.1))
         )
@@ -116,8 +150,8 @@ class SurfaceRenderingTests(unittest.TestCase):
             replace(spec, scene_definition=replace(spec.scene_definition, world_objects=(wall,)))
         )
         self.assertFalse(partial.target_visibility[0].capture_eligible)
-        image, _ = render_surfaces(partial, partial.cameras[0])
-        count = np.count_nonzero(image < 0.5)
+        image, _ = render_gpu(partial, partial.cameras[0])
+        count = np.count_nonzero(image.mean(axis=2) < 128)
         self.assertGreater(count, 50)
         self.assertLess(count, 250)
         beyond = replace(obstacle, pose=state((0.0, 0.0, 15.0)))
@@ -125,17 +159,17 @@ class SurfaceRenderingTests(unittest.TestCase):
             replace(spec, scene_definition=replace(spec.scene_definition, world_objects=(beyond,)))
         )
         self.assertTrue(visible.target_visibility[0].capture_eligible)
-        image, _ = render_surfaces(visible, visible.cameras[0])
-        self.assertGreater(np.count_nonzero(image < 0.5), 250)
+        image, _ = render_gpu(visible, visible.cameras[0])
+        self.assertGreater(np.count_nonzero(image.mean(axis=2) < 128), 250)
 
     def test_near_plane_mesh_and_rotated_box_render_without_projection_singularities(self) -> None:
         geometry = s.TriangleMeshGeometry(
             ((-1.0, -1.0, -0.2), (1.0, -1.0, 1.0), (0.0, 1.0, 1.0)), ((0, 1, 2),)
         )
         scene = snapshot(test_scene(geometry, (0.0, 0.0, 0.0)))
-        image, _ = render_surfaces(scene, scene.cameras[0])
+        image, _ = render_gpu(scene, scene.cameras[0])
         self.assertTrue(np.all(np.isfinite(image)))
-        self.assertGreater(np.count_nonzero(image < 0.5), 0)
+        self.assertGreater(np.count_nonzero(image.mean(axis=2) < 128), 0)
         rays = np.asarray(((0.0, 0.0, 1.0),))
         depth, _ = surface_hits(
             (0.0, 0.0, 0.0),
@@ -227,12 +261,15 @@ class SurfaceRenderingTests(unittest.TestCase):
         imaging = replace(spec.imaging, exposure_samples=2)
         request = s.ImageGenerationRequest("test", 42, imaging, (frame,))
         batch, truth = CameraImagingModule().render(request)
-        expected = (
-            render_surfaces(first, first.cameras[0])[0] + render_surfaces(last, last.cameras[0])[0]
-        ) / 2
+        first_pixels, _ = render_gpu(first, first.cameras[0])
+        last_pixels, _ = render_gpu(last, last.cameras[0])
+        expected = (first_pixels.astype(np.float64) / 255.0 + last_pixels / 255.0) / 2
         np.testing.assert_array_equal(
             np.frombuffer(batch.frames[0].image.pixels, dtype=np.uint8).reshape(expected.shape),
-            quantize(expected, imaging.sensor_artifacts, 42, "unused"),
+            np.frombuffer(
+                quantize_rgb8(expected, 0.0, 1.0, 0.0, 42, "sensor/station-0/main/frame"),
+                dtype=np.uint8,
+            ).reshape(expected.shape),
         )
         self.assertGreater(truth.frame_truth[0].targets[0].projected_width_px, 10)
         artifacts = replace(imaging.sensor_artifacts, sensor_noise_std_intensity=0.02)
@@ -285,6 +322,51 @@ class SurfaceRenderingTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_preview_encodes_only_requested_station_and_reuses_paused_images(self) -> None:
+        runtime = PreviewRuntime(demo_spec(station_count=2, fps=2))
+        runtime.control("pause")
+        runtime.start()
+        self.addCleanup(runtime.close)
+        with patch("chongming.preview.encode_video", wraps=encode_video) as encode:
+            runtime.control("step")
+            with runtime._condition:
+                self.assertTrue(
+                    runtime._condition.wait_for(lambda: runtime._published is not None, timeout=5)
+                )
+            self.assertEqual(encode.call_count, 0)
+            assert runtime._latest_step is not None
+            self.assertEqual(len(runtime._latest_step.video.frames), 4)
+            stations = runtime._station_ids
+            first = runtime.snapshot(stations[0])["snapshot"]
+            self.assertEqual(len(first["video"]), 2)
+            self.assertEqual({frame["station_id"] for frame in first["video"]}, {stations[0]})
+            self.assertEqual(encode.call_count, 2)
+            self.assertEqual(runtime.snapshot(stations[0])["snapshot"], first)
+            self.assertEqual(encode.call_count, 2)
+            unchanged = runtime.snapshot(stations[0], after_sequence=first["sequence"])
+            self.assertEqual(unchanged["state"], "paused")
+            self.assertIsNone(unchanged["snapshot"])
+            self.assertEqual(encode.call_count, 2)
+            second = runtime.snapshot(stations[1])["snapshot"]
+            self.assertEqual(second["sequence"], first["sequence"])
+            self.assertEqual({frame["station_id"] for frame in second["video"]}, {stations[1]})
+            self.assertEqual(encode.call_count, 4)
+            with self.assertRaisesRegex(ValueError, "station"):
+                runtime.snapshot("unknown-station")
+            runtime.control("step")
+            with runtime._condition:
+                self.assertTrue(
+                    runtime._condition.wait_for(
+                        lambda: (
+                            runtime._published is not None and runtime._published["sequence"] == 2
+                        ),
+                        timeout=5,
+                    )
+                )
+            self.assertEqual(encode.call_count, 4)
+            self.assertEqual(runtime.snapshot(stations[0])["snapshot"]["sequence"], 2)
+            self.assertEqual(encode.call_count, 6)
+
     def wait_snapshot(self, runtime: PreviewRuntime, predicate) -> dict:
         deadline = time.monotonic() + 5
         with runtime._condition:
@@ -303,8 +385,12 @@ class PreviewTests(unittest.TestCase):
         payload = preview_payload(step, 1, 1)
         for frame, encoded in zip(step.video.frames, payload["video"], strict=True):
             decoded = Image.open(io.BytesIO(base64.b64decode(encoded["png"])))
+            self.assertEqual(frame.image.pixel_format, m.PixelFormat.RGB8)
+            self.assertEqual(decoded.mode, "RGB")
             self.assertEqual(decoded.tobytes(), frame.image.pixels)
             self.assertNotIn("truth_object_id", encoded)
+        rgb = np.frombuffer(step.video.frames[0].image.pixels, dtype=np.uint8).reshape(-1, 3)
+        self.assertTrue(np.any(rgb[:, 0] != rgb[:, 2]))
         self.assertNotEqual(source.station_sessions, demo_source(spec).station_sessions)
         for camera in step.truth.logical_scene.cameras:
             rotation = np.asarray(camera.optical_state.rotation_enu_from_body)
@@ -334,6 +420,13 @@ class PreviewTests(unittest.TestCase):
             for _ in range(3):
                 with urlopen(url + "/api/preview", timeout=2) as response:
                     self.assertEqual(json.load(response)["snapshot"]["sequence"], 1)
+            with urlopen(url + "/api/preview?after=1", timeout=2) as response:
+                unchanged = json.load(response)
+                self.assertEqual(unchanged["state"], "paused")
+                self.assertIsNone(unchanged["snapshot"])
+            with self.assertRaises(HTTPError) as invalid_station:
+                urlopen(url + "/api/preview?station=absent", timeout=2)
+            self.assertEqual(invalid_station.exception.code, 400)
             runtime.control("step")
             second = self.wait_snapshot(runtime, lambda d: d["snapshot"]["sequence"] == 2)
             self.assertEqual(

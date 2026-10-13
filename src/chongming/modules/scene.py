@@ -8,6 +8,7 @@ consulted.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
 
@@ -80,7 +81,7 @@ from chongming.ports.scene import (
     VisibilityResolver,
 )
 from chongming.rendering.geometry import contains_point, surface_hits
-from chongming.rendering.software import quantize, render_surfaces
+from chongming.rendering.metal import projected_footprints, quantize_rgb8, render_rgb8
 
 _EPS = 1e-9
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
@@ -669,10 +670,17 @@ class SceneLogicModule(ModuleShell):
 
 
 class CameraImagingModule(ModuleShell):
+    def __init__(self) -> None:
+        self.last_gpu_render_ms = 0.0
+        self.last_imager_overhead_ms = 0.0
+
     def render(self, request: ImageGenerationRequest) -> tuple[ImagingBatch, ImagingTruthBatch]:
+        self.last_gpu_render_ms = 0.0
+        self.last_imager_overhead_ms = 0.0
+        render_started = time.perf_counter()
         artifacts = request.imaging_spec.sensor_artifacts
-        if artifacts.output_pixel_format is not PixelFormat.GRAY8:
-            raise ValueError("the first scene imager supports only gray8")
+        if artifacts.output_pixel_format is not PixelFormat.RGB8:
+            raise ValueError("the Metal scene imager requires rgb8 output")
         if request.imaging_spec.exposure_samples <= 0:
             raise ValueError("exposure_samples must be positive")
         frames: list[CameraFrame] = []
@@ -706,8 +714,8 @@ class CameraImagingModule(ModuleShell):
             )
             if any(time not in samples for time in integration_times):
                 raise ValueError("frame is missing a configured sub-exposure sample")
-            intensity = np.zeros((height, width), dtype=np.float64)
-            midpoint_pixels, footprints = render_surfaces(scene, camera)
+            footprints = projected_footprints(scene, camera)
+            sample_buffers: list[bytes] = []
             for sample_time in integration_times:
                 sample = samples[sample_time]
                 sample_camera = next(
@@ -715,19 +723,35 @@ class CameraImagingModule(ModuleShell):
                     for item in sample.cameras
                     if item.station_id == frame.station_id and item.camera_role is frame.camera_role
                 )
-                sample_pixels = (
-                    midpoint_pixels
-                    if sample_time == midpoint
-                    else render_surfaces(sample, sample_camera)[0]
+                sample_pixels, gpu_ms = render_rgb8(sample, sample_camera)
+                self.last_gpu_render_ms += gpu_ms
+                sample_buffers.append(sample_pixels)
+            if (
+                len(sample_buffers) == 1
+                and artifacts.intensity_min == 0.0
+                and artifacts.intensity_max == 1.0
+                and artifacts.sensor_noise_std_intensity == 0.0
+            ):
+                pixels = sample_buffers[0]
+            else:
+                intensity = sum(
+                    (
+                        np.frombuffer(sample_pixels, dtype=np.uint8)
+                        .reshape(height, width, 3)
+                        .astype(np.float64)
+                        / 255.0
+                        for sample_pixels in sample_buffers
+                    ),
+                    start=np.zeros((height, width, 3), dtype=np.float64),
+                ) / len(sample_buffers)
+                pixels = quantize_rgb8(
+                    intensity,
+                    artifacts.intensity_min,
+                    artifacts.intensity_max,
+                    artifacts.sensor_noise_std_intensity,
+                    request.random_seed,
+                    f"sensor/{frame.station_id}/{frame.camera_role.value}/{frame.frame_id}",
                 )
-                intensity += sample_pixels
-            intensity /= len(integration_times)
-            pixels = quantize(
-                intensity,
-                artifacts,
-                request.random_seed,
-                f"sensor/{frame.station_id}/{frame.camera_role.value}/{frame.frame_id}",
-            )
             target_truth: list[ProjectedTargetTruth] = []
             for target_visibility in scene.target_visibility:
                 if (
@@ -783,9 +807,9 @@ class CameraImagingModule(ModuleShell):
                     image=ImagePlane(
                         width_px=width,
                         height_px=height,
-                        pixel_format=PixelFormat.GRAY8,
-                        row_stride_bytes=width,
-                        pixels=pixels.tobytes(),
+                        pixel_format=PixelFormat.RGB8,
+                        row_stride_bytes=width * 3,
+                        pixels=pixels,
                     ),
                     camera_config_ref=frame.online_camera_config_digest,
                 )
@@ -802,6 +826,12 @@ class CameraImagingModule(ModuleShell):
                     landmarks=tuple(landmark_truth),
                 )
             )
+        # Wall time outside Metal command execution: serialization, IPC,
+        # scheduling/waiting, readback, sensor effects and truth assembly.
+        # This is not CPU execution time or CPU utilization.
+        self.last_imager_overhead_ms = max(
+            0.0, (time.perf_counter() - render_started) * 1000.0 - self.last_gpu_render_ms
+        )
         return ImagingBatch(frames=tuple(frames)), ImagingTruthBatch(frame_truth=tuple(truths))
 
 

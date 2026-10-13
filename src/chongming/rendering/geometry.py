@@ -6,6 +6,8 @@ No camera, experiment clock, or window is owned by this module.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -14,11 +16,58 @@ from chongming.contracts.scene import (
     BoxGeometry,
     GeometrySpec,
     KinematicState,
+    SceneCameraDistortion,
+    SceneCameraIntrinsics,
+    SceneDistortionModel,
     SphereGeometry,
 )
 
 FloatArray = NDArray[np.float64]
 NEAR = 1e-6
+
+
+@lru_cache(maxsize=8)
+def optical_rays(
+    intrinsics: SceneCameraIntrinsics, distortion: SceneCameraDistortion
+) -> FloatArray:
+    """Invert the generating lens model at integer pixel centres.
+
+    This is a camera-geometry utility for projection and tests.  It does not
+    render pixels; the production image path is the Metal backend.
+    """
+
+    if intrinsics.image_width_px <= 0 or intrinsics.image_height_px <= 0:
+        raise ValueError("camera dimensions must be positive")
+    if min(intrinsics.focal_x_px, intrinsics.focal_y_px) <= 0:
+        raise ValueError("camera focal lengths must be positive")
+    rows, columns = np.indices(
+        (intrinsics.image_height_px, intrinsics.image_width_px), dtype=np.float64
+    )
+    yd = (rows.ravel() - intrinsics.principal_y_px) / intrinsics.focal_y_px
+    xd = (
+        columns.ravel()
+        - intrinsics.principal_x_px
+        - intrinsics.skew_px * yd
+    ) / intrinsics.focal_x_px
+    x, y = xd.copy(), yd.copy()
+    if distortion.model is SceneDistortionModel.BROWN_CONRADY:
+        k1, k2, k3 = distortion.radial_k1_k2_k3
+        p1, p2 = distortion.tangential_p1_p2
+        for _ in range(30):
+            r2 = x * x + y * y
+            radial = 1 + r2 * (k1 + r2 * (k2 + r2 * k3))
+            dx = 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+            dy = p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+            x, y = (xd - dx) / radial, (yd - dy) / radial
+        r2 = x * x + y * y
+        radial = 1 + r2 * (k1 + r2 * (k2 + r2 * k3))
+        error_x = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x) - xd
+        error_y = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y - yd
+        if not np.all(np.isfinite(x + y)) or np.max(np.abs(error_x) + np.abs(error_y)) > 1e-7:
+            raise ValueError("lens distortion cannot be inverted over this image")
+    result = np.column_stack((x, y, np.ones_like(x)))
+    result.flags.writeable = False
+    return result
 
 
 def surface_hits(

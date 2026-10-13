@@ -20,25 +20,26 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image
 
 from chongming.contracts.model import CameraFrame
 from chongming.contracts.scene import ScenarioSpec, ScenarioStep
+from chongming.rendering.metal import close_default_renderer
 from chongming.scenarios.demo import demo_source, demo_spec
 
 logger = logging.getLogger(__name__)
 
 
 def encode_video(frame: CameraFrame) -> str:
-    """Lossless PNG transport of the ordinary gray8 plane, without annotations."""
+    """Lossless PNG transport of the ordinary RGB8 plane, without annotations."""
     image = Image.frombytes(
-        "L",
+        "RGB",
         (frame.image.width_px, frame.image.height_px),
         bytes(frame.image.pixels),
         "raw",
-        "L",
+        "RGB",
         frame.image.row_stride_bytes,
     )
     output = io.BytesIO()
@@ -46,26 +47,30 @@ def encode_video(frame: CameraFrame) -> str:
     return base64.b64encode(output.getvalue()).decode("ascii")
 
 
-def preview_payload(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str, Any]:
+def _video_payload(step: ScenarioStep, station_id: str | None) -> list[dict[str, Any]]:
+    return [
+        {
+            "station_id": frame.station_id,
+            "role": frame.camera_role.value,
+            "frame_id": frame.frame_id,
+            "session_id": frame.station_session_id,
+            "width": frame.image.width_px,
+            "height": frame.image.height_px,
+            "capture": asdict(frame.capture_time),
+            "png": encode_video(frame),
+        }
+        for frame in step.video.frames
+        if station_id is None or frame.station_id == station_id
+    ]
+
+
+def _preview_metadata(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str, Any]:
     scene = step.truth.logical_scene
     return {
         "sequence": sequence,
         "loop": loop_no,
         "time_ns": step.video.sample_time.time_ns,
         "step_no": step.video.sample_time.step_no,
-        "video": [
-            {
-                "station_id": frame.station_id,
-                "role": frame.camera_role.value,
-                "frame_id": frame.frame_id,
-                "session_id": frame.station_session_id,
-                "width": frame.image.width_px,
-                "height": frame.image.height_px,
-                "capture": asdict(frame.capture_time),
-                "png": encode_video(frame),
-            }
-            for frame in step.video.frames
-        ],
         "monitor": {
             "terrain": asdict(scene.terrain),
             "world_objects": [asdict(item) for item in scene.world_objects],
@@ -75,6 +80,10 @@ def preview_payload(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str
             "frame_truth": [asdict(item) for item in step.truth.camera_frames],
         },
     }
+
+
+def preview_payload(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str, Any]:
+    return {**_preview_metadata(step, sequence, loop_no), "video": _video_payload(step, None)}
 
 
 class PreviewRuntime:
@@ -88,6 +97,12 @@ class PreviewRuntime:
         self._pending_steps = 0
         self._reset_version = 0
         self._published: dict[str, Any] | None = None
+        self._latest_step: ScenarioStep | None = None
+        self._encoded: dict[str, dict[str, Any]] = {}
+        self._encode_lock = threading.Lock()
+        self._station_ids = tuple(
+            dict.fromkeys(str(camera.station_id) for camera in spec.scene_definition.cameras)
+        )
         self._error: str | None = None
         self._thread = threading.Thread(
             target=self._produce, name="scene-video-producer", daemon=True
@@ -122,14 +137,36 @@ class PreviewRuntime:
                 raise ValueError("unknown preview control")
             self._condition.notify_all()
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(
+        self, station_id: str | None = None, after_sequence: int | None = None
+    ) -> dict[str, Any]:
+        station_id = station_id or self._station_ids[0]
+        if station_id not in self._station_ids:
+            raise ValueError("unknown preview station")
         with self._condition:
-            return {
+            result = {
                 "state": "failed" if self._error else "paused" if self._paused else "playing",
                 "error": self._error,
                 "snapshot": self._published,
                 "profile": self.spec.scene_definition.cameras[0].metadata.profile_id,
             }
+            step, payload, cache = self._latest_step, self._published, self._encoded
+        if payload is not None and payload["sequence"] == after_sequence:
+            result["snapshot"] = None
+            return result
+        if step is not None and payload is not None:
+            # Encode on demand outside the producer's lock. All viewers share
+            # one per-station cache for this immutable latest sample. Replacing
+            # the cache on publication bounds history; paused polls reuse PNGs.
+            with self._encode_lock:
+                encoded = cache.get(station_id)
+                if encoded is None:
+                    began = time.perf_counter()
+                    encoded = {"video": _video_payload(step, station_id)}
+                    encoded["png_encode_ms"] = round((time.perf_counter() - began) * 1000, 2)
+                    cache[station_id] = encoded
+            result["snapshot"] = {**payload, **encoded, "preview_station_id": station_id}
+        return result
 
     def _produce(self) -> None:
         sequence, loop_no, reset_version = 0, 1, 0
@@ -166,13 +203,25 @@ class PreviewRuntime:
                     steps = iter(source.generate(self.spec))
                     loop_no += 1
                     step = next(steps)
-                payload = preview_payload(step, sequence + 1, loop_no)
+                generated = time.perf_counter()
+                payload = _preview_metadata(step, sequence + 1, loop_no)
+                imager = getattr(source, "imager", None)
+                if imager is not None:
+                    gpu_ms = getattr(imager, "last_gpu_render_ms", 0.0)
+                    overhead_ms = getattr(imager, "last_imager_overhead_ms", 0.0)
+                    payload["gpu_render_ms"] = round(gpu_ms, 2)
+                    payload["imager_overhead_ms"] = round(overhead_ms, 2)
+                    payload["scene_logic_ms"] = round(
+                        max(0.0, (generated - began) * 1000 - gpu_ms - overhead_ms), 2
+                    )
                 payload["render_ms"] = round((time.perf_counter() - began) * 1000, 1)
                 with self._condition:
                     if reset_version != self._reset_version:
                         continue
                     sequence += 1
                     self._published = payload
+                    self._latest_step = step
+                    self._encoded = {}
                     self._condition.notify_all()
                     # Pacing only delays the worker; simulation timestamps come from the spec.
                     interval = (
@@ -218,9 +267,17 @@ def preview_server(runtime: PreviewRuntime, port: int) -> ThreadingHTTPServer:
             if path == "/":
                 self.reply(200, page, "text/html; charset=utf-8")
             elif path == "/api/preview":
+                try:
+                    query = parse_qs(urlsplit(self.path).query)
+                    station_id = query.get("station", [None])[0]
+                    after = query.get("after", [None])[0]
+                    snapshot = runtime.snapshot(station_id, int(after) if after is not None else None)
+                except ValueError:
+                    self.reply(400, b"Invalid preview request", "text/plain")
+                    return
                 self.reply(
                     200,
-                    json.dumps(runtime.snapshot(), ensure_ascii=False, allow_nan=False).encode(),
+                    json.dumps(snapshot, ensure_ascii=False, allow_nan=False).encode(),
                     "application/json; charset=utf-8",
                 )
             else:
@@ -283,6 +340,7 @@ def main() -> None:
     finally:
         server.server_close()
         runtime.close()
+        close_default_renderer()
 
 
 if __name__ == "__main__":
