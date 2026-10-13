@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
-from hashlib import blake2b
+
+import numpy as np
 
 from chongming.contracts.model import (
     CameraFrame,
@@ -58,6 +59,8 @@ from chongming.contracts.scene import (
     SightSegment,
     SimulationTime,
     TargetVisibilityTruth,
+    TerrainModel,
+    TerrainSpec,
     TimelineSpec,
     TrajectorySpec,
     VirtualObservationBatch,
@@ -76,9 +79,23 @@ from chongming.ports.scene import (
     VirtualObservationGenerator,
     VisibilityResolver,
 )
+from chongming.rendering.geometry import contains_point, surface_hits
+from chongming.rendering.software import quantize, render_surfaces
 
 _EPS = 1e-9
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
+
+
+def exposure_sample_times(capture: CaptureTime, count: int) -> tuple[int, ...]:
+    """Uniform sub-exposure midpoints; the authoritative truth midpoint is separate."""
+    if count <= 0:
+        raise ValueError("exposure_samples must be positive")
+    duration = capture.exposure_end_ns - capture.exposure_start_ns
+    if duration < 0:
+        raise ValueError("exposure end cannot precede start")
+    return tuple(
+        capture.exposure_start_ns + (2 * k + 1) * duration // (2 * count) for k in range(count)
+    )
 
 
 def _group_exposures(
@@ -464,7 +481,7 @@ class VisibilityModule(ModuleShell):
             if not getattr(entity, "occludes_sight_lines", False):
                 continue
             hit = VisibilityModule._segment_hit(entity, origin, target)
-            if hit is not None and hit[0] > _EPS and hit[0] < 1.0 - _EPS:
+            if hit is not None and 0.0 <= hit[0] < 1.0 - _EPS:
                 blockers.append((hit[0], hit[1]))
         blockers.sort(key=lambda item: item[0])
         return tuple(item[1] for item in blockers)
@@ -477,12 +494,20 @@ class VisibilityModule(ModuleShell):
         length2 = _dot(segment, segment)
         if length2 <= _EPS:
             return None
-        center = getattr(getattr(entity, "pose", entity), "position_enu_m", None)
+        pose = getattr(entity, "pose", getattr(entity, "base_pose", None))
         geometry = getattr(entity, "geometry", None)
-        object_id = getattr(entity, "object_id", getattr(entity, "vegetation_id", None))
+        object_id = getattr(
+            entity,
+            "object_id",
+            getattr(entity, "vegetation_id", getattr(entity, "terrain_id", None)),
+        )
         if object_id is None:
             return None
-        if center is None and hasattr(entity, "base_elevation_m"):
+        if isinstance(entity, TerrainSpec):
+            if entity.model is not TerrainModel.FLAT:
+                raise ValueError("visibility currently requires flat terrain")
+            if origin[2] < entity.base_elevation_m:
+                return 0.0, SegmentOcclusionTruth(object_id, origin, 0.0)
             if abs(segment[2]) <= _EPS:
                 return None
             fraction = (entity.base_elevation_m - origin[2]) / segment[2]
@@ -491,46 +516,15 @@ class VisibilityModule(ModuleShell):
                     object_id, _add(origin, _scale(segment, fraction)), fraction
                 )
             return None
-        if center is None or geometry is None:
+        if pose is None or geometry is None:
             return None
-        radius: float | None = getattr(geometry, "radius_m", None)
-        if radius is not None:
-            to_center = _sub(center, origin)
-            projection = _dot(to_center, segment) / length2
-            closest = _add(origin, _scale(segment, projection))
-            distance2 = _dot(_sub(center, closest), _sub(center, closest))
-            if 0.0 < projection < 1.0 and distance2 <= radius * radius:
-                return projection, SegmentOcclusionTruth(object_id, closest, projection)
-            return None
-        half_extents = getattr(geometry, "half_extents_body_m", None)
-        if half_extents is None:
-            return None
-        rotation = getattr(getattr(entity, "pose", entity), "rotation_enu_from_body", None)
-        local_origin = (
-            _mat_vec(_transpose(rotation), _sub(origin, center))
-            if rotation
-            else _sub(origin, center)
-        )
-        local_direction = _mat_vec(_transpose(rotation), segment) if rotation else segment
-        t_min, t_max = 0.0, 1.0
-        for coordinate in range(3):
-            direction = local_direction[coordinate]
-            minimum = -half_extents[coordinate]
-            maximum = half_extents[coordinate]
-            if abs(direction) <= _EPS:
-                if local_origin[coordinate] < minimum or local_origin[coordinate] > maximum:
-                    return None
-                continue
-            near = (minimum - local_origin[coordinate]) / direction
-            far = (maximum - local_origin[coordinate]) / direction
-            if near > far:
-                near, far = far, near
-            t_min, t_max = max(t_min, near), min(t_max, far)
-            if t_min > t_max:
-                return None
-        if t_min > _EPS and t_min < 1.0 - _EPS:
-            point = _add(origin, _scale(segment, t_min))
-            return t_min, SegmentOcclusionTruth(object_id, point, t_min)
+        if contains_point(origin, pose, geometry):
+            return 0.0, SegmentOcclusionTruth(object_id, origin, 0.0)
+        distances, _ = surface_hits(origin, np.asarray([segment], dtype=np.float64), pose, geometry)
+        fraction = float(distances[0])
+        if 0.0 < fraction < 1.0 - _EPS:
+            point = _add(origin, _scale(segment, fraction))
+            return fraction, SegmentOcclusionTruth(object_id, point, fraction)
         return None
 
 
@@ -689,10 +683,10 @@ class CameraImagingModule(ModuleShell):
             midpoint = (
                 frame.capture_time.exposure_start_ns + frame.capture_time.exposure_end_ns
             ) // 2
-            scene = min(
-                frame.exposure_samples,
-                key=lambda sample: abs(sample.sample_time.time_ns - midpoint),
-            )
+            samples = {sample.sample_time.time_ns: sample for sample in frame.exposure_samples}
+            if midpoint not in samples:
+                raise ValueError("frame requires an exact exposure-midpoint scene sample")
+            scene = samples[midpoint]
             camera = next(
                 (
                     item
@@ -707,23 +701,32 @@ class CameraImagingModule(ModuleShell):
             height = camera.actual_intrinsics.image_height_px
             if width <= 0 or height <= 0:
                 raise ValueError("camera dimensions must be positive")
-            base_intensity = max(
-                artifacts.intensity_min,
-                min(artifacts.intensity_max, sum(scene.illumination.sky_linear_rgb) / 3.0),
+            integration_times = exposure_sample_times(
+                frame.capture_time, request.imaging_spec.exposure_samples
             )
-            pixels = bytearray(
-                self._pixel_value(
-                    base_intensity,
-                    artifacts.intensity_min,
-                    artifacts.intensity_max,
-                    artifacts.sensor_noise_std_intensity,
-                    request.random_seed,
-                    frame.frame_id,
-                    x,
-                    y,
+            if any(time not in samples for time in integration_times):
+                raise ValueError("frame is missing a configured sub-exposure sample")
+            intensity = np.zeros((height, width), dtype=np.float64)
+            midpoint_pixels, footprints = render_surfaces(scene, camera)
+            for sample_time in integration_times:
+                sample = samples[sample_time]
+                sample_camera = next(
+                    item
+                    for item in sample.cameras
+                    if item.station_id == frame.station_id and item.camera_role is frame.camera_role
                 )
-                for y in range(height)
-                for x in range(width)
+                sample_pixels = (
+                    midpoint_pixels
+                    if sample_time == midpoint
+                    else render_surfaces(sample, sample_camera)[0]
+                )
+                intensity += sample_pixels
+            intensity /= len(integration_times)
+            pixels = quantize(
+                intensity,
+                artifacts,
+                request.random_seed,
+                f"sensor/{frame.station_id}/{frame.camera_role.value}/{frame.frame_id}",
             )
             target_truth: list[ProjectedTargetTruth] = []
             for target_visibility in scene.target_visibility:
@@ -742,17 +745,14 @@ class CameraImagingModule(ModuleShell):
                         truth_object_id=target.truth_object_id,
                         projection=target_visibility.projection,
                         visibility=target_visibility,
-                        projected_width_px=None,
-                        projected_height_px=None,
+                        projected_width_px=footprints.get(
+                            str(target.truth_object_id), (None, None)
+                        )[0],
+                        projected_height_px=footprints.get(
+                            str(target.truth_object_id), (None, None)
+                        )[1],
                     )
                 )
-                if (
-                    target_visibility.capture_eligible
-                    and target_visibility.projection.centroid_px is not None
-                ):
-                    self._draw_marker(
-                        pixels, width, height, target_visibility.projection.centroid_px
-                    )
             landmark_truth: list[ProjectedLandmarkTruth] = []
             for landmark_visibility in scene.landmark_visibility:
                 if (
@@ -785,7 +785,7 @@ class CameraImagingModule(ModuleShell):
                         height_px=height,
                         pixel_format=PixelFormat.GRAY8,
                         row_stride_bytes=width,
-                        pixels=bytes(pixels),
+                        pixels=pixels.tobytes(),
                     ),
                     camera_config_ref=frame.online_camera_config_digest,
                 )
@@ -803,35 +803,6 @@ class CameraImagingModule(ModuleShell):
                 )
             )
         return ImagingBatch(frames=tuple(frames)), ImagingTruthBatch(frame_truth=tuple(truths))
-
-    @staticmethod
-    def _pixel_value(
-        intensity: float,
-        minimum: float,
-        maximum: float,
-        noise_std: float,
-        seed: int,
-        frame_id: FrameId,
-        x: int,
-        y: int,
-    ) -> int:
-        value = intensity
-        if noise_std:
-            digest = blake2b(f"{seed}:{frame_id}:{x}:{y}".encode(), digest_size=8).digest()
-            unit = int.from_bytes(digest, "big") / ((1 << 64) - 1)
-            value += noise_std * (2.0 * unit - 1.0)
-        if maximum <= minimum:
-            raise ValueError("intensity_max must be greater than intensity_min")
-        normalized = (max(minimum, min(maximum, value)) - minimum) / (maximum - minimum)
-        return max(0, min(255, round(normalized * 255.0)))
-
-    @staticmethod
-    def _draw_marker(
-        pixels: bytearray, width: int, height: int, centroid: tuple[float, float]
-    ) -> None:
-        x, y = round(centroid[0]), round(centroid[1])
-        if 0 <= x < width and 0 <= y < height:
-            pixels[y * width + x] = 255
 
 
 class VirtualObservationModule(ModuleShell):
@@ -917,13 +888,25 @@ class ScenarioModule(ModuleShell):
                 capture = CaptureTime(
                     clock_domain_id=time.clock_domain_id,
                     exposure_start_ns=midpoint - camera.exposure.exposure_duration_ns // 2,
-                    exposure_end_ns=midpoint + camera.exposure.exposure_duration_ns // 2,
+                    exposure_end_ns=midpoint
+                    - camera.exposure.exposure_duration_ns // 2
+                    + camera.exposure.exposure_duration_ns,
                     clock_uncertainty_ns=0,
                     rolling_shutter_model=(
                         "none"
                         if camera.exposure.shutter_model.value == "global"
                         else camera.exposure.shutter_model.value
                     ),
+                )
+                sample_times = set(exposure_sample_times(capture, spec.imaging.exposure_samples))
+                sample_times.add(midpoint)
+                exposure_scenes = tuple(
+                    logical_scene
+                    if sample_time == midpoint
+                    else self.logic.sample(
+                        SimulationTime(time.clock_domain_id, sample_time, time.step_no)
+                    )
+                    for sample_time in sorted(sample_times)
                 )
                 frame_inputs.append(
                     FrameImagingInput(
@@ -935,7 +918,7 @@ class ScenarioModule(ModuleShell):
                         ),
                         capture_time=capture,
                         online_camera_config_digest=config.config_digest,
-                        exposure_samples=(logical_scene,),
+                        exposure_samples=exposure_scenes,
                     )
                 )
             imaging, imaging_truth = self.imager.render(

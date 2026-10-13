@@ -225,7 +225,7 @@ class ScenePrimitiveTests(unittest.TestCase):
         spec, _ = architecture_specs()
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
-        snapshot = logic.sample(SimulationTime("structure-clock", 0, 0))
+        snapshot = logic.sample(SimulationTime("structure-clock", 500_000, 0))
         frame = FrameImagingInput(
             station_id=spec.scene_definition.cameras[0].station_id,
             station_session_id=SessionId("image-session"),
