@@ -180,7 +180,7 @@ class CenterSession:
                     "all_modules_initialized": True,
                     "algorithms_complete": False,
                     "video_enabled": video_enabled,
-                    "renderer": "Metal" if video_enabled else None,
+                    "renderer": "Godot 4" if video_enabled else None,
                     "station_sessions": self.source.station_sessions,
                 },
             )
@@ -329,7 +329,7 @@ class CenterSession:
                 raise RuntimeError("session is closed")
             self.source.video_enabled = enabled
             if not enabled:
-                from chongming.rendering.metal import close_default_renderer
+                from chongming.rendering.godot import close_default_renderer
 
                 close_default_renderer()
         finally:
@@ -378,7 +378,7 @@ class CenterSession:
             try:
                 self._resources.close()
             finally:
-                from chongming.rendering.metal import close_default_renderer
+                from chongming.rendering.godot import close_default_renderer
 
                 close_default_renderer()
         if errors:

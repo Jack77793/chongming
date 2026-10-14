@@ -33,7 +33,7 @@ def optical_rays(
     """Invert the generating lens model at integer pixel centres.
 
     This is a camera-geometry utility for projection and tests.  It does not
-    render pixels; the production image path is the Metal backend.
+    render pixels; the production image path is the Godot backend.
     """
 
     if intrinsics.image_width_px <= 0 or intrinsics.image_height_px <= 0:

@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import threading
 import time
 import unittest
@@ -34,8 +35,8 @@ from chongming.preview import (
     preview_server,
 )
 from chongming.rendering.geometry import optical_rays, surface_hits
-from chongming.rendering.metal import (
-    MetalRenderer,
+from chongming.rendering.godot import (
+    GodotRenderer,
     projected_footprints,
     quantize_rgb8,
     render_rgb8,
@@ -82,9 +83,13 @@ def render_gpu(
     return image, projected_footprints(scene, camera)
 
 
+@unittest.skipUnless(
+    os.environ.get("CHONGMING_GODOT") or shutil.which("godot4") or shutil.which("godot"),
+    "Godot 4 executable is required for pixel integration tests",
+)
 class SurfaceRenderingTests(unittest.TestCase):
     def test_renderer_survives_parent_terminal_signals_and_closes_cleanly(self) -> None:
-        renderer = MetalRenderer()
+        renderer = GodotRenderer()
         self.addCleanup(renderer.close)
         process = renderer._process
         assert process is not None

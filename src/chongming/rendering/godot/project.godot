@@ -1,0 +1,21 @@
+; Godot 4 headless worker used by the virtual-scene renderer.
+; The worker is intentionally a small process boundary: Python owns time,
+; truth, visibility and evidence; Godot owns pixels only.
+
+config_version=5
+
+[application]
+
+config/name="Chongming Virtual Scene Renderer"
+run/main_scene="res://worker.tscn"
+
+[display]
+
+window/size/viewport_width=64
+window/size/viewport_height=48
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0, 0, 0, 1)

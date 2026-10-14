@@ -10,7 +10,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --check
 uv run chongming-center --scenario scenarios/center_clean.json --output results/center-test
 ```
 
-工具默认无视频、暂停且不占端口。输入 `step` 完成一个曝光中点组及中心调用；`run 10` 连续十步，`run` 到有限终点，Ctrl+C 在完整步骤后暂停；`status` 查看状态，`video on|off` 在步间恢复/停止像素，`reset` 新建输出目录、会话和算法实例，`quit` 关闭所有资源。启用视频需 macOS/Metal/Swift，仍按主 1920×1080、辅 640×480 RGB8 输出，中心工具将视频保存为 PNG，不打开窗口。
+工具默认无视频、暂停且不占端口。输入 `step` 完成一个曝光中点组及中心调用；`run 10` 连续十步，`run` 到有限终点，Ctrl+C 在完整步骤后暂停；`status` 查看状态，`video on|off` 在步间恢复/停止像素，`reset` 新建输出目录、会话和算法实例，`quit` 关闭所有资源。启用视频需安装 Godot 4（可执行文件名为 `godot4` 或 `godot`，也可设置 `CHONGMING_GODOT`），按主 1920×1080、辅 640×480 RGB8 输出，中心工具将视频保存为 PNG，不打开窗口。
 
 `--run --tick-hz 10` 可直接连续运行；节拍只控制墙钟速度，不改变曝光时间。输出目录必须不存在。每次启动完整装配与模块生命周期；尚未实现的业务在 manifest 中标明 `algorithm_unimplemented`。默认 `InputInspector` 只检查输入，不计算定位/跟踪，实际图像检测/标定与完整算法链路仍未实现。
 

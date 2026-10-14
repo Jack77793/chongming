@@ -257,7 +257,7 @@ class CenterDevelopmentTests(unittest.TestCase):
                 )
             self.assertEqual(*normalized)
         finally:
-            from chongming.rendering.metal import close_default_renderer
+            from chongming.rendering.godot import close_default_renderer
 
             close_default_renderer()
 

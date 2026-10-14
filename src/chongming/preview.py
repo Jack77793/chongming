@@ -31,7 +31,7 @@ from PIL import Image
 
 from chongming.contracts.model import CameraFrame
 from chongming.contracts.scene import CameraFrameTruth, ScenarioSpec, ScenarioStep
-from chongming.rendering.metal import close_default_renderer
+from chongming.rendering.godot import close_default_renderer
 from chongming.scenarios.demo import demo_source, demo_spec
 from chongming.scenarios.serialization import load_scenario
 

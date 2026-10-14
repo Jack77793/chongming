@@ -76,7 +76,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
         self.assertTrue(main_start["high-box"].capture_eligible)
         self.assertTrue(main_end["high-box"].capture_eligible)
         # Inspect the native request, without starting a renderer or HTTP server.
-        from chongming.rendering.metal import _entities
+        from chongming.rendering.godot import _entities
 
         mesh = _entities(start)[0]
         self.assertEqual(mesh["position"], [-40.0, 32.0, 0.0])
@@ -110,7 +110,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
             replace(terrain, heightfield_asset_uri=None, heightfield_asset_digest=None),
             inline.scene_definition.terrain,
         )
-        from chongming.rendering.metal import _entities
+        from chongming.rendering.godot import _entities
 
         snapshots = []
         for spec in (inline, external):

@@ -109,7 +109,7 @@ from chongming.ports.scene import (
     VisibilityResolver,
 )
 from chongming.rendering.geometry import contains_point, surface_hits
-from chongming.rendering.metal import projected_footprints, quantize_rgb8, render_rgb8
+from chongming.rendering.godot import projected_footprints, quantize_rgb8, render_rgb8
 from chongming.scenarios.behaviors import sample_behavior
 
 _EPS = 1e-9
@@ -884,7 +884,7 @@ class CameraImagingModule(ModuleShell):
         render_started = time.perf_counter()
         artifacts = request.imaging_spec.sensor_artifacts
         if artifacts.output_pixel_format is not PixelFormat.RGB8:
-            raise ValueError("the Metal scene imager requires rgb8 output")
+            raise ValueError("the Godot scene imager requires rgb8 output")
         if request.imaging_spec.exposure_samples <= 0:
             raise ValueError("exposure_samples must be positive")
         frames: list[CameraFrame] = []
@@ -974,7 +974,7 @@ class CameraImagingModule(ModuleShell):
                 )
             )
             truths.append(_frame_truth(frame, scene))
-        # Wall time outside Metal command execution: serialization, IPC,
+        # Wall time outside Godot render execution: serialization, IPC,
         # scheduling/waiting, readback, sensor effects and truth assembly.
         # This is not CPU execution time or CPU utilization.
         self.last_imager_overhead_ms = max(
