@@ -27,7 +27,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 | `geometry` | sphere + radius_m，box + half_extents_m，或 aircraft；目标和地物共用 |
 | `motion` | constant_velocity + position_enu_m/velocity_enu_mps；或 orbit + center_enu_m/radius_m/period_s，可选 phase_rad/vertical_amplitude_m，支持多周期 |
 | `world_objects[]` | 覆盖内置地物，`[]` 清空建筑和面板；每项含 id、position_enu_m、geometry，可选 display_name、appearance、occludes_sight_lines |
-| `terrain` | flat 或 heightfield + origin_enu_m/spacing_m/heights_m；高度行从南到北、每行从西到东，网格外为平面 |
+| `terrain` | flat 或 heightfield + origin_enu_m/spacing_m；内嵌 heights_m 或外部 asset 二选一，高度行从南到北、每行从西到东，网格外为平面 |
 | `search` | min_enu_m、max_enu_m、step_enu_m 三个向量，控制中心搜索盒；范围外目标仍可发射线 |
 | `appearance` | 可选 linear_rgb 三个 0–1 数和 diffuse_reflectance；只影响外观 |
 
@@ -35,7 +35,11 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 
 可对 Agent 说：“复制 center_clean.json，改成三站、两个交叉运动目标、运行 60 秒，清空地物，搜索盒缩小到使第二个目标在盒外；只编辑 JSON，然后执行 --check。”未知字段和非法值会报错，JSON 不加载 Python 代码。
 
-现成场景：`center_clean.json` 双站单目标 30 秒；`constant_velocity.json` 双站交叉；`empty.json` 无目标；`heightfield.json` 山脊遮挡；`review.json` 三类形状绕行。
+现成场景：`center_clean.json` 双站单目标 30 秒；`constant_velocity.json` 双站交叉；`empty.json` 无目标；`heightfield.json` 山脊遮挡；`heightfield_asset.json` 同一山脊的外部资产版本；`review.json` 三类形状绕行。
+
+较大的地形网格放在独立 JSON 中，场景只保留位置、间距和 `"asset": {"uri": "assets/ridge.json", "sha256": "…"}`。资产只含 `{"heights_m": [[0, 1], [2, 3]]}`：至少 2×2 的矩形有限非负高度，单位米、相对基础高程。原点和间距留在场景中，同一网格可复用。URI 相对场景文件目录解析，也支持本地绝对路径/file URI；不下载远程资产。Python 调用 `load_scenario` 可用 `asset_root` 指定素材目录。
+
+编辑资产后执行 `shasum -a 256 scenarios/assets/ridge.json`，将完整的 64 位小写摘要填回场景，再用 `chongming-center --scenario scenarios/heightfield_asset.json --check` 校验。摘要不匹配、未知字段、非法网格在启动前报错；证据保留引用、摘要及编译后的几何。小网格仍可直接写 heights_m，不强制拆文件。
 
 ## 接入中心算法与答案参考
 

@@ -15,6 +15,7 @@ from PIL import Image
 from chongming.contracts import scene as s
 from chongming.contracts.model import CameraRole
 from chongming.modules.scene import _scheduled_exposures
+from chongming.scenarios.authoring import save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec, optical_rotation
 from chongming.scenarios.run import run_scene
 from chongming.scenarios.serialization import (
@@ -66,6 +67,48 @@ def normalize(value, sessions: list[str]):
 
 
 class SceneRunAcceptanceTests(unittest.TestCase):
+    def test_external_terrain_finite_run_preserves_online_and_truth_evidence(self) -> None:
+        scenes = Path(__file__).resolve().parents[1] / "scenarios"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outputs = []
+            for name in ("heightfield", "heightfield_asset"):
+                document = json.loads((scenes / f"{name}.json").read_text())
+                document["scenario_id"] = "terrain-parity"
+                document["fps"] = 1
+                if name.endswith("_asset"):
+                    document["terrain"]["asset"]["uri"] = (scenes / "assets/ridge.json").as_uri()
+                path = root / f"{name}.json"
+                save_authoring(document, path)
+                output = root / name
+                summary = run_scene(path, output, video_enabled=False)
+                self.assertEqual(summary["counts"]["gpu_submissions"], 0)
+                self.assertEqual(summary["counts"]["logical_frames"], 24)
+                manifest = json.loads((output / "manifest.json").read_text())
+                terrain = manifest["scenario"]["scenario"]["scene_definition"]["terrain"]
+                self.assertEqual(terrain["heightfield_asset_digest"] is not None,
+                                 name.endswith("_asset"))
+                sessions = [
+                    binding[key]
+                    for binding in manifest["station_sessions"]
+                    for key in ("image_session_id", "virtual_session_id")
+                ]
+                truth = records(output / "truth.jsonl")
+                for sample in truth:
+                    terrain = sample["logical_scene"]["terrain"]
+                    terrain["heightfield_asset_uri"] = None
+                    terrain["heightfield_asset_digest"] = None
+                outputs.append(normalize({
+                    "online": records(output / "online.jsonl"), "truth": truth,
+                }, sessions))
+            self.assertEqual(outputs[0], outputs[1])
+            # A modified asset fails before output creation or source startup.
+            document["terrain"]["asset"]["sha256"] = "0" * 64
+            save_authoring(document, path)
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                run_scene(path, root / "invalid", video_enabled=False)
+            self.assertFalse((root / "invalid").exists())
+
     def test_json_recreates_all_finite_streams_with_separate_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

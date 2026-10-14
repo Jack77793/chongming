@@ -9,7 +9,6 @@ backwards-compatibility layer.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import math
 import sys
@@ -20,7 +19,6 @@ from itertools import pairwise
 from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
-from urllib.parse import unquote, urlparse
 
 from chongming.contracts.model import CameraRole, PixelFormat
 from chongming.contracts.scene import (
@@ -28,6 +26,7 @@ from chongming.contracts.scene import (
     SceneCameraSpec,
     TerrainModel,
 )
+from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
 
 FORMAT_VERSION = "scenario-json-v1"
 
@@ -205,9 +204,7 @@ def load_scenario(path: Path, *, asset_root: Path | None = None) -> ScenarioSpec
     """Load the compact external authoring document and compile it."""
     from chongming.scenarios.authoring import load_authoring
 
-    spec = load_authoring(path)
-    verify_scenario_assets(spec, asset_root if asset_root is not None else path.parent)
-    return spec
+    return load_authoring(path, asset_root=asset_root)
 
 
 def _rotation_is_level(rotation: tuple[tuple[float, float, float], ...]) -> bool:
@@ -415,10 +412,7 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
 
 
 def verify_external_asset(path: Path, expected_digest: str) -> None:
-    with path.open("rb") as handle:
-        digest = hashlib.file_digest(handle, "sha256").hexdigest()
-    if digest != expected_digest:
-        raise ValueError(f"external asset digest mismatch for {path}")
+    read_verified_asset(path, expected_digest)
 
 
 def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
@@ -426,11 +420,7 @@ def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
     terrain = spec.scene_definition.terrain
     if terrain.heightfield_asset_uri is None:
         return
-    parsed = urlparse(terrain.heightfield_asset_uri)
-    if parsed.scheme not in ("", "file") or parsed.netloc:
-        raise ValueError(f"unsupported local asset URI scheme: {parsed.scheme}")
-    relative = Path(unquote(parsed.path))
-    asset = relative if relative.is_absolute() else asset_root / relative
+    asset = resolve_external_asset(terrain.heightfield_asset_uri, asset_root)
     if terrain.heightfield_asset_digest is None:
         raise ValueError("heightfield asset is missing a digest")
     verify_external_asset(asset, terrain.heightfield_asset_digest)

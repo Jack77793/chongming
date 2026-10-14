@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from chongming.contracts import scene
 from chongming.modules.scene import (
@@ -96,6 +99,120 @@ class ScenarioPersistenceTests(unittest.TestCase):
             document["terrain"] = {"type": "heightfield", **value}
             with self.subTest(terrain=value), self.assertRaises(ValueError):
                 compile_authoring(document)
+
+    def test_external_heightfield_preserves_geometry_visibility_and_native_request(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "scenarios"
+        inline = load_scenario(root / "heightfield.json")
+        external = load_scenario(root / "heightfield_asset.json")
+        terrain = external.scene_definition.terrain
+        self.assertEqual(terrain.heightfield_asset_uri, "assets/ridge.json")
+        self.assertEqual(
+            replace(terrain, heightfield_asset_uri=None, heightfield_asset_digest=None),
+            inline.scene_definition.terrain,
+        )
+        from chongming.rendering.metal import _entities
+
+        snapshots = []
+        for spec in (inline, external):
+            logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
+            logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
+            snapshots.append([
+                logic.sample(scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, t, i))
+                for i, t in enumerate((0, 11_000_000_000))
+            ])
+        for first, second in zip(*snapshots, strict=True):
+            self.assertEqual(first.target_visibility, second.target_visibility)
+            self.assertEqual(_entities(first), _entities(second))
+
+    def test_external_heightfield_uses_document_directory_and_explicit_asset_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = root / "assets"
+            assets.mkdir()
+            asset = assets / "ridge grid.json"
+            content = b'{"heights_m": [[0, 1], [2, 3]]}'
+            asset.write_bytes(content)
+            document = demo_authoring(duration_s=1)
+            document["terrain"] = {
+                "type": "heightfield",
+                "asset": {
+                    "uri": "assets/ridge%20grid.json",
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                },
+            }
+            path = root / "scene.json"
+            save_authoring(document, path)
+            relative = load_scenario(path)
+            moved = root / "elsewhere" / "scene.json"
+            save_authoring(document, moved)
+            explicit = load_scenario(moved, asset_root=root)
+            self.assertEqual(relative, explicit)
+            with self.assertRaises(FileNotFoundError):
+                load_scenario(moved)
+            document["terrain"]["asset"]["uri"] = asset.as_uri()
+            absolute = compile_authoring(document, asset_root=root)
+            self.assertEqual(relative.scene_definition.terrain.heightfield_geometry,
+                             absolute.scene_definition.terrain.heightfield_geometry)
+
+    def test_external_heightfield_rejects_ambiguous_or_nonlocal_references(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "scenarios"
+        original = json.loads((root / "heightfield_asset.json").read_text())
+        invalid = [
+            {"heights_m": [[0, 0], [0, 0]]},
+            {"asset": None},
+            {"asset": {"uri": "assets/ridge.json"}},
+            {"asset": {"uri": "assets/ridge.json", "sha256": "bad"}},
+            {"asset": {**original["terrain"]["asset"], "ignored": True}},
+        ]
+        for uri in ("https://example.com/grid.json", "file://host/grid.json", "",
+                    "assets/ridge.json?version=1", "assets/ridge.json#grid"):
+            invalid.append({"asset": {**original["terrain"]["asset"], "uri": uri}})
+        for update in invalid:
+            document = deepcopy(original)
+            document["terrain"].update(update)
+            with self.subTest(update=update), self.assertRaises((ValueError, TypeError)):
+                compile_authoring(document, asset_root=root)
+        del original["terrain"]["asset"]
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            compile_authoring(original, asset_root=root)
+
+    def test_external_heightfield_validates_verified_grid_before_runtime(self) -> None:
+        invalid = (
+            b"not json", b"\xff", b"[]", b"{}",
+            b'{"heights_m": [[0, 1], [2, 3]], "ignored": 1}',
+            b'{"heights_m": [[0, 1], [2]]}',
+            b'{"heights_m": [[0, 1], [-1, 3]]}',
+            b'{"heights_m": [[0, 1], [true, 3]]}',
+            b'{"heights_m": [[0, 1], [NaN, 3]]}',
+            b'{"heights_m": [[0, 1], [Infinity, 3]]}',
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            asset = root / "grid.json"
+            document = demo_authoring(duration_s=1)
+            for content in invalid:
+                asset.write_bytes(content)
+                document["terrain"] = {
+                    "type": "heightfield",
+                    "asset": {"uri": asset.name, "sha256": hashlib.sha256(content).hexdigest()},
+                }
+                with self.subTest(content=content), self.assertRaises((ValueError, TypeError)):
+                    compile_authoring(document, asset_root=root)
+            asset.write_bytes(b'{"heights_m": [[0, 1], [2, 3]]}')
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                compile_authoring(document, asset_root=root)
+            with self.assertRaisesRegex(ValueError, "asset_root"):
+                compile_authoring(document)
+
+    def test_external_heightfield_parses_the_same_bytes_that_were_verified(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "scenarios"
+        original = (root / "assets/ridge.json").read_bytes()
+        # A changing file must not be re-read between digest validation and parsing.
+        document = json.loads((root / "heightfield_asset.json").read_text())
+        with patch.object(Path, "read_bytes", side_effect=[original, b"tampered"]) as read:
+            compiled = compile_authoring(document, asset_root=root)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(compiled.scene_definition.terrain.maximum_relief_m, 16)
 
     def test_crossing_scene_uses_constant_velocity_with_custom_ids(self) -> None:
         spec = load_scenario(Path(__file__).resolve().parents[1] / "scenarios/constant_velocity.json")

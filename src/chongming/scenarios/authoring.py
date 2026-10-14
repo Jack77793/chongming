@@ -17,6 +17,7 @@ from typing import Any
 from chongming.contracts import model as m
 from chongming.contracts import scene as s
 from chongming.contracts.scene import BehaviorId
+from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
 from chongming.scenarios.demo import demo_spec, hold, optical_rotation, orbit_path, state
 
 AUTHORING_FORMAT = "scenario-authoring-v2"
@@ -106,7 +107,7 @@ def _geometry(value: dict[str, Any]) -> s.GeometrySpec:
     raise ValueError(f"unsupported authoring geometry type: {kind!r}")
 
 
-def _terrain(value: Any, base: s.TerrainSpec) -> s.TerrainSpec:
+def _terrain(value: Any, base: s.TerrainSpec, asset_root: Path | None) -> s.TerrainSpec:
     if value is None:
         return base
     if not isinstance(value, dict):
@@ -114,7 +115,7 @@ def _terrain(value: Any, base: s.TerrainSpec) -> s.TerrainSpec:
     kind = value.get("type", "flat")
     _fields(
         value,
-        {"type"} if kind == "flat" else {"type", "origin_enu_m", "spacing_m", "heights_m"},
+        {"type"} if kind == "flat" else {"type", "origin_enu_m", "spacing_m", "heights_m", "asset"},
         "terrain",
     )
     if kind == "flat":
@@ -125,7 +126,24 @@ def _terrain(value: Any, base: s.TerrainSpec) -> s.TerrainSpec:
     spacing = _number(value.get("spacing_m", 10.0), "terrain.spacing_m")
     if spacing <= 0:
         raise ValueError("terrain.spacing_m must be positive")
-    heights = value.get("heights_m")
+    if ("heights_m" in value) == ("asset" in value):
+        raise ValueError("heightfield requires exactly one of heights_m or asset")
+    asset_uri, asset_digest = None, None
+    if "asset" in value:
+        asset = _fields(value["asset"], {"uri", "sha256"}, "terrain.asset")
+        asset_uri = _identifier(_required(asset, "uri"), "terrain.asset.uri")
+        asset_digest = _identifier(_required(asset, "sha256"), "terrain.asset.sha256")
+        if asset_root is None:
+            raise ValueError("compiling external terrain requires asset_root")
+        content = read_verified_asset(resolve_external_asset(asset_uri, asset_root), asset_digest)
+        try:
+            grid = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ValueError(f"invalid heightfield asset JSON: {error}") from error
+        grid = _fields(grid, {"heights_m"}, "heightfield asset")
+        heights = _required(grid, "heights_m")
+    else:
+        heights = value["heights_m"]
     if not isinstance(origin, list) or len(origin) != 2 or not isinstance(heights, list):
         raise ValueError("heightfield requires origin_enu_m and heights_m")
     if any(not isinstance(row, list) for row in heights):
@@ -160,6 +178,8 @@ def _terrain(value: Any, base: s.TerrainSpec) -> s.TerrainSpec:
         maximum_relief_m=max(vertex[2] for vertex in vertices),
         heightfield_geometry=geometry,
         heightfield_origin_enu_m=(east, north),
+        heightfield_asset_uri=asset_uri,
+        heightfield_asset_digest=asset_digest,
     )
 
 
@@ -263,7 +283,9 @@ def _target(spec: s.FlyingObjectSpec, document: dict[str, Any]) -> s.FlyingObjec
     )
 
 
-def compile_authoring(document: dict[str, Any]) -> s.ScenarioSpec:
+def compile_authoring(
+    document: dict[str, Any], *, asset_root: Path | None = None
+) -> s.ScenarioSpec:
     """Compile a semantic authoring document into the strict runtime model."""
     if set(document) - {
         "format",
@@ -490,7 +512,7 @@ def compile_authoring(document: dict[str, Any]) -> s.ScenarioSpec:
         timeline=replace(spec.timeline, end_time_ns=round(duration_s * 1e9) - 1),
         scene_definition=replace(
             spec.scene_definition,
-            terrain=_terrain(document.get("terrain"), spec.scene_definition.terrain),
+            terrain=_terrain(document.get("terrain"), spec.scene_definition.terrain, asset_root),
         ),
     )
     spec = replace(
@@ -509,14 +531,14 @@ def compile_authoring(document: dict[str, Any]) -> s.ScenarioSpec:
     return spec
 
 
-def load_authoring(path: Path) -> s.ScenarioSpec:
+def load_authoring(path: Path, *, asset_root: Path | None = None) -> s.ScenarioSpec:
     try:
         document = json.loads(path.read_text())
     except json.JSONDecodeError as error:
         raise ValueError(f"invalid authoring JSON: {error}") from error
     if not isinstance(document, dict):
         raise TypeError("authoring JSON root must be an object")
-    return compile_authoring(document)
+    return compile_authoring(document, asset_root=asset_root if asset_root is not None else path.parent)
 
 
 def save_authoring(document: dict[str, Any], path: Path) -> None:
