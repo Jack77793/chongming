@@ -1,0 +1,29 @@
+{
+  "format": "scenario-authoring-v2",
+  "scenario_id": "crossing-targets",
+  "random_seed": 42,
+  "duration_s": 12,
+  "fps": 30,
+  "stations": [
+    {"id": "west", "position_enu_m": [-10, -22, 4]},
+    {"id": "east", "position_enu_m": [2, -22, 4]}
+  ],
+  "targets": [
+    {
+      "id": "eastbound", "display_name": "向东运动的球体",
+      "geometry": {"type": "sphere", "radius_m": 1.25},
+      "motion": {
+        "type": "constant_velocity",
+        "position_enu_m": [-18, 62, 20], "velocity_enu_mps": [3, 0, 0]
+      }
+    },
+    {
+      "id": "westbound", "display_name": "向西运动的飞行器",
+      "geometry": {"type": "aircraft"},
+      "motion": {
+        "type": "constant_velocity",
+        "position_enu_m": [18, 62, 20], "velocity_enu_mps": [-3, 0, 0]
+      }
+    }
+  ]
+}

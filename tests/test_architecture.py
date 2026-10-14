@@ -218,6 +218,7 @@ class ArchitectureStructureTests(unittest.TestCase):
             "CameraImagingModule",
             "VirtualObservationModule",
             "ScenarioModule",
+            "EventSequencerModule",
         }
         checked_methods = 0
         for source in module_directory.glob("*.py"):

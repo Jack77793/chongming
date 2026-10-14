@@ -8,7 +8,7 @@ The immutable objects below describe data, and perform no simulation or renderin
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import NewType
 
@@ -184,6 +184,8 @@ class TerrainSpec:
     heightfield_asset_digest: str | None
     appearance: SurfaceAppearance
     occludes_sight_lines: bool
+    heightfield_geometry: TriangleMeshGeometry | None = None
+    heightfield_origin_enu_m: tuple[float, float] | None = None
 
 
 class WorldObjectKind(StrEnum):
@@ -617,6 +619,7 @@ class FrameImagingInput:
     capture_time: CaptureTime
     online_camera_config_digest: ConfigDigest
     exposure_samples: tuple[LogicalSceneSnapshot, ...]
+    sampling_period_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -654,6 +657,7 @@ class CameraFrameTruth:
     actual_camera: CameraStateTruth
     targets: tuple[ProjectedTargetTruth, ...]
     landmarks: tuple[ProjectedLandmarkTruth, ...]
+    sampling_period_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -705,6 +709,9 @@ class ScenarioVideoOutput:
     scenario_id: str
     sample_time: SimulationTime
     frames: tuple[CameraFrame, ...]
+    rendered: bool = True
+    render_skip_reason: str | None = None
+    skipped_frame_ids: tuple[FrameId, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -730,6 +737,29 @@ class ScenarioTruthOutput:
     camera_frames: tuple[CameraFrameTruth, ...]
     online_correspondences: tuple[OnlineTruthCorrespondence, ...]
     experiment_perturbations: ExperimentPerturbations
+    rays: tuple[TruthRay, ...] = ()
+    timing: ScenarioStepTiming | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class TruthRay:
+    station_id: StationId
+    truth_object_id: TruthObjectId
+    origin_enu_m: Vec3M
+    direction_enu_unit: Vec3
+
+
+@dataclass(frozen=True)
+class ScenarioStepTiming:
+    """Measured processing wall durations, excluding consumer I/O and pacing."""
+
+    logic_ms: float
+    frame_truth_ms: float
+    render_ms: float
+    virtual_ms: float
+    total_ms: float
+    gpu_ms: float
+    gpu_submissions: int
 
 
 @dataclass(frozen=True)

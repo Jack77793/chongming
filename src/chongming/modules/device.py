@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from itertools import count
 
 from chongming.contracts.device import (
     CalibrationAttempt,
@@ -57,9 +59,21 @@ class EventSequencerModule(ModuleShell):
     station_id: StationId
     station_session_id: SessionId
     schema_version: str
+    _sequence: Iterator[int] = field(
+        default_factory=lambda: count(1), init=False, repr=False, compare=False
+    )
 
     def next_envelope(self, event_type: EventType, config_digest: ConfigDigest) -> EventEnvelope:
-        raise NotImplementedError(_TODO)
+        if not self.schema_version:
+            raise ValueError("event schema version cannot be empty")
+        return EventEnvelope(
+            schema_version=self.schema_version,
+            event_type=event_type,
+            station_id=self.station_id,
+            station_session_id=self.station_session_id,
+            sequence_no=next(self._sequence),
+            station_config_digest=config_digest,
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

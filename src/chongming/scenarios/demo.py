@@ -49,34 +49,55 @@ def hold(pose: s.KinematicState) -> s.TrajectorySpec:
     return s.TrajectorySpec(s.TrajectoryInterpolation.HOLD, (s.TrajectoryKnot(0, pose),))
 
 
-def flight_path(phase: float, height: float) -> s.TrajectorySpec:
+def orbit_path(
+    center: m.Vec3,
+    radius: float,
+    period_s: float,
+    phase: float,
+    vertical_amplitude: float = 2.0,
+) -> s.TrajectorySpec:
+    if period_s <= 0 or radius <= 0:
+        raise ValueError("orbit period and radius must be positive")
     knots = []
-    omega = 2 * math.pi / (DURATION_NS / 1e9)
+    period_ns = round(period_s * 1e9)
+    omega = 2 * math.pi / period_s
     for index in range(17):
         angle = phase + 2 * math.pi * index / 16
         position = (
-            22 * math.sin(angle),
-            62 + 8 * math.cos(angle),
-            height + 2 * math.sin(2 * angle),
+            center[0] + radius * math.sin(angle),
+            center[1] + radius * math.cos(angle),
+            center[2] + vertical_amplitude * math.sin(2 * angle),
         )
         velocity = (
-            22 * omega * math.cos(angle),
-            -8 * omega * math.sin(angle),
-            4 * omega * math.cos(2 * angle),
+            radius * omega * math.cos(angle),
+            -radius * omega * math.sin(angle),
+            2 * vertical_amplitude * omega * math.cos(2 * angle),
         )
         knots.append(
-            s.TrajectoryKnot(index * DURATION_NS // 16, state(position, velocity=velocity))
+            s.TrajectoryKnot(index * period_ns // 16, state(position, velocity=velocity))
         )
     return s.TrajectorySpec(s.TrajectoryInterpolation.CUBIC_HERMITE, tuple(knots))
 
 
-def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) -> s.ScenarioSpec:
+def flight_path(phase: float, height: float) -> s.TrajectorySpec:
+    return orbit_path((0.0, 62.0, height), 22.0, DURATION_NS / 1e9, phase)
+
+
+def demo_spec(
+    *,
+    station_count: int = 1,
+    fps: int = 30,
+    station_positions: tuple[m.Vec3, ...] | None = None,
+    station_ids: tuple[str, ...] | None = None,
+) -> s.ScenarioSpec:
     if not 1 <= station_count <= 4:
         raise ValueError("demo station count must be between 1 and 4")
     if not 1 <= fps <= 60:
         raise ValueError("fps must be between 1 and 60")
-    if baseline:
-        fps = 30
+    if station_positions is not None and len(station_positions) != station_count:
+        raise ValueError("station_positions must match station_count")
+    if station_ids is not None and len(station_ids) != station_count:
+        raise ValueError("station_ids must match station_count")
     world_id = m.WorldFrameId("demo-enu")
     anchor = m.GeodeticAnchor(
         anchor_id="demo-anchor",
@@ -196,8 +217,12 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
     )
     cameras, devices, configs = [], [], []
     for index in range(station_count):
-        sid = m.StationId(f"station-{index + 1:02d}")
-        position = (-10.0 + 12.0 * index, -22.0, 4.0)
+        position = (
+            station_positions[index]
+            if station_positions is not None
+            else (-10.0 + 12.0 * index, -22.0, 4.0)
+        )
+        sid = m.StationId(station_ids[index] if station_ids is not None else f"station-{index + 1:02d}")
         main_yaw = math.atan2(-position[0], 84.0)
         main_rotation = optical_rotation(main_yaw, math.radians(9.0))
         aux_yaw = math.atan2(-10.0 - position[0], 44.0)
@@ -207,11 +232,7 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
             (m.CameraRole.MAIN, main_rotation, 60.0),
             (m.CameraRole.AUXILIARY, aux_rotation, 20.0),
         ):
-            width, height = (
-                ((1920, 1080) if role is m.CameraRole.MAIN else (640, 480))
-                if baseline
-                else ((640, 360) if role is m.CameraRole.MAIN else (320, 240))
-            )
+            width, height = (1920, 1080) if role is m.CameraRole.MAIN else (640, 480)
             focal = math.hypot(width, height) / (2 * math.tan(math.radians(fov / 2)))
             cid = s.CameraId(f"{sid}-{role.value}")
             intrinsics = s.SceneCameraIntrinsics(
@@ -223,7 +244,7 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
                 s.CameraMetadata(
                     cid,
                     "主相机" if role is m.CameraRole.MAIN else "辅助相机",
-                    "baseline-v1" if baseline else "experimental-preview-v1",
+                    "standard-v1",
                     "1/4 inch",
                     3.0,
                     fov,
@@ -268,7 +289,7 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
             )
         )
         digest = m.ConfigDigest(
-            f"demo-config-{index}-{'baseline' if baseline else 'preview'}-{fps}"
+            f"demo-config-{index}-standard-{fps}"
         )
         # Auxiliary-from-main is a genuine rigid transform, not a copy of either pose.
         rotation_aux_from_main: m.Matrix3x3 = tuple(  # type: ignore[assignment]
@@ -323,7 +344,7 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
     return s.ScenarioSpec(
         "scene-v1",
         "video-demo",
-        m.ConfigDigest(f"demo-v1-{baseline}-{station_count}-{fps}"),
+        m.ConfigDigest(f"demo-v1-standard-{station_count}-{fps}"),
         42,
         world_id,
         m.VoxelSearchSpec(
@@ -364,9 +385,7 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
         s.ImagingSpec(
             "linear-rgb",
             1,
-            s.SensorArtifactSpec(
-                m.PixelFormat.RGB8, 0.0, 0.0, 1.0, False, None, None, False, None
-            ),
+            s.SensorArtifactSpec(m.PixelFormat.RGB8, 0.0, 0.0, 1.0, False, None, None, False, None),
         ),
         s.VirtualObservationSpec(
             1.0,
@@ -380,13 +399,24 @@ def demo_spec(*, baseline: bool = False, station_count: int = 1, fps: int = 15) 
                 maximum=1.0,
                 cross_station_comparison_group=None,
             ),
-            (),
+            tuple(
+                s.VirtualCalibrationInterval(
+                    station_id=config.station_id,
+                    start_time_ns=0,
+                    end_time_ns=DURATION_NS,
+                    health=m.CalibrationHealth.VALID,
+                    correction_error_camera_rad=(0.0, 0.0, 0.0),
+                    correction_covariance_rad2=ZERO_COVARIANCE,
+                    reason_codes=("virtual_clean_baseline",),
+                )
+                for config in configs
+            ),
         ),
         s.ExperimentPerturbations((), (), None, (), None, None, (), ()),
     )
 
 
-def demo_source(spec: s.ScenarioSpec) -> ScenarioModule:
+def demo_source(spec: s.ScenarioSpec, *, render_every: int = 1) -> ScenarioModule:
     """Fresh sessions per launch/replay; all frame contents remain deterministic."""
     sessions = tuple(
         m.StationSessionBinding(
@@ -411,4 +441,5 @@ def demo_source(spec: s.ScenarioSpec) -> ScenarioModule:
         CameraImagingModule(),
         VirtualObservationModule(sequencers),
         sessions,
+        render_every=render_every,
     )

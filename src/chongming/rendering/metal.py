@@ -28,7 +28,6 @@ from chongming.contracts.scene import (
     KinematicState,
     LogicalSceneSnapshot,
     SphereGeometry,
-    TerrainModel,
     TriangleMeshGeometry,
 )
 
@@ -76,6 +75,17 @@ def _entity(
 
 def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
+    terrain = scene.terrain
+    if terrain.heightfield_geometry is not None and terrain.heightfield_origin_enu_m is not None:
+        east, north = terrain.heightfield_origin_enu_m
+        terrain_pose = KinematicState(
+            position_enu_m=(east, north, terrain.base_elevation_m),
+            velocity_enu_mps=(0.0, 0.0, 0.0),
+            rotation_enu_from_body=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+            angular_velocity_body_radps=(0.0, 0.0, 0.0),
+        )
+        entities.append(_entity(2, terrain_pose.position_enu_m, terrain_pose,
+                                terrain.heightfield_geometry, terrain.appearance))
     for world_item in scene.world_objects:
         entities.append(
             _entity(
@@ -200,8 +210,6 @@ def _request(
 ) -> dict[str, Any]:
     if camera.actual_distortion.model.value != "none":
         raise ValueError("Metal renderer currently requires a distortion-free camera")
-    if scene.terrain.model is not TerrainModel.FLAT:
-        raise ValueError("Metal renderer currently requires flat terrain")
     i = camera.actual_intrinsics
     if min(i.image_width_px, i.image_height_px, i.focal_x_px, i.focal_y_px) <= 0:
         raise ValueError("camera dimensions and focal lengths must be positive")

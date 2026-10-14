@@ -23,11 +23,12 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--preview", choices=("none", "selected", "all"), default="selected")
+    parser.add_argument("--render-every", type=int, default=1)
     args = parser.parse_args()
-    if args.samples < 1 or args.warmup < 1:
+    if args.samples < 1 or args.warmup < 1 or args.render_every < 1:
         parser.error("samples and warmup must be positive")
-    spec = demo_spec(baseline=True, station_count=args.stations)
-    source = demo_source(spec)
+    spec = demo_spec(station_count=args.stations, fps=30)
+    source = demo_source(spec, render_every=args.render_every)
     steps = iter(source.generate(spec))
     rows: list[dict[str, float]] = []
     try:
@@ -48,8 +49,10 @@ def main() -> None:
             finished = time.perf_counter()
             if index < args.warmup:
                 continue
-            gpu = source.imager.last_gpu_render_ms
-            overhead = source.imager.last_imager_overhead_ms
+            timing = step.truth.timing
+            assert timing is not None
+            gpu = timing.gpu_ms
+            overhead = max(0.0, timing.render_ms - gpu)
             generation = (generated - began) * 1000
             rows.append(
                 {
@@ -61,6 +64,11 @@ def main() -> None:
                     "png_base64_ms": (encoded - metadata_done) * 1000,
                     "json_ms": (finished - encoded) * 1000,
                     "serial_total_ms": (finished - began) * 1000,
+                    "rendered": float(step.video.rendered),
+                    "gpu_submissions": float(timing.gpu_submissions),
+                    "logic_ms": timing.logic_ms,
+                    "frame_truth_ms": timing.frame_truth_ms,
+                    "virtual_ms": timing.virtual_ms,
                 }
             )
     finally:
@@ -69,10 +77,13 @@ def main() -> None:
         json.dumps(
             {
                 "host": platform.platform(),
-                "profile": "baseline-v1: 1920x1080 + 640x480 per station; RGB8",
+                "profile": "standard-v1: 1920x1080 + 640x480 per station; RGB8",
                 "stations": args.stations,
                 "preview": args.preview,
                 "samples": len(rows),
+                "render_every": args.render_every,
+                "gpu_submissions": int(sum(row["gpu_submissions"] for row in rows)),
+                "rendered_steps": int(sum(row["rendered"] for row in rows)),
                 "mean_ms": {
                     key: round(statistics.mean(row[key] for row in rows), 2) for key in rows[0]
                 },
@@ -80,6 +91,31 @@ def main() -> None:
                     round(min(row["generation_ms"] for row in rows), 2),
                     round(max(row["generation_ms"] for row in rows), 2),
                 ],
+                "generation_tail_ms": {
+                    "p50": round(statistics.median(row["generation_ms"] for row in rows), 2),
+                    "p95": round(
+                        sorted(row["generation_ms"] for row in rows)[
+                            max(0, (95 * len(rows) + 99) // 100 - 1)
+                        ],
+                        2,
+                    ),
+                    "max": round(max(row["generation_ms"] for row in rows), 2),
+                },
+                "rendered_generation_tail_ms": {
+                    "p50": round(
+                        statistics.median(row["generation_ms"] for row in rows if row["rendered"]),
+                        2,
+                    ),
+                    "p95": round(
+                        sorted(row["generation_ms"] for row in rows if row["rendered"])[
+                            max(0, (95 * sum(int(row["rendered"]) for row in rows) + 99) // 100 - 1)
+                        ],
+                        2,
+                    ),
+                    "max": round(max(row["generation_ms"] for row in rows if row["rendered"]), 2),
+                }
+                if any(row["rendered"] for row in rows)
+                else None,
             },
             ensure_ascii=False,
             indent=2,

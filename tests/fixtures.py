@@ -141,7 +141,7 @@ def architecture_specs(
             metadata=scene.CameraMetadata(
                 camera_id=scene.CameraId(f"{config.station_id}-{role.value}-camera"),
                 display_name=f"{config.station_id}-{role.value}",
-                profile_id="structural-profile",
+                profile_id="experimental-structural",
                 sensor_format="structural",
                 lens_focal_length_mm=3.0,
                 nominal_diagonal_fov_deg=60.0 if role is model.CameraRole.MAIN else 20.0,

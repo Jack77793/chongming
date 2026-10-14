@@ -98,6 +98,10 @@ class CameraImager(Protocol):
         """Render ordinary frames and a separate privileged frame-truth batch."""
         ...
 
+    def describe(self, request: ImageGenerationRequest) -> ImagingTruthBatch:
+        """Build frame truth without submitting pixel work to the renderer."""
+        ...
+
 
 class VirtualObservationGenerator(Protocol):
     def generate(

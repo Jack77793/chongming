@@ -8,21 +8,46 @@ consulted.
 
 from __future__ import annotations
 
+import hashlib
+import heapq
+import math
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
+from time import perf_counter
 
 import numpy as np
 
 from chongming.contracts.model import (
+    CalibrationHealth,
+    CalibrationQuality,
+    CalibrationSolution,
+    CalibrationSolutionId,
+    CalibrationSolutionRef,
+    CalibrationState,
+    CalibrationStateEvent,
+    CalibrationUsage,
+    CalibrationUseEvidence,
     CameraFrame,
     CameraRole,
     CaptureTime,
+    DiagnosticEvent,
+    EventEnvelope,
+    EventId,
+    EventType,
     FrameId,
+    FrameRef,
     ImagePlane,
+    LocalTrackId,
     Matrix3x3,
     PixelFormat,
+    ProcessingTime,
+    RayEvent,
+    RayUncertainty,
+    StationConfig,
+    StationId,
     StationSessionBinding,
+    TimeInterval,
     Vec3M,
 )
 from chongming.contracts.scene import (
@@ -44,6 +69,7 @@ from chongming.contracts.scene import (
     MonitoringSnapshot,
     MonitoringSpec,
     OnlineEvaluationData,
+    OnlineTruthCorrespondence,
     ProjectedLandmarkTruth,
     ProjectedTargetTruth,
     ProjectionTruth,
@@ -51,6 +77,7 @@ from chongming.contracts.scene import (
     ScenarioPacketOutput,
     ScenarioSpec,
     ScenarioStep,
+    ScenarioStepTiming,
     ScenarioTruth,
     ScenarioTruthOutput,
     ScenarioVideoOutput,
@@ -60,10 +87,11 @@ from chongming.contracts.scene import (
     SightSegment,
     SimulationTime,
     TargetVisibilityTruth,
-    TerrainModel,
     TerrainSpec,
     TimelineSpec,
     TrajectorySpec,
+    TruthRay,
+    VirtualCalibrationInterval,
     VirtualObservationBatch,
     VirtualObservationRequest,
     VirtualObservationTruthBatch,
@@ -82,6 +110,7 @@ from chongming.ports.scene import (
 )
 from chongming.rendering.geometry import contains_point, surface_hits
 from chongming.rendering.metal import projected_footprints, quantize_rgb8, render_rgb8
+from chongming.scenarios.behaviors import sample_behavior
 
 _EPS = 1e-9
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
@@ -99,17 +128,33 @@ def exposure_sample_times(capture: CaptureTime, count: int) -> tuple[int, ...]:
     )
 
 
-def _group_exposures(
-    exposures: list[tuple[int, SceneCameraSpec]],
+def _scheduled_exposures(
+    cameras: tuple[SceneCameraSpec, ...],
+    timeline: TimelineSpec,
 ) -> Iterator[tuple[int, list[tuple[int, SceneCameraSpec]]]]:
-    index = 0
-    while index < len(exposures):
-        midpoint = exposures[index][0]
-        end = index + 1
-        while end < len(exposures) and exposures[end][0] == midpoint:
-            end += 1
-        yield midpoint, exposures[index:end]
-        index = end
+    """One pending exposure per camera, independent of experiment duration."""
+    ordered = sorted(cameras, key=lambda c: (str(c.station_id), c.camera_role.value))
+    pending: list[tuple[int, int]] = []
+    for index, camera in enumerate(ordered):
+        midpoint = (
+            camera.exposure.first_exposure_start_ns + camera.exposure.exposure_duration_ns // 2
+        )
+        period = camera.exposure.frame_period_ns
+        if midpoint < timeline.start_time_ns:
+            midpoint += ((timeline.start_time_ns - midpoint + period - 1) // period) * period
+        if midpoint <= timeline.end_time_ns:
+            heapq.heappush(pending, (midpoint, index))
+    while pending:
+        midpoint = pending[0][0]
+        group: list[tuple[int, SceneCameraSpec]] = []
+        while pending and pending[0][0] == midpoint:
+            _, index = heapq.heappop(pending)
+            camera = ordered[index]
+            group.append((midpoint, camera))
+            following = midpoint + camera.exposure.frame_period_ns
+            if following <= timeline.end_time_ns:
+                heapq.heappush(pending, (following, index))
+        yield midpoint, group
 
 
 def _sub(a: Vec3M, b: Vec3M) -> Vec3M:
@@ -175,6 +220,49 @@ def _mat_mul(left: Matrix3x3, right: Matrix3x3) -> Matrix3x3:
             sum(left[2][k] * right[k][2] for k in range(3)),
         ),
     )
+
+
+def _unit(vector: Vec3M) -> Vec3M:
+    length = math.sqrt(_dot(vector, vector))
+    if not math.isfinite(length) or length <= _EPS:
+        raise ValueError("cannot normalize a zero or non-finite vector")
+    return (vector[0] / length, vector[1] / length, vector[2] / length)
+
+
+def _cross(left: Vec3M, right: Vec3M) -> Vec3M:
+    return (
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    )
+
+
+def _tangent_basis(direction: Vec3M) -> tuple[Vec3M, Vec3M]:
+    reference: Vec3M = (0.0, 0.0, 1.0) if abs(direction[2]) < 0.9 else (0.0, 1.0, 0.0)
+    tangent_u = _unit(_cross(reference, direction))
+    tangent_v = _unit(_cross(direction, tangent_u))
+    return tangent_u, tangent_v
+
+
+def _estimated_rotation(actual: Matrix3x3, error_camera_rad: Vec3M) -> Matrix3x3:
+    approximate = np.asarray(_mat_mul(actual, _rotation_from_small_angle(error_camera_rad)))
+    left, _, right = np.linalg.svd(approximate)
+    rotation = left @ right
+    if np.linalg.det(rotation) < 0:
+        left[:, -1] *= -1
+        rotation = left @ right
+    return tuple(tuple(float(value) for value in row) for row in rotation)  # type: ignore[return-value]
+
+
+def _deterministic_unit_interval(seed: int, key: str) -> float:
+    digest = hashlib.sha256(f"{seed}:{key}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def _deterministic_poisson(seed: int, key: str, expected_count: float) -> int:
+    digest = hashlib.sha256(f"{seed}:{key}".encode()).digest()
+    generator = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+    return int(generator.poisson(expected_count))
 
 
 class ExperimentClockModule(ModuleShell):
@@ -505,18 +593,32 @@ class VisibilityModule(ModuleShell):
         if object_id is None:
             return None
         if isinstance(entity, TerrainSpec):
-            if entity.model is not TerrainModel.FLAT:
-                raise ValueError("visibility currently requires flat terrain")
+            candidates: list[tuple[float, SegmentOcclusionTruth]] = []
             if origin[2] < entity.base_elevation_m:
-                return 0.0, SegmentOcclusionTruth(object_id, origin, 0.0)
-            if abs(segment[2]) <= _EPS:
-                return None
-            fraction = (entity.base_elevation_m - origin[2]) / segment[2]
-            if 0.0 < fraction < 1.0:
-                return fraction, SegmentOcclusionTruth(
-                    object_id, _add(origin, _scale(segment, fraction)), fraction
+                candidates.append((0.0, SegmentOcclusionTruth(object_id, origin, 0.0)))
+            elif abs(segment[2]) > _EPS:
+                fraction = (entity.base_elevation_m - origin[2]) / segment[2]
+                if 0.0 < fraction < 1.0:
+                    candidates.append((fraction, SegmentOcclusionTruth(
+                        object_id, _add(origin, _scale(segment, fraction)), fraction
+                    )))
+            if entity.heightfield_geometry is not None and entity.heightfield_origin_enu_m is not None:
+                east, north = entity.heightfield_origin_enu_m
+                terrain_pose = KinematicState(
+                    (east, north, entity.base_elevation_m), (0.0, 0.0, 0.0),
+                    ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                    (0.0, 0.0, 0.0),
                 )
-            return None
+                depths, _ = surface_hits(
+                    origin, np.asarray([segment], dtype=np.float64), terrain_pose,
+                    entity.heightfield_geometry,
+                )
+                fraction = float(depths[0])
+                if 0.0 < fraction < 1.0 - _EPS:
+                    candidates.append((fraction, SegmentOcclusionTruth(
+                        object_id, _add(origin, _scale(segment, fraction)), fraction
+                    )))
+            return min(candidates, key=lambda item: item[0]) if candidates else None
         if pose is None or geometry is None:
             return None
         if contains_point(origin, pose, geometry):
@@ -605,6 +707,11 @@ class SceneLogicModule(ModuleShell):
         flying_objects: list[FlyingObjectTruth] = []
         for object_spec in scene.flying_objects:
             state = self.trajectory_sampler.sample(object_spec.trajectory, time)
+            if object_spec.behavior is not None:
+                first = object_spec.trajectory.knots[0]
+                state = sample_behavior(
+                    object_spec.behavior, first.state, time.time_ns - first.time_ns
+                )
             center = _add(
                 state.position_enu_m,
                 _mat_vec(state.rotation_enu_from_body, object_spec.center_reference_point_body_m),
@@ -669,14 +776,83 @@ class SceneLogicModule(ModuleShell):
         )
 
 
+def _frame_truth(frame: FrameImagingInput, scene: LogicalSceneSnapshot) -> CameraFrameTruth:
+    """Build privileged frame truth without invoking the pixel renderer."""
+    camera = next(
+        (
+            item
+            for item in scene.cameras
+            if item.station_id == frame.station_id and item.camera_role is frame.camera_role
+        ),
+        None,
+    )
+    if camera is None:
+        raise ValueError("frame has no matching actual camera state")
+    footprints = projected_footprints(scene, camera)
+    target_truth: list[ProjectedTargetTruth] = []
+    for target_visibility in scene.target_visibility:
+        if (
+            target_visibility.station_id != frame.station_id
+            or target_visibility.camera_role is not frame.camera_role
+        ):
+            continue
+        target = next(
+            item
+            for item in scene.flying_objects
+            if item.truth_object_id == target_visibility.truth_object_id
+        )
+        target_truth.append(
+            ProjectedTargetTruth(
+                truth_object_id=target.truth_object_id,
+                projection=target_visibility.projection,
+                visibility=target_visibility,
+                projected_width_px=footprints.get(str(target.truth_object_id), (None, None))[0],
+                projected_height_px=footprints.get(str(target.truth_object_id), (None, None))[1],
+            )
+        )
+    landmark_truth: list[ProjectedLandmarkTruth] = []
+    for landmark_visibility in scene.landmark_visibility:
+        if (
+            landmark_visibility.station_id != frame.station_id
+            or landmark_visibility.camera_role is not frame.camera_role
+        ):
+            continue
+        landmark = next(
+            item
+            for item in scene.reference_landmarks
+            if item.landmark_id == landmark_visibility.landmark_id
+        )
+        landmark_truth.append(
+            ProjectedLandmarkTruth(
+                landmark_id=landmark.landmark_id,
+                position_enu_m=landmark.position_enu_m,
+                projection=landmark_visibility.projection,
+                visibility=landmark_visibility,
+            )
+        )
+    return CameraFrameTruth(
+        station_id=frame.station_id,
+        station_session_id=frame.station_session_id,
+        camera_role=frame.camera_role,
+        frame_id=frame.frame_id,
+        capture_time=frame.capture_time,
+        actual_camera=camera,
+        targets=tuple(target_truth),
+        landmarks=tuple(landmark_truth),
+        sampling_period_ns=frame.sampling_period_ns,
+    )
+
+
 class CameraImagingModule(ModuleShell):
     def __init__(self) -> None:
         self.last_gpu_render_ms = 0.0
         self.last_imager_overhead_ms = 0.0
+        self.last_gpu_submissions = 0
 
     def render(self, request: ImageGenerationRequest) -> tuple[ImagingBatch, ImagingTruthBatch]:
         self.last_gpu_render_ms = 0.0
         self.last_imager_overhead_ms = 0.0
+        self.last_gpu_submissions = 0
         render_started = time.perf_counter()
         artifacts = request.imaging_spec.sensor_artifacts
         if artifacts.output_pixel_format is not PixelFormat.RGB8:
@@ -714,7 +890,6 @@ class CameraImagingModule(ModuleShell):
             )
             if any(time not in samples for time in integration_times):
                 raise ValueError("frame is missing a configured sub-exposure sample")
-            footprints = projected_footprints(scene, camera)
             sample_buffers: list[bytes] = []
             for sample_time in integration_times:
                 sample = samples[sample_time]
@@ -724,6 +899,7 @@ class CameraImagingModule(ModuleShell):
                     if item.station_id == frame.station_id and item.camera_role is frame.camera_role
                 )
                 sample_pixels, gpu_ms = render_rgb8(sample, sample_camera)
+                self.last_gpu_submissions += 1
                 self.last_gpu_render_ms += gpu_ms
                 sample_buffers.append(sample_pixels)
             if (
@@ -752,51 +928,6 @@ class CameraImagingModule(ModuleShell):
                     request.random_seed,
                     f"sensor/{frame.station_id}/{frame.camera_role.value}/{frame.frame_id}",
                 )
-            target_truth: list[ProjectedTargetTruth] = []
-            for target_visibility in scene.target_visibility:
-                if (
-                    target_visibility.station_id != frame.station_id
-                    or target_visibility.camera_role is not frame.camera_role
-                ):
-                    continue
-                target = next(
-                    item
-                    for item in scene.flying_objects
-                    if item.truth_object_id == target_visibility.truth_object_id
-                )
-                target_truth.append(
-                    ProjectedTargetTruth(
-                        truth_object_id=target.truth_object_id,
-                        projection=target_visibility.projection,
-                        visibility=target_visibility,
-                        projected_width_px=footprints.get(
-                            str(target.truth_object_id), (None, None)
-                        )[0],
-                        projected_height_px=footprints.get(
-                            str(target.truth_object_id), (None, None)
-                        )[1],
-                    )
-                )
-            landmark_truth: list[ProjectedLandmarkTruth] = []
-            for landmark_visibility in scene.landmark_visibility:
-                if (
-                    landmark_visibility.station_id != frame.station_id
-                    or landmark_visibility.camera_role is not frame.camera_role
-                ):
-                    continue
-                landmark = next(
-                    item
-                    for item in scene.reference_landmarks
-                    if item.landmark_id == landmark_visibility.landmark_id
-                )
-                landmark_truth.append(
-                    ProjectedLandmarkTruth(
-                        landmark_id=landmark.landmark_id,
-                        position_enu_m=landmark.position_enu_m,
-                        projection=landmark_visibility.projection,
-                        visibility=landmark_visibility,
-                    )
-                )
             frames.append(
                 CameraFrame(
                     station_id=frame.station_id,
@@ -814,18 +945,7 @@ class CameraImagingModule(ModuleShell):
                     camera_config_ref=frame.online_camera_config_digest,
                 )
             )
-            truths.append(
-                CameraFrameTruth(
-                    station_id=frame.station_id,
-                    station_session_id=frame.station_session_id,
-                    camera_role=frame.camera_role,
-                    frame_id=frame.frame_id,
-                    capture_time=frame.capture_time,
-                    actual_camera=camera,
-                    targets=tuple(target_truth),
-                    landmarks=tuple(landmark_truth),
-                )
-            )
+            truths.append(_frame_truth(frame, scene))
         # Wall time outside Metal command execution: serialization, IPC,
         # scheduling/waiting, readback, sensor effects and truth assembly.
         # This is not CPU execution time or CPU utilization.
@@ -834,30 +954,425 @@ class CameraImagingModule(ModuleShell):
         )
         return ImagingBatch(frames=tuple(frames)), ImagingTruthBatch(frame_truth=tuple(truths))
 
+    def describe(self, request: ImageGenerationRequest) -> ImagingTruthBatch:
+        """Produce frame truth for a logic sample without any GPU invocation."""
+        truths: list[CameraFrameTruth] = []
+        for frame in request.frames:
+            if not frame.exposure_samples:
+                raise ValueError("each frame requires at least one logical scene sample")
+            midpoint = (
+                frame.capture_time.exposure_start_ns + frame.capture_time.exposure_end_ns
+            ) // 2
+            samples = {sample.sample_time.time_ns: sample for sample in frame.exposure_samples}
+            scene = samples.get(midpoint)
+            if scene is None:
+                raise ValueError("frame requires an exact exposure-midpoint scene sample")
+            truths.append(_frame_truth(frame, scene))
+        return ImagingTruthBatch(frame_truth=tuple(truths))
+
 
 class VirtualObservationModule(ModuleShell):
     """Each sequencer owns one station's fresh virtual event session."""
 
     def __init__(self, sequencers: tuple[EventSequencer, ...]) -> None:
         self.sequencers = sequencers
+        self._interval_keys: dict[StationId, VirtualCalibrationInterval | None] = {}
+        self._states: dict[StationId, CalibrationState] = {}
+        self._solutions: dict[StationId, CalibrationSolution] = {}
+        self._state_versions: dict[StationId, int] = {}
+
+    @staticmethod
+    def _midpoint(capture: CaptureTime) -> int:
+        return (capture.exposure_start_ns + capture.exposure_end_ns) // 2
+
+    @staticmethod
+    def _event_id(envelope: EventEnvelope) -> EventId:
+        return (envelope.station_id, envelope.station_session_id, envelope.sequence_no)
+
+    @staticmethod
+    def _score(request: VirtualObservationRequest, *, false_alarm: bool = False) -> float:
+        definition = request.generation_spec.detection_score_definition
+        low = 0.0 if definition.minimum is None else definition.minimum
+        high = 1.0 if definition.maximum is None else definition.maximum
+        return low + (high - low) * (0.25 if false_alarm else 0.9)
+
+    @staticmethod
+    def _active_interval(
+        station_id: StationId, time_ns: int, intervals: tuple[VirtualCalibrationInterval, ...]
+    ) -> VirtualCalibrationInterval | None:
+        matches = tuple(
+            item
+            for item in intervals
+            if item.station_id == station_id and item.start_time_ns <= time_ns < item.end_time_ns
+        )
+        if len(matches) > 1:
+            raise ValueError(f"overlapping virtual calibration intervals: {station_id}")
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _validate(request: VirtualObservationRequest) -> None:
+        spec = request.generation_spec
+        if not 0.0 <= spec.detection_probability <= 1.0:
+            raise ValueError("detection_probability must be between 0 and 1")
+        if spec.false_alarms_per_camera_hour < 0.0:
+            raise ValueError("false_alarms_per_camera_hour cannot be negative")
+        for interval in spec.calibration_intervals:
+            if interval.end_time_ns <= interval.start_time_ns:
+                raise ValueError("virtual calibration interval must have positive duration")
+
+    def _transition_calibration(
+        self,
+        frame: CameraFrameTruth,
+        config: StationConfig,
+        session: StationSessionBinding,
+        sequencer: EventSequencer,
+        interval: VirtualCalibrationInterval | None,
+    ) -> tuple[CalibrationState, CalibrationSolution | None, CalibrationStateEvent | None]:
+        station_id = frame.station_id
+        if self._interval_keys.get(station_id) == interval and station_id in self._states:
+            return self._states[station_id], None, None
+
+        version = self._state_versions.get(station_id, 0) + 1
+        self._state_versions[station_id] = version
+        self._interval_keys[station_id] = interval
+        time_ns = self._midpoint(frame.capture_time)
+        now = ProcessingTime(clock_domain_id=frame.capture_time.clock_domain_id, time_ns=time_ns)
+        new_solution: CalibrationSolution | None = None
+        solution = self._solutions.get(station_id)
+
+        if interval is not None and interval.health is CalibrationHealth.VALID:
+            solution_ref = CalibrationSolutionRef(
+                station_id=station_id,
+                station_session_id=session.virtual_session_id,
+                solution_id=CalibrationSolutionId(f"virtual-calibration-{version}"),
+            )
+            solution = CalibrationSolution(
+                solution_ref=solution_ref,
+                station_config_digest=config.config_digest,
+                world_frame_id=config.world_frame_id,
+                reference_capture_time=frame.capture_time,
+                accepted_time=now,
+                valid_interval=TimeInterval(
+                    clock_domain_id=frame.capture_time.clock_domain_id,
+                    start_ns=interval.start_time_ns,
+                    end_ns=interval.end_time_ns,
+                ),
+                main_camera_position_enu_m=config.main_camera_position_enu_m,
+                rotation_enu_from_main=_estimated_rotation(
+                    frame.actual_camera.optical_state.rotation_enu_from_body,
+                    interval.correction_error_camera_rad,
+                ),
+                correction_covariance_enu_rad2=interval.correction_covariance_rad2,
+                quality=CalibrationQuality(
+                    source="virtual_observation",
+                    matched_reference_count=0,
+                    reprojection_rmse_px=None,
+                    angular_residual_rad=math.sqrt(
+                        sum(value * value for value in interval.correction_error_camera_rad)
+                    ),
+                    reason_codes=interval.reason_codes,
+                ),
+            )
+            self._solutions[station_id] = solution
+            new_solution = solution
+
+        has_usable_solution = solution is not None and interval is not None
+        requested_health = interval.health if interval is not None else CalibrationHealth.INVALID
+        reasons: tuple[str, ...]
+        if (
+            requested_health in {CalibrationHealth.FROZEN, CalibrationHealth.STALE}
+            and solution is None
+        ):
+            health = CalibrationHealth.INVALID
+            reasons = ("virtual_no_trusted_calibration",)
+        else:
+            health = requested_health
+            reasons = interval.reason_codes if interval is not None else ("virtual_no_calibration",)
+        usable_interval = (
+            TimeInterval(
+                clock_domain_id=frame.capture_time.clock_domain_id,
+                start_ns=interval.start_time_ns,
+                end_ns=interval.end_time_ns,
+            )
+            if has_usable_solution and interval is not None
+            else None
+        )
+        state = CalibrationState(
+            station_id=station_id,
+            station_session_id=session.virtual_session_id,
+            station_config_digest=config.config_digest,
+            state_version=version,
+            health=health,
+            solution_ref=solution.solution_ref
+            if has_usable_solution and solution is not None
+            else None,
+            observed_at=now,
+            last_trusted_time=solution.accepted_time if solution is not None else None,
+            usable_interval=usable_interval,
+            reason_codes=reasons,
+        )
+        self._states[station_id] = state
+        envelope = sequencer.next_envelope(EventType.CALIBRATION_STATE, config.config_digest)
+        event = CalibrationStateEvent(envelope=envelope, state=state, solution=new_solution)
+        return state, new_solution, event
+
+    @staticmethod
+    def _usage(state: CalibrationState) -> CalibrationUsage | None:
+        return {
+            CalibrationHealth.VALID: CalibrationUsage.VALID,
+            CalibrationHealth.FROZEN: CalibrationUsage.FROZEN,
+            CalibrationHealth.STALE: CalibrationUsage.STALE,
+        }.get(state.health)
+
+    def _ray(
+        self,
+        request: VirtualObservationRequest,
+        frame: CameraFrameTruth,
+        config: StationConfig,
+        sequencer: EventSequencer,
+        state: CalibrationState,
+        solution: CalibrationSolution,
+        local_direction: Vec3M,
+        local_track_id: LocalTrackId,
+        *,
+        false_alarm: bool = False,
+    ) -> RayEvent:
+        direction = _unit(_mat_vec(solution.rotation_enu_from_main, _unit(local_direction)))
+        tangent_u, tangent_v = _tangent_basis(direction)
+        usage = self._usage(state)
+        if usage is None or state.usable_interval is None or state.last_trusted_time is None:
+            raise ValueError("ray generation requires a usable virtual calibration state")
+        envelope = sequencer.next_envelope(EventType.RAY, config.config_digest)
+        return RayEvent(
+            envelope=envelope,
+            frame_id=frame.frame_id,
+            local_track_id=local_track_id,
+            capture_time=frame.capture_time,
+            world_frame_id=config.world_frame_id,
+            calibration_solution_ref=solution.solution_ref,
+            calibration_usage=usage,
+            calibration_evidence=CalibrationUseEvidence(
+                state_version=state.state_version,
+                last_trusted_time=state.last_trusted_time,
+                solution_accepted_time=solution.accepted_time,
+                solution_reference_capture_time=solution.reference_capture_time,
+                solution_valid_interval=solution.valid_interval,
+                usable_interval=state.usable_interval,
+                reason_codes=state.reason_codes,
+            ),
+            ray_origin_enu_m=solution.main_camera_position_enu_m,
+            ray_direction_enu_unit=direction,
+            uncertainty=RayUncertainty(
+                model="tangent_gaussian_v1",
+                tangent_u_enu_unit=tangent_u,
+                tangent_v_enu_unit=tangent_v,
+                independent_angular_covariance_rad2=(
+                    request.generation_spec.independent_angular_covariance_rad2
+                ),
+                independent_origin_covariance_m2=(
+                    request.generation_spec.independent_origin_covariance_m2
+                ),
+                shared_installation_state_ref=config.installation_uncertainty.state_ref,
+                shared_calibration_solution_ref=solution.solution_ref,
+            ),
+            detection_score=self._score(request, false_alarm=false_alarm),
+            detection_score_definition=request.generation_spec.detection_score_definition,
+            track_quality=None,
+            track_quality_definition=None,
+            quality_flags=state.reason_codes,
+        )
+
+    @staticmethod
+    def _track_id(session: StationSessionBinding, truth_object_id: object) -> LocalTrackId:
+        digest = hashlib.sha256(f"{session.station_id}:{truth_object_id}".encode()).hexdigest()[:16]
+        return LocalTrackId(f"virtual-{digest}")
+
+    def _diagnostic(
+        self,
+        frame: CameraFrameTruth,
+        config: StationConfig,
+        sequencer: EventSequencer,
+        state: CalibrationState,
+    ) -> DiagnosticEvent:
+        envelope = sequencer.next_envelope(EventType.DIAGNOSTIC, config.config_digest)
+        return DiagnosticEvent(
+            envelope=envelope,
+            related_frame_ref=FrameRef(
+                station_id=frame.station_id,
+                station_session_id=frame.station_session_id,
+                camera_role=frame.camera_role,
+                frame_id=frame.frame_id,
+            ),
+            capture_time=frame.capture_time,
+            category="virtual_calibration_unavailable",
+            reason_codes=state.reason_codes,
+            related_config_ref=config.config_digest,
+            related_calibration_ref=state.solution_ref,
+        )
+
+    @staticmethod
+    def _false_alarm_directions(
+        request: VirtualObservationRequest, frame: CameraFrameTruth
+    ) -> tuple[Vec3M, ...]:
+        if frame.sampling_period_ns is not None and frame.sampling_period_ns <= 0:
+            raise ValueError("camera sampling period must be positive")
+        frame_rate = (
+            1_000_000_000 / frame.sampling_period_ns
+            if frame.sampling_period_ns is not None
+            else frame.actual_camera.metadata.nominal_frame_rate_hz
+        )
+        if frame_rate <= 0.0:
+            raise ValueError("nominal camera frame rate must be positive")
+        expected = request.generation_spec.false_alarms_per_camera_hour / (3600.0 * frame_rate)
+        count = _deterministic_poisson(
+            request.random_seed, f"false-alarm-count/{frame.station_id}/{frame.frame_id}", expected
+        )
+        intrinsics = frame.actual_camera.actual_intrinsics
+        directions: list[Vec3M] = []
+        for index in range(count):
+            u = _deterministic_unit_interval(
+                request.random_seed,
+                f"false-alarm-u/{frame.station_id}/{frame.frame_id}/{index}",
+            ) * (intrinsics.image_width_px - 1)
+            v = _deterministic_unit_interval(
+                request.random_seed,
+                f"false-alarm-v/{frame.station_id}/{frame.frame_id}/{index}",
+            ) * (intrinsics.image_height_px - 1)
+            normalized_y = (v - intrinsics.principal_y_px) / intrinsics.focal_y_px
+            normalized_x = (
+                u - intrinsics.principal_x_px - intrinsics.skew_px * normalized_y
+            ) / intrinsics.focal_x_px
+            directions.append((normalized_x, normalized_y, 1.0))
+        return tuple(directions)
 
     def generate(
         self, request: VirtualObservationRequest
     ) -> tuple[VirtualObservationBatch, VirtualObservationTruthBatch]:
-        # The packet generator is intentionally conservative until calibration
-        # snapshots and online detections are available.  An empty batch is a
-        # valid result; it never invents a ray or placeholder calibration.
+        self._validate(request)
         if len(request.station_sessions) != len(self.sequencers):
             raise ValueError("station session bindings must match virtual sequencers")
+        configs = {item.station_id: item for item in request.online_station_configs}
+        sessions = {item.station_id: item for item in request.station_sessions}
+        sequencers = {
+            item.station_id: sequencer
+            for item, sequencer in zip(request.station_sessions, self.sequencers, strict=True)
+        }
+        states: list[CalibrationState] = []
+        solutions: list[CalibrationSolution] = []
+        state_events: list[CalibrationStateEvent] = []
+        rays: list[RayEvent] = []
+        diagnostics: list[DiagnosticEvent] = []
+        correspondences: list[OnlineTruthCorrespondence] = []
+        main_frames = tuple(
+            frame for frame in request.frames if frame.camera_role is CameraRole.MAIN
+        )
+        for frame in main_frames:
+            config = configs.get(frame.station_id)
+            session = sessions.get(frame.station_id)
+            sequencer = sequencers.get(frame.station_id)
+            if config is None or session is None or sequencer is None:
+                raise ValueError(f"missing virtual station binding: {frame.station_id}")
+            if frame.station_session_id != session.image_session_id:
+                raise ValueError("virtual frame image session does not match station binding")
+            visible_targets = tuple(
+                item for item in frame.targets if item.visibility.capture_eligible
+            )
+            selected_targets = tuple(
+                item
+                for item in visible_targets
+                if _deterministic_unit_interval(
+                    request.random_seed,
+                    f"detect/{frame.station_id}/{frame.frame_id}/{item.truth_object_id}",
+                )
+                < request.generation_spec.detection_probability
+            )
+            false_alarm_directions = self._false_alarm_directions(request, frame)
+            interval = self._active_interval(
+                frame.station_id,
+                self._midpoint(frame.capture_time),
+                request.generation_spec.calibration_intervals,
+            )
+            if (
+                interval is None
+                and frame.station_id not in self._states
+                and not selected_targets
+                and not false_alarm_directions
+            ):
+                continue
+            state, new_solution, state_event = self._transition_calibration(
+                frame, config, session, sequencer, interval
+            )
+            states.append(state)
+            if new_solution is not None:
+                solutions.append(new_solution)
+            if state_event is not None:
+                state_events.append(state_event)
+            solution = self._solutions.get(frame.station_id)
+            if (selected_targets or false_alarm_directions) and (
+                solution is None or self._usage(state) is None
+            ):
+                diagnostics.append(self._diagnostic(frame, config, sequencer, state))
+                continue
+            for target in selected_targets:
+                assert solution is not None
+                track_id = self._track_id(session, target.truth_object_id)
+                ray = self._ray(
+                    request,
+                    frame,
+                    config,
+                    sequencer,
+                    state,
+                    solution,
+                    target.projection.reference_point_camera_m,
+                    track_id,
+                )
+                rays.append(ray)
+                correspondences.append(
+                    OnlineTruthCorrespondence(
+                        station_id=frame.station_id,
+                        station_session_id=frame.station_session_id,
+                        camera_role=frame.camera_role,
+                        frame_id=frame.frame_id,
+                        local_track_id=track_id,
+                        ray_event_id=self._event_id(ray.envelope),
+                        truth_object_id=target.truth_object_id,
+                    )
+                )
+            for index, direction in enumerate(false_alarm_directions):
+                assert solution is not None
+                track_id = self._track_id(session, f"false/{frame.frame_id}/{index}")
+                ray = self._ray(
+                    request,
+                    frame,
+                    config,
+                    sequencer,
+                    state,
+                    solution,
+                    direction,
+                    track_id,
+                    false_alarm=True,
+                )
+                rays.append(ray)
+                correspondences.append(
+                    OnlineTruthCorrespondence(
+                        station_id=frame.station_id,
+                        station_session_id=frame.station_session_id,
+                        camera_role=frame.camera_role,
+                        frame_id=frame.frame_id,
+                        local_track_id=track_id,
+                        ray_event_id=self._event_id(ray.envelope),
+                        truth_object_id=None,
+                    )
+                )
         return (
             VirtualObservationBatch(
-                calibration_states=(),
-                calibration_solutions=(),
-                calibration_events=(),
-                rays=(),
-                diagnostics=(),
+                calibration_states=tuple(states),
+                calibration_solutions=tuple(solutions),
+                calibration_events=tuple(state_events),
+                rays=tuple(rays),
+                diagnostics=tuple(diagnostics),
             ),
-            VirtualObservationTruthBatch(truth_correspondences=()),
+            VirtualObservationTruthBatch(truth_correspondences=tuple(correspondences)),
         )
 
 
@@ -869,14 +1384,29 @@ class ScenarioModule(ModuleShell):
         imager: CameraImager,
         virtual_generator: VirtualObservationGenerator,
         station_sessions: tuple[StationSessionBinding, ...],
+        render_every: int = 1,
     ) -> None:
+        if type(render_every) is not int or render_every <= 0:
+            raise ValueError("render_every must be positive")
         self.clock = clock
         self.logic = logic
         self.imager = imager
         self.virtual_generator = virtual_generator
         self.station_sessions = station_sessions
+        self.render_every = render_every
 
     def generate(self, spec: ScenarioSpec) -> Iterable[ScenarioStep]:
+        from chongming.scenarios.serialization import (
+            validate_scenario_spec,
+            validate_supported_features,
+        )
+
+        validate_scenario_spec(spec)
+        validate_supported_features(spec)
+        if {s.station_id for s in self.station_sessions} != {
+            c.station_id for c in spec.station_configs
+        } or len(self.station_sessions) != len(spec.station_configs):
+            raise ValueError("station sessions must match station configs exactly")
         self.clock.initialize(spec.timeline)
         self.logic.initialize(
             spec.scene_definition,
@@ -885,25 +1415,9 @@ class ScenarioModule(ModuleShell):
         )
         station_configs = {config.station_id: config for config in spec.station_configs}
         camera_specs = spec.scene_definition.cameras
-        exposures: list[tuple[int, SceneCameraSpec]] = []
-        for camera in camera_specs:
-            if camera.exposure.frame_period_ns <= 0:
-                raise ValueError("camera frame period must be positive")
-            if camera.exposure.exposure_duration_ns < 0:
-                raise ValueError("exposure duration cannot be negative")
-            start = camera.exposure.first_exposure_start_ns
-            while start <= spec.timeline.end_time_ns:
-                midpoint = start + camera.exposure.exposure_duration_ns // 2
-                if (
-                    midpoint >= spec.timeline.start_time_ns
-                    and midpoint <= spec.timeline.end_time_ns
-                ):
-                    exposures.append((midpoint, camera))
-                start += camera.exposure.frame_period_ns
-        exposures.sort(
-            key=lambda item: (item[0], str(item[1].station_id), item[1].camera_role.value)
-        )
-        for _, group in _group_exposures(exposures):
+        camera_samples: dict[tuple[StationId, CameraRole], int] = {}
+        for _, group in _scheduled_exposures(camera_specs, spec.timeline):
+            began = perf_counter()
             midpoint = group[0][0]
             time = self.clock.advance_to(midpoint)
             logical_scene = self.logic.sample(time)
@@ -949,16 +1463,43 @@ class ScenarioModule(ModuleShell):
                         capture_time=capture,
                         online_camera_config_digest=config.config_digest,
                         exposure_samples=exposure_scenes,
+                        sampling_period_ns=camera.exposure.frame_period_ns,
                     )
                 )
-            imaging, imaging_truth = self.imager.render(
-                ImageGenerationRequest(
-                    scenario_id=spec.scenario_id,
-                    random_seed=spec.random_seed,
-                    imaging_spec=spec.imaging,
-                    frames=tuple(frame_inputs),
-                )
+            image_request = ImageGenerationRequest(
+                scenario_id=spec.scenario_id,
+                random_seed=spec.random_seed,
+                imaging_spec=spec.imaging,
+                frames=tuple(frame_inputs),
             )
+            logic_finished = perf_counter()
+            imaging_truth = self.imager.describe(image_request)
+            truth_finished = perf_counter()
+            selected: list[FrameImagingInput] = []
+            skipped: list[FrameId] = []
+            for frame in frame_inputs:
+                key = (frame.station_id, frame.camera_role)
+                count = camera_samples.get(key, 0)
+                camera_samples[key] = count + 1
+                if count % self.render_every == 0:
+                    selected.append(frame)
+                else:
+                    skipped.append(frame.frame_id)
+            rendered = bool(selected)
+            if rendered:
+                imaging, rendered_truth = self.imager.render(
+                    replace(image_request, frames=tuple(selected))
+                )
+                # Rendering and description must agree; retaining this check prevents
+                # a future renderer from silently changing event truth.
+                expected_truth = tuple(
+                    f for f in imaging_truth.frame_truth if f.frame_id not in skipped
+                )
+                if rendered_truth.frame_truth != expected_truth:
+                    raise RuntimeError("renderer truth diverged from logic description")
+            else:
+                imaging = ImagingBatch(frames=())
+            render_finished = perf_counter()
             virtual, virtual_truth = self.virtual_generator.generate(
                 VirtualObservationRequest(
                     scenario_id=spec.scenario_id,
@@ -969,11 +1510,35 @@ class ScenarioModule(ModuleShell):
                     station_sessions=self.station_sessions,
                 )
             )
+            virtual_finished = perf_counter()
+            truth_rays: list[TruthRay] = []
+            for frame_truth in imaging_truth.frame_truth:
+                if frame_truth.camera_role is not CameraRole.MAIN:
+                    continue
+                for target in frame_truth.targets:
+                    if target.visibility.capture_eligible:
+                        segment = target.visibility.sight_segment
+                        direction = _sub(
+                            segment.reference_point_enu_m, segment.optical_center_enu_m
+                        )
+                        length = math.sqrt(sum(v * v for v in direction))
+                        if length > _EPS:
+                            truth_rays.append(
+                                TruthRay(
+                                    frame_truth.station_id,
+                                    target.truth_object_id,
+                                    segment.optical_center_enu_m,
+                                    _scale(direction, 1 / length),
+                                )
+                            )
             yield ScenarioStep(
                 video=ScenarioVideoOutput(
                     scenario_id=spec.scenario_id,
                     sample_time=time,
                     frames=imaging.frames,
+                    rendered=rendered,
+                    render_skip_reason="discrete_render_clock" if skipped else None,
+                    skipped_frame_ids=tuple(skipped),
                 ),
                 packets=ScenarioPacketOutput(
                     scenario_id=spec.scenario_id,
@@ -991,6 +1556,20 @@ class ScenarioModule(ModuleShell):
                     camera_frames=imaging_truth.frame_truth,
                     online_correspondences=virtual_truth.truth_correspondences,
                     experiment_perturbations=spec.perturbations,
+                    rays=tuple(truth_rays),
+                    timing=ScenarioStepTiming(
+                        logic_ms=(logic_finished - began) * 1000,
+                        frame_truth_ms=(truth_finished - logic_finished) * 1000,
+                        render_ms=(render_finished - truth_finished) * 1000 if rendered else 0.0,
+                        virtual_ms=(virtual_finished - render_finished) * 1000,
+                        total_ms=(perf_counter() - began) * 1000,
+                        gpu_ms=float(getattr(self.imager, "last_gpu_render_ms", 0.0))
+                        if rendered
+                        else 0.0,
+                        gpu_submissions=int(getattr(self.imager, "last_gpu_submissions", 0))
+                        if rendered
+                        else 0,
+                    ),
                 ),
             )
 

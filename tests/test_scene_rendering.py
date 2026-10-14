@@ -26,7 +26,13 @@ from chongming.modules.scene import (
     TrajectoryModule,
     VisibilityModule,
 )
-from chongming.preview import PreviewRuntime, encode_video, preview_payload, preview_server
+from chongming.preview import (
+    DiscreteRenderClock,
+    PreviewRuntime,
+    encode_video,
+    preview_payload,
+    preview_server,
+)
 from chongming.rendering.geometry import optical_rays, surface_hits
 from chongming.rendering.metal import (
     MetalRenderer,
@@ -320,10 +326,106 @@ class SurfaceRenderingTests(unittest.TestCase):
                     step.video.sample_time.time_ns,
                 )
 
+    def test_discrete_render_schedule_preserves_logic_but_skips_pixel_work(self) -> None:
+        spec = test_scene(s.SphereGeometry(1.0))
+        cameras = tuple(
+            replace(
+                camera,
+                exposure=replace(
+                    camera.exposure,
+                    frame_period_ns=1_000_000,
+                    exposure_duration_ns=100_000,
+                ),
+            )
+            for camera in spec.scene_definition.cameras
+        )
+        spec = replace(
+            spec,
+            scene_definition=replace(spec.scene_definition, cameras=cameras),
+            timeline=replace(spec.timeline, end_time_ns=3_000_000),
+        )
+        all_steps = list(demo_source(spec).generate(spec))
+        scheduled_steps = list(demo_source(spec, render_every=2).generate(spec))
+        self.assertEqual(
+            [step.video.sample_time for step in all_steps],
+            [step.video.sample_time for step in scheduled_steps],
+        )
+        self.assertEqual(
+            [step.truth.logical_scene for step in all_steps],
+            [step.truth.logical_scene for step in scheduled_steps],
+        )
+        self.assertEqual(
+            [len(step.packets.rays) for step in all_steps],
+            [len(step.packets.rays) for step in scheduled_steps],
+        )
+        self.assertEqual([step.video.rendered for step in scheduled_steps], [True, False, True])
+        self.assertTrue(
+            all(not step.video.frames for step in scheduled_steps if not step.video.rendered)
+        )
+
 
 class PreviewTests(unittest.TestCase):
+    def test_step_budget_counts_visible_frames_and_all_logical_timings(self) -> None:
+        runtime = PreviewRuntime(demo_spec(fps=15), render_fps=7.5)
+        runtime.control("pause")
+        runtime.start()
+        self.addCleanup(runtime.close)
+        runtime.control("step")
+        self.wait_snapshot(runtime, lambda d: d["snapshot"] is not None)
+        runtime.control("step")
+        result = self.wait_snapshot(runtime, lambda d: d["snapshot"]["sequence"] == 2)
+        self.assertEqual(result["logical_step_count"], 3)
+        self.assertEqual(result["rendered_step_count"], 2)
+        self.assertEqual(result["skipped_step_count"], 1)
+        self.assertEqual(result["generation_stats_ms"]["sample_count"], 3)
+        self.assertEqual(result["rendered_generation_stats_ms"]["sample_count"], 2)
+        self.assertEqual(result["gpu_submissions"], 4)
+        # A paused poll cannot consume the next skipped logical sample.
+        self.assertEqual(runtime.snapshot()["logical_step_count"], 3)
+
+    def test_independent_roles_keep_their_capture_and_matching_overlay(self) -> None:
+        spec = demo_spec(fps=2)
+        cameras = tuple(
+            replace(
+                c,
+                exposure=replace(
+                    c.exposure,
+                    first_exposure_start_ns=100_000_000
+                    if c.camera_role is m.CameraRole.AUXILIARY
+                    else 0,
+                ),
+            )
+            for c in spec.scene_definition.cameras
+        )
+        spec = replace(spec, scene_definition=replace(spec.scene_definition, cameras=cameras))
+        runtime = PreviewRuntime(spec, render_fps=10)
+        runtime.control("pause")
+        runtime.start()
+        self.addCleanup(runtime.close)
+        runtime.control("step")
+        first = self.wait_snapshot(runtime, lambda d: d["snapshot"] is not None)["snapshot"]
+        self.assertEqual([f["role"] for f in first["video"]], ["main"])
+        runtime.control("step")
+        second = self.wait_snapshot(runtime, lambda d: d["snapshot"]["sequence"] == 2)["snapshot"]
+        frames = {f["role"]: f for f in second["video"]}
+        self.assertEqual(set(frames), {"main", "auxiliary"})
+        self.assertEqual(frames["main"]["frame_id"], first["video"][0]["frame_id"])
+        self.assertNotEqual(frames["main"]["capture"], frames["auxiliary"]["capture"])
+        self.assertEqual(
+            {t["frame_id"] for t in second["monitor"]["frame_truth"]},
+            {f["frame_id"] for f in frames.values()},
+        )
+
+    def test_discrete_render_clock_validates_rate(self) -> None:
+        clock = DiscreteRenderClock(7.5)
+        self.assertEqual(clock.render_fps, 7.5)
+        self.assertEqual(clock.period_ns, round(1_000_000_000 / 7.5))
+        for invalid in (0.0, -1.0, 241.0):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "render_fps"):
+                DiscreteRenderClock(invalid)
+
     def test_preview_encodes_only_requested_station_and_reuses_paused_images(self) -> None:
-        runtime = PreviewRuntime(demo_spec(station_count=2, fps=2))
+        runtime = PreviewRuntime(demo_spec(station_count=2, fps=2), render_fps=7.5)
         runtime.control("pause")
         runtime.start()
         self.addCleanup(runtime.close)
@@ -338,6 +440,12 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(len(runtime._latest_step.video.frames), 4)
             stations = runtime._station_ids
             first = runtime.snapshot(stations[0])["snapshot"]
+            status = runtime.snapshot(stations[0])
+            self.assertEqual(status["render_clock_fps"], 7.5)
+            self.assertEqual(first["generation_stats_ms"]["sample_count"], 1)
+            self.assertEqual(
+                first["generation_stats_ms"]["p50"], first["generation_stats_ms"]["max"]
+            )
             self.assertEqual(len(first["video"]), 2)
             self.assertEqual({frame["station_id"] for frame in first["video"]}, {stations[0]})
             self.assertEqual(encode.call_count, 2)
@@ -383,6 +491,21 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(len(step.video.frames), 4)
         self.assertEqual(len(step.truth.logical_scene.flying_objects), 3)
         payload = preview_payload(step, 1, 1)
+        self.assertEqual(len(step.packets.calibration_events), 2)
+        self.assertEqual(len(step.packets.calibration_solutions), 2)
+        self.assertGreater(len(step.packets.rays), 0)
+        self.assertEqual(len(step.packets.rays), len(step.truth.online_correspondences))
+        self.assertEqual(payload["packets"]["ray_count"], len(step.packets.rays))
+        self.assertNotIn("truth_object_id", json.dumps(payload["packets"]))
+        for ray in step.packets.rays:
+            direction = np.asarray(ray.ray_direction_enu_unit)
+            tangent_u = np.asarray(ray.uncertainty.tangent_u_enu_unit)
+            tangent_v = np.asarray(ray.uncertainty.tangent_v_enu_unit)
+            np.testing.assert_allclose(np.linalg.norm(direction), 1.0, atol=1e-12)
+            np.testing.assert_allclose(np.cross(tangent_u, tangent_v), direction, atol=1e-12)
+            self.assertNotEqual(
+                ray.envelope.station_session_id, step.video.frames[0].station_session_id
+            )
         for frame, encoded in zip(step.video.frames, payload["video"], strict=True):
             decoded = Image.open(io.BytesIO(base64.b64decode(encoded["png"])))
             self.assertEqual(frame.image.pixel_format, m.PixelFormat.RGB8)
@@ -403,6 +526,92 @@ class PreviewTests(unittest.TestCase):
             np.eye(3),
             atol=1e-12,
         )
+
+    def test_virtual_calibration_freezes_and_stales_without_replacing_solution(self) -> None:
+        spec = demo_spec(fps=2)
+        station_id = spec.station_configs[0].station_id
+        intervals = (
+            s.VirtualCalibrationInterval(
+                station_id,
+                0,
+                500_000_000,
+                m.CalibrationHealth.VALID,
+                (0.0, 0.0, 0.0),
+                ((0.0, 0.0, 0.0),) * 3,
+                ("fresh",),
+            ),
+            s.VirtualCalibrationInterval(
+                station_id,
+                500_000_000,
+                1_000_000_000,
+                m.CalibrationHealth.FROZEN,
+                (0.0, 0.0, 0.0),
+                ((0.0, 0.0, 0.0),) * 3,
+                ("reference_missed",),
+            ),
+            s.VirtualCalibrationInterval(
+                station_id,
+                1_000_000_000,
+                2_000_000_000,
+                m.CalibrationHealth.STALE,
+                (0.0, 0.0, 0.0),
+                ((0.0, 0.0, 0.0),) * 3,
+                ("reference_stale",),
+            ),
+        )
+        spec = replace(
+            spec,
+            virtual_observations=replace(
+                spec.virtual_observations, calibration_intervals=intervals
+            ),
+        )
+        steps = iter(demo_source(spec).generate(spec))
+        valid, frozen, stale = next(steps), next(steps), next(steps)
+        self.assertEqual(valid.packets.calibration_states[0].health, m.CalibrationHealth.VALID)
+        self.assertEqual(frozen.packets.calibration_states[0].health, m.CalibrationHealth.FROZEN)
+        self.assertEqual(stale.packets.calibration_states[0].health, m.CalibrationHealth.STALE)
+        solution_ref = valid.packets.calibration_solutions[0].solution_ref
+        self.assertTrue(
+            all(ray.calibration_solution_ref == solution_ref for ray in frozen.packets.rays)
+        )
+        self.assertTrue(
+            all(ray.calibration_usage is m.CalibrationUsage.FROZEN for ray in frozen.packets.rays)
+        )
+        self.assertTrue(
+            all(ray.calibration_usage is m.CalibrationUsage.STALE for ray in stale.packets.rays)
+        )
+        self.assertFalse(frozen.packets.calibration_solutions)
+        self.assertFalse(stale.packets.calibration_solutions)
+
+    def test_virtual_false_alarms_are_separated_in_truth_correspondence(self) -> None:
+        spec = demo_spec(fps=2)
+        spec = replace(
+            spec,
+            virtual_observations=replace(
+                spec.virtual_observations,
+                detection_probability=0.0,
+                false_alarms_per_camera_hour=72_000.0,
+            ),
+        )
+        step = next(iter(demo_source(spec).generate(spec)))
+        self.assertGreater(len(step.packets.rays), 0)
+        self.assertTrue(
+            all(item.truth_object_id is None for item in step.truth.online_correspondences)
+        )
+        self.assertEqual(len(step.packets.rays), len(step.truth.online_correspondences))
+
+    def test_virtual_observation_without_trusted_calibration_emits_only_diagnostic(self) -> None:
+        spec = demo_spec(fps=2)
+        spec = replace(
+            spec,
+            virtual_observations=replace(spec.virtual_observations, calibration_intervals=()),
+        )
+        step = next(iter(demo_source(spec).generate(spec)))
+        self.assertFalse(step.packets.rays)
+        self.assertFalse(step.packets.calibration_solutions)
+        self.assertEqual(len(step.packets.diagnostics), 1)
+        self.assertEqual(step.packets.diagnostics[0].category, "virtual_calibration_unavailable")
+        self.assertIsNone(step.packets.diagnostics[0].related_calibration_ref)
 
     def test_pause_step_restart_and_http_readers_do_not_advance_time(self) -> None:
         spec = demo_spec(fps=2)

@@ -7,6 +7,7 @@ from chongming.contracts.model import (
     CameraRole,
     CaptureTime,
     ConfigDigest,
+    EventType,
     FrameId,
     PixelFormat,
     SessionId,
@@ -40,6 +41,7 @@ from chongming.contracts.scene import (
     WorldObjectKind,
     WorldObjectSpec,
 )
+from chongming.modules.device import EventSequencerModule
 from chongming.modules.scene import (
     CameraImagingModule,
     CameraProjectionModule,
@@ -69,7 +71,7 @@ def camera() -> CameraStateTruth:
         metadata=CameraMetadata(
             camera_id="camera-1",
             display_name="main",
-            profile_id="test",
+            profile_id="experimental-test",
             sensor_format=None,
             lens_focal_length_mm=None,
             nominal_diagonal_fov_deg=60.0,
@@ -98,6 +100,21 @@ def terrain() -> TerrainSpec:
 
 
 class ScenePrimitiveTests(unittest.TestCase):
+    def test_event_sequencer_is_monotonic_across_event_types(self) -> None:
+        sequencer = EventSequencerModule(
+            station_id="station-1", station_session_id="session-1", schema_version="event-v1"
+        )
+        envelopes = tuple(
+            sequencer.next_envelope(event_type, ConfigDigest("config-1"))
+            for event_type in (
+                EventType.CALIBRATION_STATE,
+                EventType.RAY,
+                EventType.DIAGNOSTIC,
+            )
+        )
+        self.assertEqual([item.sequence_no for item in envelopes], [1, 2, 3])
+        self.assertEqual({item.station_session_id for item in envelopes}, {"session-1"})
+
     def test_clock_is_explicit_and_monotonic(self) -> None:
         clock = ExperimentClockModule()
         timeline = TimelineSpec(
