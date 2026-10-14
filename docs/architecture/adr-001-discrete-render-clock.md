@@ -50,6 +50,25 @@ per camera role and never advances either clock from polling.
   algorithm evaluation requires `render-every=1`; skipped frames have no
   fabricated pixels or detections.
 
+## Center development extension (2026-10-14)
+
+`CenterSession` now initializes the full declared module group, including explicit
+`algorithm_unimplemented` health for business shells. Pixels are disabled by
+default and can be resumed between steps. With pixels disabled, no pixel/GPU
+resources are allocated; logical sampling, ordinary events, protected truth,
+center input/progress and stage measurements continue.
+
+Each synchronous step completes one experiment exposure group and the supplied
+center hook before accepting another step. A separate finite-end step delivers
+terminal progress. Monitoring does not advance the experiment; wall-clock pacing
+and human pauses are excluded from center processing durations. The default hook
+only checks input, and does not implement fusion or scoring. The generic
+`SystemRunner` and complete image algorithm pipeline remain future work.
+
+Preview with pixels enabled still steps to the next rendered publication. Its
+`--no-video` mode publishes each logical group; algorithm debugging uses the
+center tool instead. See [the JSON/tool guide](../../scenarios/README.md).
+
 ## Revisit Triggers
 
 - Implementing device detection, calibration and fusion in the same run loop.

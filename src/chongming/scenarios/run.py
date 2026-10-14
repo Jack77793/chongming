@@ -92,10 +92,13 @@ class SceneEvidenceWriter:
         self.spec = spec
         directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory
-        self._handles = {
-            name: (directory / f"{name}.jsonl").open("x", encoding="utf-8")
-            for name in ("online", "truth", "timing")
-        }
+        self._handles = {}
+        try:
+            for name in ("online", "truth", "timing"):
+                self._handles[name] = (directory / f"{name}.jsonl").open("x", encoding="utf-8")
+        except BaseException:
+            self.close()
+            raise
         self.streams: Counter[str] = Counter()
 
     def document(self, name: str, value: Any) -> None:
@@ -173,7 +176,9 @@ class SceneEvidenceWriter:
             handle.close()
 
 
-def run_scene(path: Path, output: Path, *, render_every: int = 1) -> dict[str, Any]:
+def run_scene(
+    path: Path, output: Path, *, render_every: int = 1, video_enabled: bool = True
+) -> dict[str, Any]:
     if type(render_every) is not int or render_every <= 0:
         raise ValueError("render_every must be a positive integer")
     document = json.loads(path.read_text())
@@ -184,7 +189,7 @@ def run_scene(path: Path, output: Path, *, render_every: int = 1) -> dict[str, A
     )
     validate_supported_features(spec)
     authoring_document = document
-    source = demo_source(spec, render_every=render_every)
+    source = demo_source(spec, render_every=render_every, video_enabled=video_enabled)
     writer = SceneEvidenceWriter(output, spec)
     counts: Counter[str] = Counter()
     samples: deque[float] = deque(maxlen=512)
@@ -195,7 +200,10 @@ def run_scene(path: Path, output: Path, *, render_every: int = 1) -> dict[str, A
     summary: dict[str, Any] = {"status": "failed", "scope": "virtual-subsystem"}
     try:
         scenario = scenario_to_dict(spec)
-        if isinstance(authoring_document, dict) and authoring_document.get("format") == "scenario-authoring-v2":
+        if (
+            isinstance(authoring_document, dict)
+            and authoring_document.get("format") == "scenario-authoring-v2"
+        ):
             writer.document("authoring.json", authoring_document)
         writer.document("scenario.json", scenario)
         writer.document(
@@ -217,6 +225,7 @@ def run_scene(path: Path, output: Path, *, render_every: int = 1) -> dict[str, A
                 },
                 "station_sessions": source.station_sessions,
                 "render_policy": {
+                    "video_enabled": video_enabled,
                     "every_camera_exposures": render_every,
                     "backpressure": "serial-no-catch-up",
                 },
@@ -230,6 +239,7 @@ def run_scene(path: Path, output: Path, *, render_every: int = 1) -> dict[str, A
                     for i, c in enumerate(spec.scene_definition.cameras)
                 ],
                 **_provenance(),
+                "renderer": "Metal" if video_enabled else None,
             },
         )
         for step in source.generate(spec):
@@ -290,11 +300,23 @@ def main() -> None:
     parser.add_argument("--scenario", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="必须是尚不存在的目录")
     parser.add_argument(
+        "--no-video", action="store_true", help="完全停用像素；保留逻辑、普通事件和真值"
+    )
+    parser.add_argument(
         "--render-every", type=int, default=1, help="每条相机流的像素采样间隔，默认完整输出"
     )
     args = parser.parse_args()
     try:
-        print(_json(run_scene(args.scenario, args.output, render_every=args.render_every)))
+        print(
+            _json(
+                run_scene(
+                    args.scenario,
+                    args.output,
+                    render_every=args.render_every,
+                    video_enabled=not args.no_video,
+                )
+            )
+        )
     finally:
         close_default_renderer()
 

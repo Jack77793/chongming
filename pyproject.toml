@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 chongming-preview = "chongming.preview:main"
 chongming-scene = "chongming.scenarios.run:main"
+chongming-center = "chongming.development:main"
 
 [dependency-groups]
 dev = [

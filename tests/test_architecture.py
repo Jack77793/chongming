@@ -33,7 +33,7 @@ from chongming.contracts.scene import (
 from chongming.modules import base
 from chongming.modules.base import ModuleShell
 from chongming.modules.fusion import DirectGeometryCandidateModule, VoxelCandidateModule
-from chongming.ports import device, fusion, runtime
+from chongming.ports import development, device, fusion, runtime
 from tests.fixtures import architecture_specs
 
 
@@ -175,6 +175,7 @@ class ArchitectureStructureTests(unittest.TestCase):
         ports: tuple[type[object], ...] = (
             *_port_classes(device),
             *_port_classes(fusion),
+            *_port_classes(development),
             runtime.EventTransport,
         )
         checked_methods = 0
@@ -210,6 +211,7 @@ class ArchitectureStructureTests(unittest.TestCase):
     def test_stage_two_shell_business_methods_only_raise(self) -> None:
         module_directory = Path(inspect.getfile(base)).parent
         implemented_scene = {
+            "ModuleShell",
             "ExperimentClockModule",
             "TrajectoryModule",
             "CameraProjectionModule",

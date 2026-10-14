@@ -56,6 +56,7 @@ _TODO = "TODO(stage-3): business logic is intentionally absent from the architec
 
 @dataclass(frozen=True, kw_only=True)
 class EventSequencerModule(ModuleShell):
+    business_implemented = True
     station_id: StationId
     station_session_id: SessionId
     schema_version: str

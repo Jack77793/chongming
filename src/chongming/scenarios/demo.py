@@ -73,9 +73,7 @@ def orbit_path(
             -radius * omega * math.sin(angle),
             2 * vertical_amplitude * omega * math.cos(2 * angle),
         )
-        knots.append(
-            s.TrajectoryKnot(index * period_ns // 16, state(position, velocity=velocity))
-        )
+        knots.append(s.TrajectoryKnot(index * period_ns // 16, state(position, velocity=velocity)))
     return s.TrajectorySpec(s.TrajectoryInterpolation.CUBIC_HERMITE, tuple(knots))
 
 
@@ -222,7 +220,9 @@ def demo_spec(
             if station_positions is not None
             else (-10.0 + 12.0 * index, -22.0, 4.0)
         )
-        sid = m.StationId(station_ids[index] if station_ids is not None else f"station-{index + 1:02d}")
+        sid = m.StationId(
+            station_ids[index] if station_ids is not None else f"station-{index + 1:02d}"
+        )
         main_yaw = math.atan2(-position[0], 84.0)
         main_rotation = optical_rotation(main_yaw, math.radians(9.0))
         aux_yaw = math.atan2(-10.0 - position[0], 44.0)
@@ -288,9 +288,7 @@ def demo_spec(
                 cameras[-1].metadata.camera_id,
             )
         )
-        digest = m.ConfigDigest(
-            f"demo-config-{index}-standard-{fps}"
-        )
+        digest = m.ConfigDigest(f"demo-config-{index}-standard-{fps}")
         # Auxiliary-from-main is a genuine rigid transform, not a copy of either pose.
         rotation_aux_from_main: m.Matrix3x3 = tuple(  # type: ignore[assignment]
             tuple(sum(aux_rotation[k][i] * main_rotation[k][j] for k in range(3)) for j in range(3))
@@ -416,7 +414,9 @@ def demo_spec(
     )
 
 
-def demo_source(spec: s.ScenarioSpec, *, render_every: int = 1) -> ScenarioModule:
+def demo_source(
+    spec: s.ScenarioSpec, *, render_every: int = 1, video_enabled: bool = True
+) -> ScenarioModule:
     """Fresh sessions per launch/replay; all frame contents remain deterministic."""
     sessions = tuple(
         m.StationSessionBinding(
@@ -442,4 +442,5 @@ def demo_source(spec: s.ScenarioSpec, *, render_every: int = 1) -> ScenarioModul
         VirtualObservationModule(sequencers),
         sessions,
         render_every=render_every,
+        video_enabled=video_enabled,
     )

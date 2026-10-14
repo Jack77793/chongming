@@ -141,8 +141,11 @@ def preview_payload(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str
 class PreviewRuntime:
     """Bounded latest-frame buffer and one simulation worker, shared by all viewers."""
 
-    def __init__(self, spec: ScenarioSpec, *, render_fps: float = 10.0) -> None:
+    def __init__(
+        self, spec: ScenarioSpec, *, render_fps: float = 10.0, video_enabled: bool = True
+    ) -> None:
         self.spec = spec
+        self.video_enabled = video_enabled
         self.render_clock = DiscreteRenderClock(render_fps)
         minimum_period = min(
             (camera.exposure.frame_period_ns for camera in spec.scene_definition.cameras),
@@ -262,7 +265,9 @@ class PreviewRuntime:
         latest_frames: dict[tuple[str, str], CameraFrame] = {}
         latest_truths: dict[tuple[str, str], CameraFrameTruth] = {}
         try:
-            source = demo_source(self.spec, render_every=self.render_every)
+            source = demo_source(
+                self.spec, render_every=self.render_every, video_enabled=self.video_enabled
+            )
             steps = iter(source.generate(self.spec))
             while True:
 
@@ -280,7 +285,11 @@ class PreviewRuntime:
                         return
                     if self._reset_version != reset_version:
                         reset_version = self._reset_version
-                        source = demo_source(self.spec, render_every=self.render_every)
+                        source = demo_source(
+                            self.spec,
+                            render_every=self.render_every,
+                            video_enabled=self.video_enabled,
+                        )
                         steps = iter(source.generate(self.spec))
                         loop_no += 1
                         latest_frames.clear()
@@ -290,7 +299,9 @@ class PreviewRuntime:
                 try:
                     step = next(steps)
                 except StopIteration:
-                    source = demo_source(self.spec, render_every=self.render_every)
+                    source = demo_source(
+                        self.spec, render_every=self.render_every, video_enabled=self.video_enabled
+                    )
                     steps = iter(source.generate(self.spec))
                     loop_no += 1
                     latest_frames.clear()
@@ -304,15 +315,18 @@ class PreviewRuntime:
                     self._generation_samples_ms.append(timing.total_ms)
                     self._last_logical_timing = asdict(timing)
                     self._gpu_submissions += timing.gpu_submissions
-                if not step.video.rendered:
+                if not step.video.rendered and self.video_enabled:
                     # Logic, virtual events and privileged truth were still generated;
                     # this tick simply has no pixel payload to publish or encode.
                     with self._condition:
                         self._skipped_step_count += 1
                     continue
                 with self._condition:
-                    self._rendered_step_count += 1
-                    self._rendered_samples_ms.append(timing.total_ms)
+                    if step.video.rendered:
+                        self._rendered_step_count += 1
+                        self._rendered_samples_ms.append(timing.total_ms)
+                    else:
+                        self._skipped_step_count += 1
                     stats = self._timing_stats(self._generation_samples_ms)
                     render_stats = self._timing_stats(self._rendered_samples_ms)
                 for frame in step.video.frames:
@@ -447,6 +461,7 @@ def main() -> None:
         help="从 scenario-authoring-v2 文件加载可编辑场景；提供后忽略 --stations/--fps",
     )
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    parser.add_argument("--no-video", action="store_true", help="只看逻辑与事件，完全停止像素生产")
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("port must be between 0 and 65535")
@@ -456,7 +471,7 @@ def main() -> None:
             if args.scenario is not None
             else demo_spec(station_count=args.stations, fps=args.fps)
         )
-        runtime = PreviewRuntime(spec, render_fps=args.render_fps)
+        runtime = PreviewRuntime(spec, render_fps=args.render_fps, video_enabled=not args.no_video)
         server = preview_server(runtime, args.port)
     except (ValueError, OSError) as error:
         parser.error(str(error))

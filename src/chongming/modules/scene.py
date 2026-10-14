@@ -266,6 +266,8 @@ def _deterministic_poisson(seed: int, key: str, expected_count: float) -> int:
 
 
 class ExperimentClockModule(ModuleShell):
+    business_implemented = True
+
     def __init__(self) -> None:
         self._timeline: TimelineSpec | None = None
         self._time: SimulationTime | None = None
@@ -313,6 +315,8 @@ class ExperimentClockModule(ModuleShell):
 
 
 class TrajectoryModule(ModuleShell):
+    business_implemented = True
+
     def sample(self, trajectory: TrajectorySpec, time: SimulationTime) -> KinematicState:
         if not trajectory.knots:
             raise ValueError("trajectory must contain at least one knot")
@@ -465,6 +469,8 @@ class TrajectoryModule(ModuleShell):
 
 
 class CameraProjectionModule(ModuleShell):
+    business_implemented = True
+
     def project(self, camera: CameraStateTruth, reference_point_enu_m: Vec3M) -> ProjectionTruth:
         displacement = _sub(reference_point_enu_m, camera.optical_state.position_enu_m)
         camera_from_enu = _transpose(camera.optical_state.rotation_enu_from_body)
@@ -507,6 +513,8 @@ class CameraProjectionModule(ModuleShell):
 
 
 class VisibilityModule(ModuleShell):
+    business_implemented = True
+
     def resolve(self, query: VisibilityQuery) -> TargetVisibilityTruth:
         occlusions = self._occlusions(
             query.projection,
@@ -599,25 +607,41 @@ class VisibilityModule(ModuleShell):
             elif abs(segment[2]) > _EPS:
                 fraction = (entity.base_elevation_m - origin[2]) / segment[2]
                 if 0.0 < fraction < 1.0:
-                    candidates.append((fraction, SegmentOcclusionTruth(
-                        object_id, _add(origin, _scale(segment, fraction)), fraction
-                    )))
-            if entity.heightfield_geometry is not None and entity.heightfield_origin_enu_m is not None:
+                    candidates.append(
+                        (
+                            fraction,
+                            SegmentOcclusionTruth(
+                                object_id, _add(origin, _scale(segment, fraction)), fraction
+                            ),
+                        )
+                    )
+            if (
+                entity.heightfield_geometry is not None
+                and entity.heightfield_origin_enu_m is not None
+            ):
                 east, north = entity.heightfield_origin_enu_m
                 terrain_pose = KinematicState(
-                    (east, north, entity.base_elevation_m), (0.0, 0.0, 0.0),
+                    (east, north, entity.base_elevation_m),
+                    (0.0, 0.0, 0.0),
                     ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
                     (0.0, 0.0, 0.0),
                 )
                 depths, _ = surface_hits(
-                    origin, np.asarray([segment], dtype=np.float64), terrain_pose,
+                    origin,
+                    np.asarray([segment], dtype=np.float64),
+                    terrain_pose,
                     entity.heightfield_geometry,
                 )
                 fraction = float(depths[0])
                 if 0.0 < fraction < 1.0 - _EPS:
-                    candidates.append((fraction, SegmentOcclusionTruth(
-                        object_id, _add(origin, _scale(segment, fraction)), fraction
-                    )))
+                    candidates.append(
+                        (
+                            fraction,
+                            SegmentOcclusionTruth(
+                                object_id, _add(origin, _scale(segment, fraction)), fraction
+                            ),
+                        )
+                    )
             return min(candidates, key=lambda item: item[0]) if candidates else None
         if pose is None or geometry is None:
             return None
@@ -632,6 +656,8 @@ class VisibilityModule(ModuleShell):
 
 
 class SceneLogicModule(ModuleShell):
+    business_implemented = True
+
     def __init__(
         self,
         trajectory_sampler: TrajectorySampler,
@@ -844,6 +870,8 @@ def _frame_truth(frame: FrameImagingInput, scene: LogicalSceneSnapshot) -> Camer
 
 
 class CameraImagingModule(ModuleShell):
+    business_implemented = True
+
     def __init__(self) -> None:
         self.last_gpu_render_ms = 0.0
         self.last_imager_overhead_ms = 0.0
@@ -973,6 +1001,8 @@ class CameraImagingModule(ModuleShell):
 
 class VirtualObservationModule(ModuleShell):
     """Each sequencer owns one station's fresh virtual event session."""
+
+    business_implemented = True
 
     def __init__(self, sequencers: tuple[EventSequencer, ...]) -> None:
         self.sequencers = sequencers
@@ -1377,6 +1407,8 @@ class VirtualObservationModule(ModuleShell):
 
 
 class ScenarioModule(ModuleShell):
+    business_implemented = True
+
     def __init__(
         self,
         clock: ExperimentClock,
@@ -1385,6 +1417,7 @@ class ScenarioModule(ModuleShell):
         virtual_generator: VirtualObservationGenerator,
         station_sessions: tuple[StationSessionBinding, ...],
         render_every: int = 1,
+        video_enabled: bool = True,
     ) -> None:
         if type(render_every) is not int or render_every <= 0:
             raise ValueError("render_every must be positive")
@@ -1394,6 +1427,7 @@ class ScenarioModule(ModuleShell):
         self.virtual_generator = virtual_generator
         self.station_sessions = station_sessions
         self.render_every = render_every
+        self.video_enabled = video_enabled
 
     def generate(self, spec: ScenarioSpec) -> Iterable[ScenarioStep]:
         from chongming.scenarios.serialization import (
@@ -1481,7 +1515,7 @@ class ScenarioModule(ModuleShell):
                 key = (frame.station_id, frame.camera_role)
                 count = camera_samples.get(key, 0)
                 camera_samples[key] = count + 1
-                if count % self.render_every == 0:
+                if self.video_enabled and count % self.render_every == 0:
                     selected.append(frame)
                 else:
                     skipped.append(frame.frame_id)
@@ -1537,7 +1571,13 @@ class ScenarioModule(ModuleShell):
                     sample_time=time,
                     frames=imaging.frames,
                     rendered=rendered,
-                    render_skip_reason="discrete_render_clock" if skipped else None,
+                    render_skip_reason=(
+                        "video_disabled"
+                        if not self.video_enabled
+                        else "discrete_render_clock"
+                        if skipped
+                        else None
+                    ),
                     skipped_frame_ids=tuple(skipped),
                 ),
                 packets=ScenarioPacketOutput(
