@@ -13,7 +13,7 @@ import statistics
 import time
 
 from chongming.preview import _preview_metadata, _video_payload
-from chongming.rendering.metal import close_default_renderer
+from chongming.rendering.godot import close_default_renderer
 from chongming.scenarios.demo import demo_source, demo_spec
 
 

@@ -293,10 +293,8 @@ class ScenarioPersistenceTests(unittest.TestCase):
         self.assertIn("$type", document["scenario"])
         self.assertIn("timeline", document["scenario"])
         document["scenario"]["random_seed"] = 99
-        self.assertEqual(
-            load_scenario_from_document(document).random_seed,
-            99,
-        )
+        with self.assertRaisesRegex(ValueError, "fixed random_seed 42"):
+            load_scenario_from_document(document)
 
     def test_profile_validation_rejects_implicit_non_baseline_profile(self) -> None:
         spec = demo_spec(fps=2)

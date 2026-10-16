@@ -18,13 +18,20 @@ from chongming.contracts import model as m
 from chongming.contracts import scene as s
 from chongming.contracts.scene import BehaviorId
 from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
-from chongming.scenarios.demo import demo_spec, hold, optical_rotation, orbit_path, state
+from chongming.scenarios.demo import (
+    calibration_panel,
+    demo_spec,
+    hold,
+    optical_rotation,
+    orbit_path,
+    state,
+)
 
 AUTHORING_FORMAT = "scenario-authoring-v2"
 STANDARD_MAIN_RESOLUTION = (1920, 1080)
 STANDARD_AUXILIARY_RESOLUTION = (640, 480)
 STANDARD_MAIN_FOV_DEG = 60.0
-STANDARD_AUXILIARY_FOV_DEG = 20.0
+STANDARD_AUXILIARY_FOV_DEG = 2.6  # horizontal, main is diagonal
 
 
 def _number(value: Any, name: str) -> float:
@@ -353,6 +360,8 @@ def compile_authoring(
         raise ValueError("duration_s must be positive")
     cameras = []
     configs = []
+    panels: list[s.WorldObjectSpec] = []
+    landmarks: list[s.ReferenceLandmarkSpec] = []
     for station, config in zip(stations, spec.station_configs, strict=True):
         rate = _integer(station.get("fps", fps), "station.fps")
         if not 1 <= rate <= 60:
@@ -399,11 +408,35 @@ def compile_authoring(
                 )
             )
         main, aux = rotations[m.CameraRole.MAIN], rotations[m.CameraRole.AUXILIARY]
+        panel_objects, panel_landmarks = calibration_panel(
+            config.station_id,
+            next(
+                c
+                for c in cameras
+                if c.station_id == config.station_id and c.camera_role is m.CameraRole.AUXILIARY
+            )
+            .optical_pose_trajectory.knots[0]
+            .state,
+        )
+        panels.extend(panel_objects)
+        landmarks.extend(panel_landmarks)
         relative = tuple(
             tuple(sum(aux[k][i] * main[k][j] for k in range(3)) for j in range(3)) for i in range(3)
         )
+        assert isinstance(config.reference_anchor, m.SurveyedReference)
         compiled_config = replace(
             config,
+            reference_anchor=replace(
+                config.reference_anchor,
+                landmarks=tuple(
+                    replace(
+                        old, landmark_id=str(new.landmark_id), position_enu_m=new.position_enu_m
+                    )
+                    for old, new in zip(
+                        config.reference_anchor.landmarks, panel_landmarks, strict=True
+                    )
+                ),
+            ),
             baseline_orientation_enu_from_main=main,
             fixed_rotation_aux_from_main=relative,  # type: ignore[arg-type]
             full_rigid_transform_aux_from_main=m.RigidTransform(
@@ -431,7 +464,17 @@ def compile_authoring(
     spec = replace(
         spec,
         station_configs=tuple(configs),
-        scene_definition=replace(spec.scene_definition, cameras=tuple(cameras)),
+        scene_definition=replace(
+            spec.scene_definition,
+            cameras=tuple(cameras),
+            world_objects=tuple(
+                o
+                for o in spec.scene_definition.world_objects
+                if o.kind is not s.WorldObjectKind.FIXED_REFERENCE
+            )
+            + tuple(panels),
+            reference_landmarks=tuple(landmarks),
+        ),
     )
     if "world_objects" in document:
         objects = document["world_objects"]
@@ -470,7 +513,7 @@ def compile_authoring(
         spec = replace(
             spec,
             scene_definition=replace(
-                spec.scene_definition, world_objects=tuple(compiled_objects), reference_landmarks=()
+                spec.scene_definition, world_objects=tuple(compiled_objects) + tuple(panels)
             ),
         )
     if "search" in document:
@@ -508,7 +551,7 @@ def compile_authoring(
                 json.dumps(document, sort_keys=True, allow_nan=False).encode()
             ).hexdigest()
         ),
-        random_seed=_integer(document.get("random_seed", 42), "random_seed"),
+        random_seed=_integer(document.get("random_seed", s.SCENE_RANDOM_SEED), "random_seed"),
         timeline=replace(spec.timeline, end_time_ns=round(duration_s * 1e9) - 1),
         scene_definition=replace(
             spec.scene_definition,
@@ -538,7 +581,9 @@ def load_authoring(path: Path, *, asset_root: Path | None = None) -> s.ScenarioS
         raise ValueError(f"invalid authoring JSON: {error}") from error
     if not isinstance(document, dict):
         raise TypeError("authoring JSON root must be an object")
-    return compile_authoring(document, asset_root=asset_root if asset_root is not None else path.parent)
+    return compile_authoring(
+        document, asset_root=asset_root if asset_root is not None else path.parent
+    )
 
 
 def save_authoring(document: dict[str, Any], path: Path) -> None:
@@ -582,7 +627,7 @@ def demo_authoring(*, stations: int = 1, fps: int = 30, duration_s: float = 24.0
     return {
         "format": AUTHORING_FORMAT,
         "scenario_id": "video-demo",
-        "random_seed": 42,
+        "random_seed": s.SCENE_RANDOM_SEED,
         "duration_s": duration_s,
         "fps": fps,
         "stations": [

@@ -50,7 +50,9 @@ from chongming.contracts.model import (
     TimeInterval,
     Vec3M,
 )
+from chongming.contracts.runtime import ModuleHealth
 from chongming.contracts.scene import (
+    SCENE_RANDOM_SEED,
     CameraFrameTruth,
     CameraStateTruth,
     EvaluationRecord,
@@ -96,6 +98,9 @@ from chongming.contracts.scene import (
     VirtualObservationRequest,
     VirtualObservationTruthBatch,
     VisibilityQuery,
+    WorldObjectId,
+    WorldObjectKind,
+    WorldObjectSpec,
 )
 from chongming.modules.base import ModuleShell
 from chongming.ports.device import EventSequencer
@@ -109,7 +114,14 @@ from chongming.ports.scene import (
     VisibilityResolver,
 )
 from chongming.rendering.geometry import contains_point, surface_hits
-from chongming.rendering.godot import projected_footprints, quantize_rgb8, render_rgb8
+from chongming.rendering.godot import (
+    close_default_renderer,
+    default_renderer,
+    projected_footprints,
+    quantize_rgb8,
+    render_rgb8,
+    srgb_to_linear,
+)
 from chongming.scenarios.behaviors import sample_behavior
 
 _EPS = 1e-9
@@ -676,6 +688,8 @@ class SceneLogicModule(ModuleShell):
     ) -> None:
         if not scene.cameras:
             raise ValueError("scene must define at least one camera")
+        if random_seed != SCENE_RANDOM_SEED:
+            raise ValueError(f"virtual scenes require the fixed random_seed {SCENE_RANDOM_SEED}")
         camera_stations = {camera.station_id for camera in scene.cameras}
         device_stations = {device.station_id for device in scene.edge_devices}
         if camera_stations != device_stations:
@@ -756,8 +770,22 @@ class SceneLogicModule(ModuleShell):
             )
         target_visibility: list[TargetVisibilityTruth] = []
         landmark_visibility: list[LandmarkVisibilityTruth] = []
+        # Use the same moving geometry for depth rendering and center-ray truth.
+        blockers = tuple(
+            WorldObjectSpec(
+                WorldObjectId(f"aircraft/{item.truth_object_id}"),
+                item.display_name,
+                WorldObjectKind.OBSTACLE,
+                "aircraft",
+                item.state,
+                item.geometry,
+                item.appearance,
+                True,
+            )
+            for item in flying_objects
+        )
         for camera in cameras:
-            for target in flying_objects:
+            for index, target in enumerate(flying_objects):
                 projection = self.projector.project(camera, target.center_reference_point_enu_m)
                 target_visibility.append(
                     self.visibility.resolve(
@@ -767,7 +795,9 @@ class SceneLogicModule(ModuleShell):
                             target=target,
                             projection=projection,
                             terrain=scene.terrain,
-                            world_objects=scene.world_objects,
+                            world_objects=scene.world_objects
+                            + blockers[:index]
+                            + blockers[index + 1 :],
                             vegetation=scene.vegetation,
                         )
                     )
@@ -782,7 +812,7 @@ class SceneLogicModule(ModuleShell):
                             landmark=landmark,
                             projection=projection,
                             terrain=scene.terrain,
-                            world_objects=scene.world_objects,
+                            world_objects=scene.world_objects + blockers,
                             vegetation=scene.vegetation,
                         )
                     )
@@ -872,6 +902,14 @@ def _frame_truth(frame: FrameImagingInput, scene: LogicalSceneSnapshot) -> Camer
 class CameraImagingModule(ModuleShell):
     business_implemented = True
 
+    def start_module(self, module_key: str, now: ProcessingTime) -> ModuleHealth:
+        default_renderer()
+        return super().start_module(module_key, now)
+
+    def stop_module(self, module_key: str, now: ProcessingTime) -> ModuleHealth:
+        close_default_renderer()
+        return super().stop_module(module_key, now)
+
     def __init__(self) -> None:
         self.last_gpu_render_ms = 0.0
         self.last_imager_overhead_ms = 0.0
@@ -940,10 +978,12 @@ class CameraImagingModule(ModuleShell):
             else:
                 intensity = sum(
                     (
-                        np.frombuffer(sample_pixels, dtype=np.uint8)
-                        .reshape(height, width, 3)
-                        .astype(np.float64)
-                        / 255.0
+                        srgb_to_linear(
+                            np.frombuffer(sample_pixels, dtype=np.uint8)
+                            .reshape(height, width, 3)
+                            .astype(np.float64)
+                            / 255.0
+                        )
                         for sample_pixels in sample_buffers
                     ),
                     start=np.zeros((height, width, 3), dtype=np.float64),

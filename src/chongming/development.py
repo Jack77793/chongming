@@ -34,6 +34,7 @@ from chongming.contracts.runtime import ModuleHealth
 from chongming.contracts.scene import ScenarioStep
 from chongming.ports.development import CenterAlgorithm
 from chongming.ports.fusion import FusionEngine
+from chongming.rendering.godot import default_renderer
 from chongming.scenarios.run import SceneEvidenceWriter, _json, _provenance
 from chongming.scenarios.serialization import load_scenario, validate_supported_features
 
@@ -180,7 +181,7 @@ class CenterSession:
                     "all_modules_initialized": True,
                     "algorithms_complete": False,
                     "video_enabled": video_enabled,
-                    "renderer": "Godot 4" if video_enabled else None,
+                    "renderer_version": default_renderer().version,
                     "station_sessions": self.source.station_sessions,
                 },
             )
@@ -328,10 +329,6 @@ class CenterSession:
             if self.closed:
                 raise RuntimeError("session is closed")
             self.source.video_enabled = enabled
-            if not enabled:
-                from chongming.rendering.godot import close_default_renderer
-
-                close_default_renderer()
         finally:
             self._step_lock.release()
 

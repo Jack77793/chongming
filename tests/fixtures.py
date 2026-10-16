@@ -190,7 +190,7 @@ def architecture_specs(
         scenario_id="structure-only",
         schema_version="structure-scenario-v1",
         config_digest=model.ConfigDigest("structure-scenario-digest"),
-        random_seed=0,
+        random_seed=scene.SCENE_RANDOM_SEED,
         world_frame_id=_WORLD,
         voxel_search=search,
         station_configs=configs,
@@ -242,7 +242,7 @@ def architecture_specs(
             logic_step_ns=1_000_000,
         ),
         imaging=scene.ImagingSpec(
-            color_space="linear-rgb",
+            color_space="srgb",
             exposure_samples=1,
             sensor_artifacts=scene.SensorArtifactSpec(
                 output_pixel_format=model.PixelFormat.RGB8,

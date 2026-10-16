@@ -22,6 +22,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from chongming.contracts.model import CameraRole, PixelFormat
 from chongming.contracts.scene import (
+    SCENE_RANDOM_SEED,
     ScenarioSpec,
     SceneCameraSpec,
     TerrainModel,
@@ -170,7 +171,9 @@ def save_scenario(spec: ScenarioSpec, path: Path) -> None:
     if spec.scenario_id != "video-demo":
         raise ValueError("authoring export currently supports the virtual-demo scenario only")
     cameras = spec.scene_definition.cameras
-    fps = round(cameras[0].exposure.frame_period_ns and 1_000_000_000 / cameras[0].exposure.frame_period_ns)
+    fps = round(
+        cameras[0].exposure.frame_period_ns and 1_000_000_000 / cameras[0].exposure.frame_period_ns
+    )
     save_authoring(
         demo_authoring(
             stations=len(spec.station_configs),
@@ -185,7 +188,9 @@ def save_compiled_scenario(spec: ScenarioSpec, path: Path) -> None:
     """Write the verbose runtime graph for diagnostics, not authoring."""
     validate_scenario_spec(spec)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(scenario_to_dict(spec), ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+    path.write_text(
+        json.dumps(scenario_to_dict(spec), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    )
 
 
 def load_compiled_scenario(path: Path, *, asset_root: Path | None = None) -> ScenarioSpec:
@@ -222,6 +227,8 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
     # The typed decoder checks finite scalars, tuple dimensions and primitive
     # types for programmatic configurations as well as edited JSON.
     _decode(_encode(spec), ScenarioSpec)
+    if spec.random_seed != SCENE_RANDOM_SEED:
+        raise ValueError(f"virtual scenes require the fixed random_seed {SCENE_RANDOM_SEED}")
     if spec.timeline.logic_step_ns <= 0 or spec.timeline.end_time_ns < spec.timeline.start_time_ns:
         raise ValueError("invalid finite timeline")
     clock = spec.timeline.clock_domain
@@ -229,8 +236,8 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         raise ValueError("clock time scale and absolute epoch are inconsistent")
     if not scene.cameras:
         raise ValueError("scene must define at least one camera")
-    if spec.imaging.exposure_samples <= 0 or spec.imaging.color_space != "linear-rgb":
-        raise ValueError("imaging requires positive exposure_samples and linear-rgb")
+    if spec.imaging.exposure_samples <= 0 or spec.imaging.color_space != "srgb":
+        raise ValueError("imaging requires positive exposure_samples and srgb")
     from chongming.scenarios.behaviors import validate_behavior
 
     for target in scene.flying_objects:
@@ -304,7 +311,11 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
             )
         if standard:
             expected = (1920, 1080) if camera.camera_role is CameraRole.MAIN else (640, 480)
-            expected_fov = 60.0 if camera.camera_role is CameraRole.MAIN else 20.0
+            expected_fov = (
+                60.0
+                if camera.camera_role is CameraRole.MAIN
+                else math.degrees(2 * math.atan(1.25 * math.tan(math.radians(1.3))))
+            )
             actual = (intrinsics.image_width_px, intrinsics.image_height_px)
             if actual != expected:
                 raise ValueError(
@@ -314,10 +325,13 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
                 raise ValueError(
                     f"standard camera {camera.metadata.camera_id} violates nominal FOV"
                 )
-            if abs(
-                camera.exposure.frame_period_ns
-                - 1_000_000_000 / camera.metadata.nominal_frame_rate_hz
-            ) > 1:
+            if (
+                abs(
+                    camera.exposure.frame_period_ns
+                    - 1_000_000_000 / camera.metadata.nominal_frame_rate_hz
+                )
+                > 1
+            ):
                 raise ValueError("standard exposure period violates nominal FPS")
             if camera.camera_role is CameraRole.AUXILIARY and any(
                 not _rotation_is_level(k.state.rotation_enu_from_body)
@@ -347,7 +361,7 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         reference = config.reference_anchor
         if getattr(reference, "image", None) is not None:
             raise ValueError(
-                "inline reference image is unsupported; use a surveyed reference in P1"
+                "inline reference image is unsupported; use a surveyed reference"
             )
     observations = spec.virtual_observations
     if (
@@ -442,7 +456,13 @@ def validate_supported_features(spec: ScenarioSpec) -> None:
         or any(c.actual_distortion.tangential_p1_p2)
         for c in spec.scene_definition.cameras
     ):
-        raise ValueError("P0–P2 supports distortion-free cameras only")
+        raise ValueError("Godot renderer supports distortion-free cameras only")
+    if any(
+        abs(c.actual_intrinsics.skew_px) > 1e-9
+        or abs(c.actual_intrinsics.focal_x_px - c.actual_intrinsics.focal_y_px) > 1e-9
+        for c in spec.scene_definition.cameras
+    ):
+        raise ValueError("Godot cameras require zero skew and square pixels")
     if (
         spec.scene_definition.vegetation
         or p.wind
@@ -453,7 +473,7 @@ def validate_supported_features(spec: ScenarioSpec) -> None:
         or p.camera_jitter
         or p.communication
     ):
-        raise ValueError("configured environment/transport effects are not implemented in P0–P2")
+        raise ValueError("configured environment/transport effects are not implemented")
     if (
         a.auto_exposure_enabled
         or a.dynamic_range_stops is not None
@@ -461,14 +481,14 @@ def validate_supported_features(spec: ScenarioSpec) -> None:
         or a.glare_enabled
         or a.bloom_strength is not None
     ):
-        raise ValueError("configured advanced sensor effects are not implemented in P0–P2")
+        raise ValueError("configured advanced sensor effects are not implemented")
     if any(
         c.exposure.shutter_model.value != "global" or c.exposure.rolling_readout_ns not in (None, 0)
         for c in spec.scene_definition.cameras
     ):
-        raise ValueError("P0–P2 supports global shutter only")
+        raise ValueError("Godot scene imaging currently supports global shutter only")
     if any(any(v != 0 for v in item.drift_rotation_camera_radps) for item in p.camera_pose):
-        raise ValueError("camera pose drift is not implemented in P0–P2")
+        raise ValueError("camera pose drift is not implemented")
 
 
 def runtime_metadata() -> dict[str, str]:

@@ -1,1 +1,1 @@
-"""Headless geometry and lightweight software imaging backends."""
+"""Virtual-scene geometry queries and Godot image generation."""

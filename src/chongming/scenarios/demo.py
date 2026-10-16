@@ -49,6 +49,63 @@ def hold(pose: s.KinematicState) -> s.TrajectorySpec:
     return s.TrajectorySpec(s.TrajectoryInterpolation.HOLD, (s.TrajectoryKnot(0, pose),))
 
 
+def calibration_panel(
+    station_id: m.StationId, pose: s.KinematicState
+) -> tuple[tuple[s.WorldObjectSpec, ...], tuple[s.ReferenceLandmarkSpec, ...]]:
+    """One landscape A4 checkerboard, normal to its level auxiliary camera."""
+    r = pose.rotation_enu_from_body
+    rotation: m.Matrix3x3 = tuple(  # type: ignore[assignment]
+        (r[k][0], r[k][2], -r[k][1]) for k in range(3)
+    )
+    center = tuple(pose.position_enu_m[k] + 10.0 * r[k][2] for k in range(3))
+    white = s.SurfaceAppearance((0.92, 0.92, 0.92), 0.95)
+    black = s.SurfaceAppearance((0.015, 0.015, 0.015), 0.95)
+
+    def point(x: float, y: float, z: float) -> m.Vec3:
+        return tuple(  # type: ignore[return-value]
+            center[k] + rotation[k][0] * x + rotation[k][1] * y + rotation[k][2] * z
+            for k in range(3)
+        )
+
+    panel_id = s.WorldObjectId(f"{station_id}-a4")
+    objects = [
+        s.WorldObjectSpec(
+            panel_id,
+            f"{station_id} A4",
+            s.WorldObjectKind.FIXED_REFERENCE,
+            "calibration-panel",
+            state(point(0, 0, 0), rotation),
+            s.BoxGeometry((0.297 / 2, 0.001, 0.210 / 2)),
+            white,
+            True,
+        )
+    ]
+    for row in range(5):
+        for col in range(7):
+            if (row + col) % 2 == 0:
+                objects.append(
+                    s.WorldObjectSpec(
+                        s.WorldObjectId(f"{panel_id}-{row}-{col}"),
+                        f"{panel_id} mark",
+                        s.WorldObjectKind.FIXED_REFERENCE,
+                        "calibration-panel",
+                        state(point((col - 3) * 0.035, -0.0015, (row - 2) * 0.035), rotation),
+                        s.BoxGeometry((0.0175, 0.0002, 0.0175)),
+                        black,
+                        True,
+                    )
+                )
+    landmarks = tuple(
+        s.ReferenceLandmarkSpec(
+            s.LandmarkId(f"{panel_id}-corner-{index}"), panel_id, point(x, -0.0011, z), white
+        )
+        for index, (x, z) in enumerate(
+            ((-0.1485, -0.105), (0.1485, -0.105), (0.1485, 0.105), (-0.1485, 0.105))
+        )
+    )
+    return tuple(objects), landmarks
+
+
 def orbit_path(
     center: m.Vec3,
     radius: float,
@@ -108,7 +165,6 @@ def demo_spec(
     )
     dark = s.SurfaceAppearance((0.16, 0.18, 0.21), 0.9)
     concrete = s.SurfaceAppearance((0.58, 0.57, 0.54), 0.9)
-    white = s.SurfaceAppearance((0.92, 0.92, 0.92), 0.95)
     objects = [
         s.WorldObjectSpec(
             s.WorldObjectId("building-01"),
@@ -141,33 +197,7 @@ def demo_spec(
             True,
         ),
     ]
-    landmarks = []
-    # A three-dimensional reference panel is visible to the level auxiliary camera.
-    for row in range(3):
-        for col in range(3):
-            object_id = s.WorldObjectId(f"reference-{row}-{col}")
-            position = (-10.0 + (col - 1) * 1.2, 22.0, 4.0 + (row - 1) * 1.2)
-            appearance = white if (row + col) % 2 else dark
-            objects.append(
-                s.WorldObjectSpec(
-                    object_id,
-                    f"参照格 {row + 1}/{col + 1}",
-                    s.WorldObjectKind.FIXED_REFERENCE,
-                    "calibration-panel",
-                    state(position),
-                    s.BoxGeometry((0.58, 0.12, 0.58)),
-                    appearance,
-                    True,
-                )
-            )
-            landmarks.append(
-                s.ReferenceLandmarkSpec(
-                    s.LandmarkId(str(object_id)),
-                    object_id,
-                    (position[0], position[1] - 0.12, position[2]),
-                    appearance,
-                )
-            )
+    landmarks: list[s.ReferenceLandmarkSpec] = []
     aircraft = s.TriangleMeshGeometry(
         (
             (0.0, 2.8, 0.0),
@@ -225,15 +255,18 @@ def demo_spec(
         )
         main_yaw = math.atan2(-position[0], 84.0)
         main_rotation = optical_rotation(main_yaw, math.radians(9.0))
-        aux_yaw = math.atan2(-10.0 - position[0], 44.0)
+        aux_yaw = main_yaw
         aux_rotation = optical_rotation(aux_yaw, 0.0)
         station_cameras = []
         for role, rotation, fov in (
             (m.CameraRole.MAIN, main_rotation, 60.0),
-            (m.CameraRole.AUXILIARY, aux_rotation, 20.0),
+            (m.CameraRole.AUXILIARY, aux_rotation, 2.6),
         ):
             width, height = (1920, 1080) if role is m.CameraRole.MAIN else (640, 480)
-            focal = math.hypot(width, height) / (2 * math.tan(math.radians(fov / 2)))
+            focal = (math.hypot(width, height) if role is m.CameraRole.MAIN else width) / (
+                2 * math.tan(math.radians(fov / 2))
+            )
+            diagonal_fov = math.degrees(2 * math.atan(math.hypot(width, height) / (2 * focal)))
             cid = s.CameraId(f"{sid}-{role.value}")
             intrinsics = s.SceneCameraIntrinsics(
                 width, height, focal, focal, (width - 1) / 2, (height - 1) / 2, 0.0
@@ -247,7 +280,7 @@ def demo_spec(
                     "standard-v1",
                     "1/4 inch",
                     3.0,
-                    fov,
+                    diagonal_fov,
                     float(fps),
                 ),
                 intrinsics,
@@ -279,6 +312,11 @@ def demo_spec(
                     distortion=m.CameraDistortion(model="none", coefficients=()),
                 )
             )
+        panel_objects, panel_landmarks = calibration_panel(
+            sid, cameras[-1].optical_pose_trajectory.knots[0].state
+        )
+        objects.extend(panel_objects)
+        landmarks.extend(panel_landmarks)
         devices.append(
             s.EdgeDeviceMetadata(
                 sid,
@@ -315,7 +353,7 @@ def demo_spec(
                     ),
                 ),
                 reference_anchor=m.SurveyedReference(
-                    reference_id="demo-panel",
+                    reference_id=f"{sid}-a4",
                     world_frame_id=world_id,
                     landmarks=tuple(
                         m.SurveyedLandmark(
@@ -324,7 +362,7 @@ def demo_spec(
                             covariance_enu_m2=ZERO_COVARIANCE,
                             visual_description="alternating gray panel",
                         )
-                        for item in landmarks
+                        for item in panel_landmarks
                     ),
                 ),
                 reference_scene_version="demo-v1",
@@ -343,7 +381,7 @@ def demo_spec(
         "scene-v1",
         "video-demo",
         m.ConfigDigest(f"demo-v1-standard-{station_count}-{fps}"),
-        42,
+        s.SCENE_RANDOM_SEED,
         world_id,
         m.VoxelSearchSpec(
             world_frame_id=world_id,
@@ -381,7 +419,7 @@ def demo_spec(
             1_000_000,
         ),
         s.ImagingSpec(
-            "linear-rgb",
+            "srgb",
             1,
             s.SensorArtifactSpec(m.PixelFormat.RGB8, 0.0, 0.0, 1.0, False, None, None, False, None),
         ),

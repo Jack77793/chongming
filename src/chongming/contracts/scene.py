@@ -52,6 +52,9 @@ from chongming.contracts.model import (
     WorldFrameId,
 )
 
+# Every virtual-scene RNG stream derives from this fixed experiment seed.
+SCENE_RANDOM_SEED = 42
+
 TruthObjectId = NewType("TruthObjectId", str)
 WorldObjectId = NewType("WorldObjectId", str)
 LandmarkId = NewType("LandmarkId", str)

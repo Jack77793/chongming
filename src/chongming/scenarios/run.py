@@ -25,7 +25,7 @@ from uuid import uuid4
 from PIL import Image
 
 from chongming.contracts.scene import ScenarioSpec, ScenarioStep
-from chongming.rendering.godot import close_default_renderer
+from chongming.rendering.godot import GODOT_VERSION, close_default_renderer, default_renderer
 from chongming.scenarios.demo import demo_source
 from chongming.scenarios.serialization import (
     FORMAT_VERSION,
@@ -81,7 +81,7 @@ def _provenance() -> dict[str, Any]:
         "platform": platform.platform(),
         "machine": platform.machine(),
         "dependencies": {name: version(name) for name in ("numpy", "pillow", "chongming")},
-        "renderer": "Godot 4 headless renderer",
+        "renderer": f"Godot {GODOT_VERSION} Compatibility renderer",
     }
 
 
@@ -199,6 +199,7 @@ def run_scene(
     render_maximum = 0.0
     summary: dict[str, Any] = {"status": "failed", "scope": "virtual-subsystem"}
     try:
+        default_renderer()
         scenario = scenario_to_dict(spec)
         if (
             isinstance(authoring_document, dict)
@@ -239,7 +240,7 @@ def run_scene(
                     for i, c in enumerate(spec.scene_definition.cameras)
                 ],
                 **_provenance(),
-                "renderer": "Godot 4" if video_enabled else None,
+                "renderer_version": default_renderer().version,
             },
         )
         for step in source.generate(spec):

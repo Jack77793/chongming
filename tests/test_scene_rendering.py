@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import shutil
 import threading
@@ -40,7 +41,9 @@ from chongming.rendering.godot import (
     projected_footprints,
     quantize_rgb8,
     render_rgb8,
+    srgb_to_linear,
 )
+from chongming.scenarios.authoring import compile_authoring, demo_authoring
 from chongming.scenarios.demo import demo_source, demo_spec, optical_rotation, state
 from tests.fixtures import architecture_specs
 
@@ -83,11 +86,109 @@ def render_gpu(
     return image, projected_footprints(scene, camera)
 
 
+class SceneConfigurationTests(unittest.TestCase):
+    def test_each_station_has_an_aligned_landscape_a4_with_bound_landmarks(self) -> None:
+        document = demo_authoring(stations=3)
+        document["world_objects"] = []
+        for index, station in enumerate(document["stations"]):
+            station["auxiliary_yaw_deg"] = 37.0 + 40 * index
+        spec = compile_authoring(document)
+        for config in spec.station_configs:
+            camera = next(
+                c
+                for c in spec.scene_definition.cameras
+                if c.station_id == config.station_id and c.camera_role is m.CameraRole.AUXILIARY
+            )
+            pose = camera.optical_pose_trajectory.knots[0].state
+            panel = next(
+                o
+                for o in spec.scene_definition.world_objects
+                if o.object_id == f"{config.station_id}-a4"
+            )
+            self.assertEqual(panel.geometry, s.BoxGeometry((0.1485, 0.001, 0.105)))
+            displacement = np.array(panel.pose.position_enu_m) - pose.position_enu_m
+            np.testing.assert_allclose(
+                displacement, np.array(pose.rotation_enu_from_body)[:, 2] * 10
+            )
+            i = camera.actual_intrinsics
+            self.assertAlmostEqual(
+                math.degrees(2 * math.atan(i.image_width_px / (2 * i.focal_x_px))), 2.6
+            )
+            self.assertEqual(pose.rotation_enu_from_body[2][2], 0)
+            reference = config.reference_anchor
+            assert isinstance(reference, m.SurveyedReference)
+            self.assertEqual(reference.reference_id, panel.object_id)
+            landmarks = [
+                l
+                for l in spec.scene_definition.reference_landmarks
+                if l.world_object_id == panel.object_id
+            ]
+            self.assertEqual(len(landmarks), 4)
+            self.assertEqual(
+                [l.position_enu_m for l in reference.landmarks],
+                [l.position_enu_m for l in landmarks],
+            )
+
+    def test_fixed_seed_and_srgb_energy_integration(self) -> None:
+        document = demo_authoring()
+        document["random_seed"] = 99
+        with self.assertRaisesRegex(ValueError, "fixed random_seed 42"):
+            compile_authoring(document)
+        # Half black/half white exposure encodes half linear energy as sRGB 188.
+        value = np.mean(srgb_to_linear(np.array([0.0, 1.0])))
+        self.assertEqual(quantize_rgb8(np.array([value]), 0, 1, 0, 42, "test"), bytes([188]))
+
+    def test_aircraft_mutual_occlusion_uses_the_current_snapshot(self) -> None:
+        spec = test_scene(s.SphereGeometry(1.0))
+        distant = spec.scene_definition.flying_objects[0]
+        near = replace(
+            distant,
+            truth_object_id=s.TruthObjectId("near"),
+            trajectory=s.TrajectorySpec(
+                s.TrajectoryInterpolation.HOLD, (s.TrajectoryKnot(0, state((0.0, 0.0, 5.0))),)
+            ),
+        )
+        scene = snapshot(
+            replace(
+                spec,
+                scene_definition=replace(spec.scene_definition, flying_objects=(distant, near)),
+            )
+        )
+        visibility = scene.target_visibility[:2]
+        self.assertFalse(visibility[0].capture_eligible)
+        self.assertEqual(visibility[0].occlusions[0].blocker_object_id, "aircraft/near")
+        self.assertTrue(visibility[1].capture_eligible)
+
+
 @unittest.skipUnless(
     os.environ.get("CHONGMING_GODOT") or shutil.which("godot4") or shutil.which("godot"),
     "Godot 4 executable is required for pixel integration tests",
 )
 class SurfaceRenderingTests(unittest.TestCase):
+    def test_pixels_match_rotated_off_axis_projection_without_stale_frames(self) -> None:
+        scene = snapshot(test_scene(s.SphereGeometry(0.35)))
+        original = scene.cameras[0]
+        camera = replace(
+            original,
+            optical_state=state((100.0, 200.0, 20.0), optical_rotation(0.4, 0.2)),
+            actual_intrinsics=replace(
+                original.actual_intrinsics, principal_x_px=27.0, principal_y_px=20.0
+            ),
+        )
+        for x, y in ((-0.7, -0.4), (0.7, 0.4), (-0.7, -0.4)):
+            point = tuple(
+                np.array(camera.optical_state.rotation_enu_from_body) @ np.array((x, y, 10.0))
+                + camera.optical_state.position_enu_m
+            )
+            target = replace(scene.flying_objects[0], state=state(point),
+                             appearance=s.SurfaceAppearance((0.4, 0.01, 0.01), 1.0))
+            current = replace(scene, cameras=(camera,), flying_objects=(target,))
+            pixels, _ = render_gpu(current, camera)
+            ys, xs = np.nonzero(pixels[:, :, 0].astype(int) > pixels[:, :, 1].astype(int) + 40)
+            self.assertGreater(len(xs), 10)
+            expected = CameraProjectionModule().project(camera, point).centroid_px
+            np.testing.assert_allclose((xs.mean(), ys.mean()), expected, atol=0.8)
+
     def test_renderer_survives_parent_terminal_signals_and_closes_cleanly(self) -> None:
         renderer = GodotRenderer()
         self.addCleanup(renderer.close)
@@ -100,9 +201,7 @@ class SurfaceRenderingTests(unittest.TestCase):
         renderer.close()
         renderer.close()
         self.assertEqual(process.poll(), 0)
-        self.assertTrue(
-            all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
-        )
+        self.assertTrue(renderer._log.closed)
         with self.assertRaisesRegex(RuntimeError, "closed"):
             renderer.render(scene, scene.cameras[0])
 
@@ -118,7 +217,7 @@ class SurfaceRenderingTests(unittest.TestCase):
             with self.subTest(geometry=type(geometry).__name__):
                 scene = snapshot(test_scene(geometry))
                 pixels, footprints = render_gpu(scene, scene.cameras[0])
-                self.assertGreater(np.count_nonzero(pixels.mean(axis=2) < 128), 100)
+                self.assertGreater(np.count_nonzero(pixels.mean(axis=2) < 200), 100)
                 self.assertGreater(footprints["target"][0], 10)
                 self.assertGreater(footprints["target"][1], 10)
 
@@ -127,12 +226,12 @@ class SurfaceRenderingTests(unittest.TestCase):
         for distance in (10.0, 20.0):
             scene = snapshot(test_scene(s.SphereGeometry(1.0), (0.0, 0.0, distance)))
             pixels, _ = render_gpu(scene, scene.cameras[0])
-            areas.append(np.count_nonzero(pixels.mean(axis=2) < 128))
+            areas.append(np.count_nonzero(pixels.mean(axis=2) < 200))
         self.assertGreater(areas[0], 3.5 * areas[1])
         scene = snapshot(test_scene(s.SphereGeometry(1.0), (3.7, 0.0, 10.0)))
         self.assertFalse(scene.target_visibility[0].capture_eligible)
         pixels, _ = render_gpu(scene, scene.cameras[0])
-        self.assertGreater(np.count_nonzero(pixels.mean(axis=2) < 128), 0)
+        self.assertGreater(np.count_nonzero(pixels.mean(axis=2) < 200), 0)
 
     def test_depth_hides_target_and_preserves_partial_silhouette(self) -> None:
         spec = test_scene(s.SphereGeometry(1.0))
@@ -153,7 +252,7 @@ class SurfaceRenderingTests(unittest.TestCase):
         )
         self.assertFalse(full.target_visibility[0].capture_eligible)
         image, _ = render_gpu(full, full.cameras[0])
-        self.assertEqual(np.count_nonzero(image.mean(axis=2) < 128), 0)
+        self.assertEqual(np.count_nonzero(image.mean(axis=2) < 200), 0)
         wall = replace(
             obstacle, pose=state((-0.5, 0.0, 5.0)), geometry=s.BoxGeometry((0.5, 1.0, 0.1))
         )
@@ -162,7 +261,7 @@ class SurfaceRenderingTests(unittest.TestCase):
         )
         self.assertFalse(partial.target_visibility[0].capture_eligible)
         image, _ = render_gpu(partial, partial.cameras[0])
-        count = np.count_nonzero(image.mean(axis=2) < 128)
+        count = np.count_nonzero(image.mean(axis=2) < 200)
         self.assertGreater(count, 50)
         self.assertLess(count, 250)
         beyond = replace(obstacle, pose=state((0.0, 0.0, 15.0)))
@@ -171,7 +270,7 @@ class SurfaceRenderingTests(unittest.TestCase):
         )
         self.assertTrue(visible.target_visibility[0].capture_eligible)
         image, _ = render_gpu(visible, visible.cameras[0])
-        self.assertGreater(np.count_nonzero(image.mean(axis=2) < 128), 250)
+        self.assertGreater(np.count_nonzero(image.mean(axis=2) < 200), 250)
 
     def test_near_plane_mesh_and_rotated_box_render_without_projection_singularities(self) -> None:
         geometry = s.TriangleMeshGeometry(
@@ -180,7 +279,7 @@ class SurfaceRenderingTests(unittest.TestCase):
         scene = snapshot(test_scene(geometry, (0.0, 0.0, 0.0)))
         image, _ = render_gpu(scene, scene.cameras[0])
         self.assertTrue(np.all(np.isfinite(image)))
-        self.assertGreater(np.count_nonzero(image.mean(axis=2) < 128), 0)
+        self.assertGreater(np.count_nonzero(image.mean(axis=2) < 200), 0)
         rays = np.asarray(((0.0, 0.0, 1.0),))
         depth, _ = surface_hits(
             (0.0, 0.0, 0.0),
@@ -274,7 +373,10 @@ class SurfaceRenderingTests(unittest.TestCase):
         batch, truth = CameraImagingModule().render(request)
         first_pixels, _ = render_gpu(first, first.cameras[0])
         last_pixels, _ = render_gpu(last, last.cameras[0])
-        expected = (first_pixels.astype(np.float64) / 255.0 + last_pixels / 255.0) / 2
+        expected = (
+            srgb_to_linear(first_pixels.astype(np.float64) / 255.0)
+            + srgb_to_linear(last_pixels.astype(np.float64) / 255.0)
+        ) / 2
         np.testing.assert_array_equal(
             np.frombuffer(batch.frames[0].image.pixels, dtype=np.uint8).reshape(expected.shape),
             np.frombuffer(
@@ -517,7 +619,8 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(decoded.mode, "RGB")
             self.assertEqual(decoded.tobytes(), frame.image.pixels)
             self.assertNotIn("truth_object_id", encoded)
-        rgb = np.frombuffer(step.video.frames[0].image.pixels, dtype=np.uint8).reshape(-1, 3)
+        main = next(f for f in step.video.frames if f.camera_role is m.CameraRole.MAIN)
+        rgb = np.frombuffer(main.image.pixels, dtype=np.uint8).reshape(-1, 3)
         self.assertTrue(np.any(rgb[:, 0] != rgb[:, 2]))
         self.assertNotEqual(source.station_sessions, demo_source(spec).station_sessions)
         for camera in step.truth.logical_scene.cameras:

@@ -31,7 +31,7 @@ from PIL import Image
 
 from chongming.contracts.model import CameraFrame
 from chongming.contracts.scene import CameraFrameTruth, ScenarioSpec, ScenarioStep
-from chongming.rendering.godot import close_default_renderer
+from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.demo import demo_source, demo_spec
 from chongming.scenarios.serialization import load_scenario
 
@@ -179,6 +179,7 @@ class PreviewRuntime:
         )
 
     def start(self) -> None:
+        default_renderer()
         self._thread.start()
 
     def close(self) -> None:
@@ -188,6 +189,7 @@ class PreviewRuntime:
         self._thread.join(timeout=30)
         if self._thread.is_alive():
             raise RuntimeError("scene video producer did not stop")
+        close_default_renderer()
 
     def control(self, action: str) -> None:
         with self._condition:

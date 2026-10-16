@@ -259,7 +259,7 @@ class ScenePrimitiveTests(unittest.TestCase):
             exposure_samples=(snapshot,),
         )
         imaging = ImagingSpec(
-            color_space="linear-rgb",
+            color_space="srgb",
             exposure_samples=1,
             sensor_artifacts=SensorArtifactSpec(
                 output_pixel_format=PixelFormat.RGB8,

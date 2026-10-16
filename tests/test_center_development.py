@@ -15,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 
 from chongming.contracts import model as m
+from chongming.contracts import scene as s
 from chongming.contracts.development import CenterInputStep, CenterRegistration
 from chongming.development import CenterSession, FusionEngineAdapter, InputInspector
 from chongming.modules import scene as modules
@@ -196,7 +197,13 @@ class CenterDevelopmentTests(unittest.TestCase):
             spec.virtual_observations.calibration_intervals[0].end_time_ns, 60_000_000_000
         )
         self.assertEqual(spec.voxel_search.step_enu_m, (20, 20, 20))
-        self.assertEqual(spec.scene_definition.world_objects, ())
+        self.assertTrue(spec.scene_definition.world_objects)
+        self.assertTrue(
+            all(
+                o.kind is s.WorldObjectKind.FIXED_REFERENCE
+                for o in spec.scene_definition.world_objects
+            )
+        )
         from chongming.scenarios.behaviors import sample_behavior
 
         target = spec.scene_definition.flying_objects[0]
