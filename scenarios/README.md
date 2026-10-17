@@ -27,11 +27,15 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 | `geometry` | sphere + radius_m，box + half_extents_m，或 aircraft；目标和地物共用 |
 | `motion` | constant_velocity + position_enu_m/velocity_enu_mps；或 orbit + center_enu_m/radius_m/period_s，可选 phase_rad/vertical_amplitude_m，支持多周期 |
 | `world_objects[]` | 覆盖内置地物，`[]` 清空建筑，始终保留每站 A4 标志物；每项含 id、position_enu_m、geometry，可选 display_name、appearance、occludes_sight_lines |
+| `vegetation[]` | 可省略以使用演示林地，或显式设 `[]` 清空；树含 `id`、`position_enu_m`、`height_m`、`crown_radius_m`，可选 `sway_amplitude_m` / `sway_frequency_hz` |
+| `wind` | 可省略使用演示风，设为 `null` 关闭，或配置平均 ENU 风速和可选湍流标准差；风和摆动仅由实验时间/固定种子决定 |
 | `terrain` | flat 或 heightfield + origin_enu_m/spacing_m；内嵌 heights_m 或外部 asset 二选一，高度行从南到北、每行从西到东，网格外为平面 |
 | `search` | min_enu_m、max_enu_m、step_enu_m 三个向量，控制中心搜索盒；范围外目标仍可发射线 |
 | `appearance` | 可选 linear_rgb 三个 0–1 数和 diffuse_reflectance；只影响外观 |
 
 未写 `world_objects` 时保留内置建筑、球形地物和每站标志物；相机朝向未指定时采用演示朝向。主相机对角线 FOV 60°，辅助相机水平 FOV 2.6°、俯仰角 0，朝向 10 m 外自己的横向 A4 棋盘；标志物 ID 为 `<station-id>-a4`，角点与站配置绑定。仅在主视场内且中心视线未被地形、地物或其他飞行器挡住时发包。校准为理想有效状态，覆盖全部配置时长。
+
+默认树木由程序生成低面数八棱树干和三层树冠，无需额外素材许可；树干静止，树冠按平均风向摆动，当前同一位置快照同时用于图像和中心视线遮挡。湿润叶面、枝叶级形变、草本植被和湍流时变还未实现。
 
 可对 Agent 说：“复制 center_clean.json，改成三站、两个交叉运动目标、运行 60 秒，清空地物，搜索盒缩小到使第二个目标在盒外；只编辑 JSON，然后执行 --check。”未知字段和非法值会报错，JSON 不加载 Python 代码。
 

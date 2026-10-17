@@ -26,6 +26,7 @@ from chongming.scenarios.demo import (
     orbit_path,
     state,
 )
+from chongming.scenarios.vegetation import tree_geometry
 
 AUTHORING_FORMAT = "scenario-authoring-v2"
 STANDARD_MAIN_RESOLUTION = (1920, 1080)
@@ -302,6 +303,8 @@ def compile_authoring(
         "fps",
         "stations",
         "targets",
+        "vegetation",
+        "wind",
         "terrain",
         "world_objects",
         "search",
@@ -314,6 +317,8 @@ def compile_authoring(
             "fps",
             "stations",
             "targets",
+            "vegetation",
+            "wind",
             "terrain",
             "world_objects",
             "search",
@@ -543,6 +548,73 @@ def compile_authoring(
             spec,
             scene_definition=replace(spec.scene_definition, flying_objects=tuple(compiled)),
         )
+    vegetation_doc = document.get("vegetation")
+    use_demo_vegetation = vegetation_doc is None
+    if use_demo_vegetation:
+        vegetation_doc = []
+    if not isinstance(vegetation_doc, list):
+        raise TypeError("vegetation must be an array")
+    vegetation: list[s.VegetationSpec] = (
+        list(spec.scene_definition.vegetation) if use_demo_vegetation else []
+    )
+    vegetation_perturbations: list[s.VegetationPerturbation] = (
+        list(spec.perturbations.vegetation) if use_demo_vegetation else []
+    )
+    vegetation_ids: set[str] = set()
+    for item in vegetation_doc:
+        if not isinstance(item, dict):
+            raise TypeError("vegetation entries must be objects")
+        _fields(
+            item,
+            {"id", "display_name", "position_enu_m", "height_m", "crown_radius_m",
+             "sway_amplitude_m", "sway_frequency_hz"},
+            "vegetation",
+        )
+        tree_id = _identifier(_required(item, "id"), "vegetation.id")
+        if tree_id in vegetation_ids:
+            raise ValueError(f"vegetation IDs must be unique: {tree_id}")
+        vegetation_ids.add(tree_id)
+        position = _vec3(_required(item, "position_enu_m"), "vegetation.position_enu_m")
+        height = _number(_required(item, "height_m"), "vegetation.height_m")
+        radius = _number(_required(item, "crown_radius_m"), "vegetation.crown_radius_m")
+        amplitude = _number(item.get("sway_amplitude_m", 0.25), "vegetation.sway_amplitude_m")
+        frequency = _number(item.get("sway_frequency_hz", 0.22), "vegetation.sway_frequency_hz")
+        if height <= 0 or radius <= 0 or amplitude < 0 or frequency <= 0:
+            raise ValueError("tree dimensions/frequency must be positive and sway amplitude nonnegative")
+        trunk_mesh, canopy_mesh = tree_geometry(height, radius)
+        trunk_id = s.VegetationId(f"{tree_id}/trunk")
+        canopy_id = s.VegetationId(f"{tree_id}/canopy")
+        pose = state(position, ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        canopy_pose = state((position[0], position[1], position[2] + height * 0.42))
+        display_name = str(item.get("display_name", tree_id))
+        vegetation.extend((
+            s.VegetationSpec(
+                trunk_id, f"{display_name} 树干", pose, trunk_mesh,
+                s.SurfaceAppearance((0.20, 0.105, 0.045), 0.9),
+                s.VegetationMotionModel.STATIC, True,
+            ),
+            s.VegetationSpec(
+                canopy_id, f"{display_name} 树冠", canopy_pose, canopy_mesh,
+                s.SurfaceAppearance((0.12, 0.31, 0.09), 0.9),
+                s.VegetationMotionModel.WIND_DRIVEN, True,
+            ),
+        ))
+        vegetation_perturbations.append(
+            s.VegetationPerturbation(
+                s.WorldObjectId(str(canopy_id)), (amplitude, 0.0, 0.0), frequency
+            )
+        )
+    wind_doc = document.get("wind")
+    wind = spec.perturbations.wind if "wind" not in document else None
+    if wind_doc is not None:
+        _fields(wind_doc, {"mean_velocity_enu_mps", "turbulent_velocity_std_enu_mps"}, "wind")
+        wind = s.WindPerturbation(
+            _vec3(wind_doc.get("mean_velocity_enu_mps", [0, 0, 0]), "wind.mean_velocity_enu_mps"),
+            _vec3(wind_doc.get("turbulent_velocity_std_enu_mps", [0, 0, 0]),
+                  "wind.turbulent_velocity_std_enu_mps"),
+        )
+        if min(wind.turbulent_velocity_std_enu_mps) < 0:
+            raise ValueError("wind turbulence standard deviations must be nonnegative")
     spec = replace(
         spec,
         scenario_id=_identifier(document.get("scenario_id", "scenario"), "scenario_id"),
@@ -552,10 +624,14 @@ def compile_authoring(
             ).hexdigest()
         ),
         random_seed=_integer(document.get("random_seed", s.SCENE_RANDOM_SEED), "random_seed"),
+        perturbations=replace(
+            spec.perturbations, wind=wind, vegetation=tuple(vegetation_perturbations)
+        ),
         timeline=replace(spec.timeline, end_time_ns=round(duration_s * 1e9) - 1),
         scene_definition=replace(
             spec.scene_definition,
             terrain=_terrain(document.get("terrain"), spec.scene_definition.terrain, asset_root),
+            vegetation=tuple(vegetation),
         ),
     )
     spec = replace(

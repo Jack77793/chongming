@@ -87,6 +87,70 @@ def render_gpu(
 
 
 class SceneConfigurationTests(unittest.TestCase):
+    def test_tree_geometry_wind_is_replayable_and_moves_occlusion_state(self) -> None:
+        document = demo_authoring()
+        document["vegetation"] = [
+            {
+                "id": "oak-01",
+                "position_enu_m": [0, 0, 0],
+                "height_m": 8,
+                "crown_radius_m": 2,
+                "sway_amplitude_m": 0.3,
+                "sway_frequency_hz": 0.2,
+            }
+        ]
+        document["wind"] = {
+            "mean_velocity_enu_mps": [3, 0.5, 0],
+            "turbulent_velocity_std_enu_mps": [0.2, 0.2, 0],
+        }
+        spec = compile_authoring(document)
+        self.assertEqual(len(spec.scene_definition.vegetation), 2)
+        self.assertEqual(len(spec.scene_definition.vegetation[0].geometry.vertices_body_m), 16)
+        self.assertEqual(len(spec.scene_definition.vegetation[1].geometry.triangle_vertex_indices), 24)
+        logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
+        logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
+        first = logic.sample(s.SimulationTime("demo-clock", 1_000_000_000, 30))
+        replay = logic.sample(s.SimulationTime("demo-clock", 1_000_000_000, 30))
+        later = logic.sample(s.SimulationTime("demo-clock", 2_000_000_000, 60))
+        self.assertEqual(first.vegetation, replay.vegetation)
+        self.assertEqual(first.vegetation[0].base_pose.position_enu_m, (0, 0, 0))
+        self.assertNotEqual(
+            first.vegetation[1].base_pose.rotation_enu_from_body,
+            later.vegetation[1].base_pose.rotation_enu_from_body,
+        )
+        canopy = first.vegetation[1]
+        x, y, z = canopy.base_pose.position_enu_m
+        hit = VisibilityModule._segment_hit(
+            canopy, (x, y - 5, z + 1), (x, y + 5, z + 1)
+        )
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit[1].blocker_object_id, canopy.vegetation_id)
+        # Render payload is sourced from precisely the same sampled pose.
+        from chongming.rendering.godot import _entities
+
+        tree_payload = [
+            entity for entity in _entities(first)
+            if entity["object_id"] == "oak-01/canopy"
+        ]
+        self.assertEqual(tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m))
+
+    def test_tree_and_wind_authoring_rejects_invalid_dimensions_and_ids(self) -> None:
+        for update in (
+            {"vegetation": "tree"},
+            {"vegetation": [{"id": "tree", "position_enu_m": [0, 0, 0],
+                             "height_m": -1, "crown_radius_m": 1}]},
+            {"vegetation": [{"id": "tree", "position_enu_m": [0, 0, 0],
+                             "height_m": 4, "crown_radius_m": 1},
+                            {"id": "tree", "position_enu_m": [1, 0, 0],
+                             "height_m": 4, "crown_radius_m": 1}]},
+            {"wind": {"turbulent_velocity_std_enu_mps": [-1, 0, 0]}},
+        ):
+            document = demo_authoring()
+            document.update(update)
+            with self.subTest(update=update), self.assertRaises((TypeError, ValueError)):
+                compile_authoring(document)
+
     def test_each_station_has_an_aligned_landscape_a4_with_bound_landmarks(self) -> None:
         document = demo_authoring(stations=3)
         document["world_objects"] = []

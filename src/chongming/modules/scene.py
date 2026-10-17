@@ -93,6 +93,7 @@ from chongming.contracts.scene import (
     TimelineSpec,
     TrajectorySpec,
     TruthRay,
+    VegetationMotionModel,
     VirtualCalibrationInterval,
     VirtualObservationBatch,
     VirtualObservationRequest,
@@ -175,6 +176,31 @@ def _sub(a: Vec3M, b: Vec3M) -> Vec3M:
 
 def _add(a: Vec3M, b: Vec3M) -> Vec3M:
     return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _deterministic_wind(seed: int, object_id: str, time_ns: int, mean: Vec3M, std: Vec3M) -> Vec3M:
+    """Smooth replayable half-second turbulence samples keyed by object and seed."""
+    interval_ns = 500_000_000
+    index, remainder = divmod(time_ns, interval_ns)
+    blend = remainder / interval_ns
+    blend = blend * blend * (3.0 - 2.0 * blend)
+
+    def sample(tick: int) -> Vec3M:
+        digest = hashlib.blake2b(
+            f"{seed}:wind/{object_id}/{tick}".encode(), digest_size=24
+        ).digest()
+        values = []
+        for component in range(3):
+            first = (int.from_bytes(digest[component * 8 : component * 8 + 4], "big") + 0.5) / 2**32
+            second = (int.from_bytes(digest[component * 8 + 4 : component * 8 + 8], "big") + 0.5) / 2**32
+            values.append(math.sqrt(-2.0 * math.log(first)) * math.cos(2.0 * math.pi * second))
+        return tuple(values)  # type: ignore[return-value]
+
+    a, b = sample(index), sample(index + 1)
+    return tuple(
+        mean[i] + std[i] * (a[i] * (1.0 - blend) + b[i] * blend)
+        for i in range(3)
+    )  # type: ignore[return-value]
 
 
 def _scale(a: Vec3M, value: float) -> Vec3M:
@@ -768,6 +794,77 @@ class SceneLogicModule(ModuleShell):
                     appearance=object_spec.appearance,
                 )
             )
+        vegetation_perturbations = {
+            str(item.object_id): item for item in perturbations.vegetation
+        }
+        sampled_vegetation = []
+        wind = perturbations.wind
+        for item in scene.vegetation:
+            sway = vegetation_perturbations.get(str(item.vegetation_id))
+            if (
+                sway is None
+                or wind is None
+                or item.motion_model is not VegetationMotionModel.WIND_DRIVEN
+                or math.hypot(*wind.mean_velocity_enu_mps[:2])
+                + math.hypot(*wind.turbulent_velocity_std_enu_mps[:2])
+                <= _EPS
+            ):
+                sampled_vegetation.append(item)
+                continue
+            digest = hashlib.blake2b(
+                f"{self._random_seed}:vegetation/{item.vegetation_id}".encode(), digest_size=8
+            ).digest()
+            phase = int.from_bytes(digest, "big") / (2**64) * 2 * math.pi
+            seconds = time.time_ns / 1_000_000_000
+            angle = 2 * math.pi * sway.oscillation_frequency_hz * seconds + phase
+            amplitude = math.sqrt(sum(value * value for value in sway.displacement_amplitude_enu_m))
+            wind_velocity = _deterministic_wind(
+                self._random_seed,
+                str(item.vegetation_id),
+                time.time_ns,
+                wind.mean_velocity_enu_mps,
+                wind.turbulent_velocity_std_enu_mps,
+            )
+            wind_east, wind_north = wind_velocity[:2]
+            wind_speed = math.hypot(wind_east, wind_north)
+            if wind_speed <= _EPS:
+                sampled_vegetation.append(item)
+                continue
+            # Mean wind sets the bend direction; two deterministic harmonics
+            # create a restrained gust-like motion without wall-clock/RNG use.
+            scale = min(1.5, wind_speed / 4.0)
+            displacement = amplitude * scale * (
+                math.sin(angle) + 0.18 * math.sin(2.37 * angle + phase * 0.61)
+            )
+            lean = amplitude * min(wind_speed / 12.0, 0.3)
+            bend_angle = max(-0.22, min(0.22, (displacement + lean) / 8.0))
+            horizontal_x = wind_east / wind_speed
+            horizontal_y = wind_north / wind_speed
+            axis = (-horizontal_y, horizontal_x, 0.0)
+            cosine, sine = math.cos(bend_angle), math.sin(bend_angle)
+            one_minus_cosine = 1.0 - cosine
+            ax, ay, az = axis
+            rotation: Matrix3x3 = (
+                (cosine + ax * ax * one_minus_cosine,
+                 ax * ay * one_minus_cosine - az * sine,
+                 ax * az * one_minus_cosine + ay * sine),
+                (ay * ax * one_minus_cosine + az * sine,
+                 cosine + ay * ay * one_minus_cosine,
+                 ay * az * one_minus_cosine - ax * sine),
+                (az * ax * one_minus_cosine - ay * sine,
+                 az * ay * one_minus_cosine + ax * sine,
+                 cosine + az * az * one_minus_cosine),
+            )
+            old_pose = item.base_pose
+            sampled_vegetation.append(
+                replace(
+                    item,
+                    base_pose=replace(
+                        old_pose,
+                        rotation_enu_from_body=rotation,
+                    ),
+                )
+            )
         target_visibility: list[TargetVisibilityTruth] = []
         landmark_visibility: list[LandmarkVisibilityTruth] = []
         # Use the same moving geometry for depth rendering and center-ray truth.
@@ -798,7 +895,7 @@ class SceneLogicModule(ModuleShell):
                             world_objects=scene.world_objects
                             + blockers[:index]
                             + blockers[index + 1 :],
-                            vegetation=scene.vegetation,
+                            vegetation=tuple(sampled_vegetation),
                         )
                     )
                 )
@@ -813,7 +910,7 @@ class SceneLogicModule(ModuleShell):
                             projection=projection,
                             terrain=scene.terrain,
                             world_objects=scene.world_objects + blockers,
-                            vegetation=scene.vegetation,
+                            vegetation=tuple(sampled_vegetation),
                         )
                     )
                 )
@@ -824,7 +921,7 @@ class SceneLogicModule(ModuleShell):
             flying_objects=tuple(flying_objects),
             terrain=scene.terrain,
             world_objects=scene.world_objects,
-            vegetation=scene.vegetation,
+            vegetation=tuple(sampled_vegetation),
             reference_landmarks=scene.reference_landmarks,
             target_visibility=tuple(target_visibility),
             landmark_visibility=tuple(landmark_visibility),

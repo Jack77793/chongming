@@ -53,6 +53,8 @@ def _entity(
     state: KinematicState,
     geometry: GeometrySpec,
     appearance: Any,
+    *,
+    object_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": entity_type,
@@ -63,6 +65,7 @@ def _entity(
         "parameters": [],
         "vertices": None,
         "triangles": None,
+        "object_id": object_id,
     }
     if isinstance(geometry, SphereGeometry):
         payload["parameters"] = [float(geometry.radius_m)]
@@ -110,6 +113,7 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
                 vegetation_item.base_pose,
                 vegetation_item.geometry,
                 vegetation_item.appearance,
+                object_id=str(vegetation_item.vegetation_id),
             )
         )
     for flying_item in scene.flying_objects:

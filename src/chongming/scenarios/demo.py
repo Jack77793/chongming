@@ -22,6 +22,7 @@ from chongming.modules.scene import (
     VirtualObservationModule,
     VisibilityModule,
 )
+from chongming.scenarios.vegetation import tree_geometry
 
 IDENTITY: m.Matrix3x3 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 ZERO_COVARIANCE: m.Matrix3x3 = ((0.0, 0.0, 0.0),) * 3
@@ -377,6 +378,30 @@ def demo_spec(
                 ),
             )
         )
+    vegetation: list[s.VegetationSpec] = []
+    vegetation_perturbations: list[s.VegetationPerturbation] = []
+    for index, position in enumerate(((-25.0, 27.0, 0.0), (10.0, 30.0, 0.0),
+                                      (-31.0, 48.0, 0.0), (23.0, 52.0, 0.0))):
+        tree_id = f"demo-tree-{index + 1:02d}"
+        trunk, canopy = tree_geometry(8.0, 2.2)
+        pose = state(position)
+        canopy_pose = state((position[0], position[1], position[2] + 8.0 * 0.42))
+        trunk_id, canopy_id = s.VegetationId(f"{tree_id}/trunk"), s.VegetationId(f"{tree_id}/canopy")
+        vegetation.extend((
+            s.VegetationSpec(
+                trunk_id, f"演示树 {index + 1} 树干", pose, trunk,
+                s.SurfaceAppearance((0.20, 0.105, 0.045), 0.9),
+                s.VegetationMotionModel.STATIC, True,
+            ),
+            s.VegetationSpec(
+                canopy_id, f"演示树 {index + 1} 树冠", canopy_pose, canopy,
+                s.SurfaceAppearance((0.12, 0.31, 0.09), 0.9),
+                s.VegetationMotionModel.WIND_DRIVEN, True,
+            ),
+        ))
+        vegetation_perturbations.append(
+            s.VegetationPerturbation(s.WorldObjectId(str(canopy_id)), (0.3, 0.0, 0.0), 0.22)
+        )
     return s.ScenarioSpec(
         "scene-v1",
         "video-demo",
@@ -409,6 +434,7 @@ def demo_spec(
             flying,
             tuple(landmarks),
             s.IlluminationSpec((-0.4, -0.5, 0.76), 20_000.0, (0.78, 0.84, 0.91)),
+            tuple(vegetation),
         ),
         s.TimelineSpec(
             s.ClockDomainSpec(
@@ -448,7 +474,10 @@ def demo_spec(
                 for config in configs
             ),
         ),
-        s.ExperimentPerturbations((), (), None, (), None, None, (), ()),
+        s.ExperimentPerturbations(
+            (), (), s.WindPerturbation((2.5, 1.1, 0.0), (0.15, 0.15, 0.0)),
+            (), None, None, tuple(vegetation_perturbations), (),
+        ),
     )
 
 

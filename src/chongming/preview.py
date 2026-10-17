@@ -126,6 +126,7 @@ def _preview_metadata(step: ScenarioStep, sequence: int, loop_no: int) -> dict[s
         "monitor": {
             "terrain": asdict(scene.terrain),
             "world_objects": [asdict(item) for item in scene.world_objects],
+            "vegetation": [asdict(item) for item in scene.vegetation],
             "cameras": [asdict(item) for item in scene.cameras],
             "flying_objects": [asdict(item) for item in scene.flying_objects],
             "visibility": [asdict(item) for item in scene.target_visibility],

@@ -26,6 +26,7 @@ from chongming.contracts.scene import (
     ScenarioSpec,
     SceneCameraSpec,
     TerrainModel,
+    WorldObjectId,
 )
 from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
 
@@ -255,6 +256,24 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
     unique(
         [scene.terrain.terrain_id, *(o.object_id for o in scene.world_objects)], "world object ID"
     )
+    unique([v.vegetation_id for v in scene.vegetation], "vegetation ID")
+    unique(
+        [scene.terrain.terrain_id, *(o.object_id for o in scene.world_objects),
+         *(WorldObjectId(str(v.vegetation_id)) for v in scene.vegetation)],
+        "scene geometry ID",
+    )
+    for vegetation_item in scene.vegetation:
+        if vegetation_item.motion_model.value not in {"static", "periodic", "wind_driven"}:
+            raise ValueError(f"unsupported vegetation motion model: {vegetation_item.motion_model!r}")
+    vegetation_perturbation_ids = [item.object_id for item in spec.perturbations.vegetation]
+    unique(vegetation_perturbation_ids, "vegetation perturbation")
+    canopy_ids = {
+        WorldObjectId(str(item.vegetation_id))
+        for item in scene.vegetation
+        if item.motion_model.value == "wind_driven"
+    }
+    if not set(vegetation_perturbation_ids) <= canopy_ids:
+        raise ValueError("vegetation perturbations must reference a wind-driven vegetation object")
     trajectories = [c.optical_pose_trajectory for c in scene.cameras] + [
         t.trajectory for t in scene.flying_objects
     ]
@@ -464,16 +483,13 @@ def validate_supported_features(spec: ScenarioSpec) -> None:
     ):
         raise ValueError("Godot cameras require zero skew and square pixels")
     if (
-        spec.scene_definition.vegetation
-        or p.wind
-        or p.clouds
+        p.clouds
         or p.fog
         or p.rain
-        or p.vegetation
         or p.camera_jitter
         or p.communication
     ):
-        raise ValueError("configured environment/transport effects are not implemented")
+        raise ValueError("configured cloud/fog/rain/camera-jitter/transport effects are not implemented")
     if (
         a.auto_exposure_enabled
         or a.dynamic_range_stops is not None
