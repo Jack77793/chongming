@@ -26,7 +26,6 @@ from chongming.scenarios.demo import (
     orbit_path,
     state,
 )
-from chongming.scenarios.vegetation import tree_geometry
 
 AUTHORING_FORMAT = "scenario-authoring-v2"
 STANDARD_MAIN_RESOLUTION = (1920, 1080)
@@ -581,7 +580,8 @@ def compile_authoring(
         frequency = _number(item.get("sway_frequency_hz", 0.22), "vegetation.sway_frequency_hz")
         if height <= 0 or radius <= 0 or amplitude < 0 or frequency <= 0:
             raise ValueError("tree dimensions/frequency must be positive and sway amplitude nonnegative")
-        trunk_mesh, canopy_mesh = tree_geometry(height, radius)
+        trunk_proxy = s.CylinderGeometry(max(0.12, radius * 0.12), height * 0.58)
+        canopy_proxy = s.CylinderGeometry(radius, height * 0.50)
         trunk_id = s.VegetationId(f"{tree_id}/trunk")
         canopy_id = s.VegetationId(f"{tree_id}/canopy")
         pose = state(position, ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
@@ -589,14 +589,16 @@ def compile_authoring(
         display_name = str(item.get("display_name", tree_id))
         vegetation.extend((
             s.VegetationSpec(
-                trunk_id, f"{display_name} 树干", pose, trunk_mesh,
+                trunk_id, f"{display_name} 树干", pose, trunk_proxy,
                 s.SurfaceAppearance((0.20, 0.105, 0.045), 0.9),
                 s.VegetationMotionModel.STATIC, True,
+                s.TreeVisualSpec(s.TreePart.TRUNK, trunk_proxy.height_m, trunk_proxy.radius_m),
             ),
             s.VegetationSpec(
-                canopy_id, f"{display_name} 树冠", canopy_pose, canopy_mesh,
+                canopy_id, f"{display_name} 树冠", canopy_pose, canopy_proxy,
                 s.SurfaceAppearance((0.12, 0.31, 0.09), 0.9),
                 s.VegetationMotionModel.WIND_DRIVEN, True,
+                s.TreeVisualSpec(s.TreePart.CANOPY, canopy_proxy.height_m, canopy_proxy.radius_m),
             ),
         ))
         vegetation_perturbations.append(

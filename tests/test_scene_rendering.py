@@ -105,8 +105,10 @@ class SceneConfigurationTests(unittest.TestCase):
         }
         spec = compile_authoring(document)
         self.assertEqual(len(spec.scene_definition.vegetation), 2)
-        self.assertEqual(len(spec.scene_definition.vegetation[0].geometry.vertices_body_m), 16)
-        self.assertEqual(len(spec.scene_definition.vegetation[1].geometry.triangle_vertex_indices), 24)
+        self.assertIsInstance(spec.scene_definition.vegetation[0].geometry, s.CylinderGeometry)
+        self.assertIsInstance(spec.scene_definition.vegetation[1].geometry, s.CylinderGeometry)
+        self.assertEqual(spec.scene_definition.vegetation[0].visual.part, s.TreePart.TRUNK)
+        self.assertEqual(spec.scene_definition.vegetation[1].visual.part, s.TreePart.CANOPY)
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
         first = logic.sample(s.SimulationTime("demo-clock", 1_000_000_000, 30))
@@ -134,6 +136,11 @@ class SceneConfigurationTests(unittest.TestCase):
             if entity["object_id"] == "oak-01/canopy"
         ]
         self.assertEqual(tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m))
+        self.assertEqual(tree_payload[0]["visual"]["kind"], "tree_canopy")
+        self.assertEqual(tree_payload[0]["visual"]["height"], first.vegetation[1].visual.height_m)
+        self.assertEqual(tree_payload[0]["visual"]["radius"], first.vegetation[1].visual.radius_m)
+        self.assertIsNone(tree_payload[0]["vertices"])
+        self.assertIsNone(tree_payload[0]["triangles"])
 
     def test_tree_and_wind_authoring_rejects_invalid_dimensions_and_ids(self) -> None:
         for update in (

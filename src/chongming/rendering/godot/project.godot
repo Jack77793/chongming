@@ -1,6 +1,6 @@
 ; Godot 4.7.2 graphics worker used by the virtual-scene renderer.
 ; The worker is intentionally a small process boundary: Python owns time,
-; truth, visibility and evidence; Godot owns pixels only.
+; truth and evidence; Godot owns procedural visuals, scene objects and pixels.
 
 config_version=5
 

@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from chongming.contracts.model import Vec3M
 from chongming.contracts.scene import (
     BoxGeometry,
+    CylinderGeometry,
     GeometrySpec,
     KinematicState,
     SceneCameraDistortion,
@@ -118,6 +119,42 @@ def surface_hits(
         axes = np.argmax(np.abs(points / half), axis=1)
         indices = np.flatnonzero(hit)
         normals[indices, axes] = np.sign(points[np.arange(len(points)), axes])
+    elif isinstance(geometry, CylinderGeometry):
+        if geometry.radius_m <= 0 or geometry.height_m <= 0:
+            raise ValueError("cylinder dimensions must be positive")
+        radial = rays[:, 0] ** 2 + rays[:, 1] ** 2
+        linear = 2.0 * (local_origin[0] * rays[:, 0] + local_origin[1] * rays[:, 1])
+        constant = local_origin[0] ** 2 + local_origin[1] ** 2 - geometry.radius_m**2
+        discriminant = linear * linear - 4.0 * radial * constant
+        root = np.sqrt(np.maximum(discriminant, 0.0))
+        near = (-linear - root) / np.where(radial > 1e-12, 2.0 * radial, 1.0)
+        far = (-linear + root) / np.where(radial > 1e-12, 2.0 * radial, 1.0)
+        side_depth = np.where(near > NEAR, near, far)
+        side_point = local_origin + side_depth[:, None] * rays
+        side_hit = (
+            (radial > 1e-12)
+            & (discriminant >= 0)
+            & (side_depth > NEAR)
+            & (side_point[:, 2] >= 0.0)
+            & (side_point[:, 2] <= geometry.height_m)
+        )
+        depth[side_hit] = side_depth[side_hit]
+        normals[side_hit, 0] = side_point[side_hit, 0] / geometry.radius_m
+        normals[side_hit, 1] = side_point[side_hit, 1] / geometry.radius_m
+        cap_depths = []
+        for z in (0.0, geometry.height_m):
+            cap = (z - local_origin[2]) / np.where(np.abs(rays[:, 2]) > 1e-12, rays[:, 2], 1.0)
+            point = local_origin + cap[:, None] * rays
+            cap_hit = (
+                (np.abs(rays[:, 2]) > 1e-12)
+                & (cap > NEAR)
+                & (point[:, 0] ** 2 + point[:, 1] ** 2 <= geometry.radius_m**2)
+            )
+            cap_depths.append((cap, cap_hit, z))
+        for cap, cap_hit, z in cap_depths:
+            replace = cap_hit & (cap < depth)
+            depth[replace] = cap[replace]
+            normals[replace, 2] = 1.0 if z == geometry.height_m else -1.0
     else:
         vertices = np.asarray(geometry.vertices_body_m, dtype=np.float64)
         for triangle in geometry.triangle_vertex_indices:
@@ -161,4 +198,6 @@ def contains_point(origin: Vec3M, pose: KinematicState, geometry: GeometrySpec) 
         return bool(point @ point < geometry.radius_m**2)
     if isinstance(geometry, BoxGeometry):
         return bool(np.all(np.abs(point) < geometry.half_extents_body_m))
+    if isinstance(geometry, CylinderGeometry):
+        return bool(point[0] ** 2 + point[1] ** 2 < geometry.radius_m**2 and 0.0 < point[2] < geometry.height_m)
     return False

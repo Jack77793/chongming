@@ -1,6 +1,6 @@
 extends Node
 
-## Python owns all simulation time. Render only on an immutable request.
+## Python owns simulation time; Godot owns procedural visuals. Render only on a snapshot request.
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
 var _buffer := PackedByteArray()
@@ -163,7 +163,7 @@ func _render(request: Dictionary) -> PackedByteArray:
 			_instances.append(new_instance)
 			_signatures.append("")
 		var instance := _instances[index]
-		var signature := JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.color, entity.reflectance])
+		var signature := JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance])
 		if signature != _signatures[index]:
 			instance.mesh = _mesh(entity)
 			instance.material_override = _material(entity.color, float(entity.reflectance))
@@ -181,6 +181,14 @@ func _render(request: Dictionary) -> PackedByteArray:
 
 
 func _mesh(entity: Dictionary) -> Mesh:
+	var visual: Dictionary = {}
+	var visual_value: Variant = entity.get("visual", null)
+	if visual_value is Dictionary:
+		visual = visual_value
+	if visual.get("kind", "") == "tree_trunk":
+		return _tree_trunk_mesh(float(visual.get("height", 1.0)), float(visual.get("radius", 0.2)))
+	if visual.get("kind", "") == "tree_canopy":
+		return _tree_canopy_mesh(float(visual.get("height", 1.0)), float(visual.get("radius", 1.0)))
 	var parameters: Array = entity.parameters
 	if int(entity.type) == 0:
 		var mesh := SphereMesh.new()
@@ -198,6 +206,89 @@ func _mesh(entity: Dictionary) -> Mesh:
 			surface.add_vertex(_vector(entity.vertices[int(vertex)]))
 	surface.generate_normals()
 	return surface.commit()
+
+
+func _tree_trunk_mesh(height: float, radius: float) -> Mesh:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var trunk_radius: float = maxf(radius, 0.05)
+	_add_cylinder_between(surface, Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, height), trunk_radius, trunk_radius * 0.48, 10)
+	# A few tapered branches make the silhouette read as a tree at low frame rates.
+	for index in range(5):
+		var angle := TAU * float(index) / 5.0 + 0.35
+		var branch_height := height * (0.42 + 0.09 * float(index % 3))
+		var branch_start := Vector3(0.0, 0.0, branch_height)
+		var branch_end := Vector3(cos(angle) * radius * 2.3, sin(angle) * radius * 2.3, branch_height + height * 0.14)
+		_add_cylinder_between(surface, branch_start, branch_end, trunk_radius * 0.28, trunk_radius * 0.08, 7)
+	surface.generate_normals()
+	return surface.commit()
+
+
+func _tree_canopy_mesh(height: float, radius: float) -> Mesh:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Overlapping low-poly ellipsoids provide a clustered canopy rather than cones.
+	var centers := [
+		Vector3(0.0, 0.0, height * 0.14),
+		Vector3(-radius * 0.38, radius * 0.08, height * 0.32),
+		Vector3(radius * 0.34, -radius * 0.12, height * 0.38),
+		Vector3(-radius * 0.12, -radius * 0.34, height * 0.54),
+		Vector3(radius * 0.16, radius * 0.28, height * 0.62),
+		Vector3(0.0, 0.0, height * 0.82),
+	]
+	var scales := [
+		Vector3(radius * 0.72, radius * 0.67, height * 0.25),
+		Vector3(radius * 0.55, radius * 0.48, height * 0.24),
+		Vector3(radius * 0.58, radius * 0.52, height * 0.25),
+		Vector3(radius * 0.48, radius * 0.43, height * 0.22),
+		Vector3(radius * 0.46, radius * 0.42, height * 0.24),
+		Vector3(radius * 0.38, radius * 0.36, height * 0.28),
+	]
+	for index in range(centers.size()):
+		_add_ellipsoid(surface, centers[index], scales[index], 5, 8)
+	surface.generate_normals()
+	return surface.commit()
+
+
+func _add_ellipsoid(surface: SurfaceTool, center: Vector3, radii: Vector3, rings: int, segments: int) -> void:
+	for ring in range(rings):
+		var phi0 := PI * float(ring) / float(rings)
+		var phi1 := PI * float(ring + 1) / float(rings)
+		for segment in range(segments):
+			var theta0 := TAU * float(segment) / float(segments)
+			var theta1 := TAU * float(segment + 1) / float(segments)
+			var a := center + Vector3(sin(phi0) * cos(theta0) * radii.x, sin(phi0) * sin(theta0) * radii.y, cos(phi0) * radii.z)
+			var b := center + Vector3(sin(phi0) * cos(theta1) * radii.x, sin(phi0) * sin(theta1) * radii.y, cos(phi0) * radii.z)
+			var c := center + Vector3(sin(phi1) * cos(theta1) * radii.x, sin(phi1) * sin(theta1) * radii.y, cos(phi1) * radii.z)
+			var d := center + Vector3(sin(phi1) * cos(theta0) * radii.x, sin(phi1) * sin(theta0) * radii.y, cos(phi1) * radii.z)
+			surface.add_triangle_fan(PackedVector3Array([a, b, c]))
+			surface.add_triangle_fan(PackedVector3Array([a, c, d]))
+
+
+func _add_cylinder_between(surface: SurfaceTool, start: Vector3, finish: Vector3, start_radius: float, finish_radius: float, segments: int) -> void:
+	var direction := finish - start
+	var length := direction.length()
+	if length <= 0.001:
+		return
+	var axis := direction / length
+	var helper := Vector3.UP if absf(axis.y) < 0.9 else Vector3.RIGHT
+	var side := axis.cross(helper).normalized()
+	var other := axis.cross(side).normalized()
+	for index in range(segments):
+		var angle0 := TAU * float(index) / float(segments)
+		var angle1 := TAU * float(index + 1) / float(segments)
+		var radial0 := side * cos(angle0) + other * sin(angle0)
+		var radial1 := side * cos(angle1) + other * sin(angle1)
+		surface.add_triangle_fan(PackedVector3Array([
+			start + radial0 * start_radius,
+			start + radial1 * start_radius,
+			finish + radial1 * finish_radius,
+		]))
+		surface.add_triangle_fan(PackedVector3Array([
+			start + radial0 * start_radius,
+			finish + radial1 * finish_radius,
+			finish + radial0 * finish_radius,
+		]))
 
 
 func _material(rgb: Array, reflectance: float) -> StandardMaterial3D:

@@ -22,7 +22,6 @@ from chongming.modules.scene import (
     VirtualObservationModule,
     VisibilityModule,
 )
-from chongming.scenarios.vegetation import tree_geometry
 
 IDENTITY: m.Matrix3x3 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 ZERO_COVARIANCE: m.Matrix3x3 = ((0.0, 0.0, 0.0),) * 3
@@ -383,20 +382,23 @@ def demo_spec(
     for index, position in enumerate(((-25.0, 27.0, 0.0), (10.0, 30.0, 0.0),
                                       (-31.0, 48.0, 0.0), (23.0, 52.0, 0.0))):
         tree_id = f"demo-tree-{index + 1:02d}"
-        trunk, canopy = tree_geometry(8.0, 2.2)
+        trunk_proxy = s.CylinderGeometry(max(0.12, 2.2 * 0.12), 8.0 * 0.58)
+        canopy_proxy = s.CylinderGeometry(2.2, 8.0 * 0.50)
         pose = state(position)
         canopy_pose = state((position[0], position[1], position[2] + 8.0 * 0.42))
         trunk_id, canopy_id = s.VegetationId(f"{tree_id}/trunk"), s.VegetationId(f"{tree_id}/canopy")
         vegetation.extend((
             s.VegetationSpec(
-                trunk_id, f"演示树 {index + 1} 树干", pose, trunk,
+                trunk_id, f"演示树 {index + 1} 树干", pose, trunk_proxy,
                 s.SurfaceAppearance((0.20, 0.105, 0.045), 0.9),
                 s.VegetationMotionModel.STATIC, True,
+                s.TreeVisualSpec(s.TreePart.TRUNK, trunk_proxy.height_m, trunk_proxy.radius_m),
             ),
             s.VegetationSpec(
-                canopy_id, f"演示树 {index + 1} 树冠", canopy_pose, canopy,
+                canopy_id, f"演示树 {index + 1} 树冠", canopy_pose, canopy_proxy,
                 s.SurfaceAppearance((0.12, 0.31, 0.09), 0.9),
                 s.VegetationMotionModel.WIND_DRIVEN, True,
+                s.TreeVisualSpec(s.TreePart.CANOPY, canopy_proxy.height_m, canopy_proxy.radius_m),
             ),
         ))
         vegetation_perturbations.append(

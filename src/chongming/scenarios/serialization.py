@@ -25,6 +25,7 @@ from chongming.contracts.scene import (
     SCENE_RANDOM_SEED,
     ScenarioSpec,
     SceneCameraSpec,
+    CylinderGeometry,
     TerrainModel,
     WorldObjectId,
 )
@@ -421,6 +422,8 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
             raise ValueError("sphere radius must be positive")
         if isinstance(geometry, BoxGeometry) and any(v <= 0 for v in geometry.half_extents_body_m):
             raise ValueError("box extents must be positive")
+        if isinstance(geometry, CylinderGeometry) and (geometry.radius_m <= 0 or geometry.height_m <= 0):
+            raise ValueError("cylinder dimensions must be positive")
         if isinstance(geometry, TriangleMeshGeometry) and (
             not geometry.vertices_body_m
             or not geometry.triangle_vertex_indices

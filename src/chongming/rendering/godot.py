@@ -55,6 +55,7 @@ def _entity(
     appearance: Any,
     *,
     object_id: str | None = None,
+    visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": entity_type,
@@ -66,8 +67,12 @@ def _entity(
         "vertices": None,
         "triangles": None,
         "object_id": object_id,
+        "visual": visual,
     }
-    if isinstance(geometry, SphereGeometry):
+    if visual is not None:
+        # Godot generates this visual model from semantic dimensions.
+        pass
+    elif isinstance(geometry, SphereGeometry):
         payload["parameters"] = [float(geometry.radius_m)]
     elif isinstance(geometry, BoxGeometry):
         payload["parameters"] = [float(value) for value in geometry.half_extents_body_m]
@@ -106,6 +111,7 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
             )
         )
     for vegetation_item in scene.vegetation:
+        visual = _vegetation_visual(vegetation_item)
         entities.append(
             _entity(
                 _geometry_type(vegetation_item.geometry),
@@ -114,6 +120,7 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
                 vegetation_item.geometry,
                 vegetation_item.appearance,
                 object_id=str(vegetation_item.vegetation_id),
+                visual=visual,
             )
         )
     for flying_item in scene.flying_objects:
@@ -127,6 +134,22 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
             )
         )
     return entities
+
+
+def _vegetation_visual(item: Any) -> dict[str, Any] | None:
+    """Describe vegetation to Godot without shipping its Python mesh.
+
+    The logical mesh remains available to the truth resolver.  It is deliberately
+    not part of the render protocol: Godot owns the high-detail visual model.
+    """
+    visual = getattr(item, "visual", None)
+    if visual is None:
+        return None
+    return {
+        "kind": f"tree_{visual.part.value}",
+        "height": visual.height_m,
+        "radius": visual.radius_m,
+    }
 
 
 def _geometry_type(geometry: GeometrySpec) -> int:

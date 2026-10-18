@@ -158,12 +158,34 @@ class BoxGeometry:
 
 
 @dataclass(frozen=True)
+class CylinderGeometry:
+    """Vertical finite cylinder around local +Z, used for cheap scene proxies."""
+
+    radius_m: float
+    height_m: float
+
+
+@dataclass(frozen=True)
 class TriangleMeshGeometry:
     vertices_body_m: tuple[Vec3M, ...]
     triangle_vertex_indices: tuple[tuple[int, int, int], ...]
 
 
-GeometrySpec = SphereGeometry | BoxGeometry | TriangleMeshGeometry
+GeometrySpec = SphereGeometry | BoxGeometry | CylinderGeometry | TriangleMeshGeometry
+
+
+class TreePart(StrEnum):
+    TRUNK = "trunk"
+    CANOPY = "canopy"
+
+
+@dataclass(frozen=True)
+class TreeVisualSpec:
+    """Semantic dimensions; Godot builds and owns all visual geometry."""
+
+    part: TreePart
+    height_m: float
+    radius_m: float
 
 
 @dataclass(frozen=True)
@@ -227,6 +249,7 @@ class VegetationSpec:
     appearance: SurfaceAppearance
     motion_model: VegetationMotionModel
     occludes_sight_lines: bool
+    visual: TreeVisualSpec | None = None
 
 
 @dataclass(frozen=True)
