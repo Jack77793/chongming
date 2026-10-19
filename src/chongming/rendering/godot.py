@@ -9,6 +9,7 @@ small framed protocol is the boundary for later Godot scene/material work.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -139,7 +140,7 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
 def _vegetation_visual(item: Any) -> dict[str, Any] | None:
     """Describe vegetation to Godot without shipping its Python mesh.
 
-    The logical mesh remains available to the truth resolver.  It is deliberately
+    The logical cylinder remains available to the truth resolver.  It is deliberately
     not part of the render protocol: Godot owns the high-detail visual model.
     """
     visual = getattr(item, "visual", None)
@@ -149,6 +150,9 @@ def _vegetation_visual(item: Any) -> dict[str, Any] | None:
         "kind": f"tree_{visual.part.value}",
         "height": visual.height_m,
         "radius": visual.radius_m,
+        "seed": int.from_bytes(
+            hashlib.blake2s(str(item.vegetation_id).encode(), digest_size=4).digest(), "little"
+        ),
     }
 
 

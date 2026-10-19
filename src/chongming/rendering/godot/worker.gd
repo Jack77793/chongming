@@ -1,6 +1,7 @@
 extends Node
 
 ## Python owns simulation time; Godot owns procedural visuals. Render only on a snapshot request.
+const Vegetation = preload("res://vegetation.gd")
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
 var _buffer := PackedByteArray()
@@ -13,7 +14,7 @@ var _camera: Camera3D
 var _environment: Environment
 var _sun: DirectionalLight3D
 var _ground: MeshInstance3D
-var _instances: Array[MeshInstance3D] = []
+var _instances: Array[Node3D] = []
 var _signatures: Array[String] = []
 var _busy := false
 
@@ -151,24 +152,7 @@ func _render(request: Dictionary) -> PackedByteArray:
 	_sun.basis = Basis.looking_at(-sun_direction, Vector3.FORWARD if absf(sun_direction.y) > 0.99 else Vector3.UP)
 	_ground.position = Vector3(_camera.position.x, float(request["terrainElevation"]), _camera.position.z)
 	_ground.material_override = _material(request["terrainColor"], float(request["terrainReflectance"]))
-	var entities: Array = request["entities"]
-	while _instances.size() > entities.size():
-		_instances.pop_back().free()
-		_signatures.pop_back()
-	for index in range(entities.size()):
-		var entity: Dictionary = entities[index]
-		if index == _instances.size():
-			var new_instance := MeshInstance3D.new()
-			_world.add_child(new_instance)
-			_instances.append(new_instance)
-			_signatures.append("")
-		var instance := _instances[index]
-		var signature := JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance])
-		if signature != _signatures[index]:
-			instance.mesh = _mesh(entity)
-			instance.material_override = _material(entity.color, float(entity.reflectance))
-			_signatures[index] = signature
-		instance.transform = Transform3D(_basis(entity.rotation), _enu(entity.position))
+	_sync_entities(request["entities"])
 	# No GPU frames between requests, even while the experiment is paused.
 	# Flush SceneTree transform/material notifications before drawing; otherwise
 	# the first image can contain the previous snapshot or an empty viewport.
@@ -180,15 +164,36 @@ func _render(request: Dictionary) -> PackedByteArray:
 	return image.get_data()
 
 
+func _sync_entities(entities: Array) -> void:
+	while _instances.size() > entities.size():
+		_instances.pop_back().free()
+		_signatures.pop_back()
+	for index in range(entities.size()):
+		var entity: Dictionary = entities[index]
+		if index == _instances.size():
+			_instances.append(Node3D.new())
+			_signatures.append("")
+		var signature := JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance])
+		if signature != _signatures[index]:
+			var old_instance := _instances[index]
+			old_instance.free()
+			var visual_value: Variant = entity.get("visual", null)
+			var new_instance: Node3D
+			if visual_value is Dictionary and String(visual_value.get("kind", "")).begins_with("tree_"):
+				new_instance = Vegetation.create(visual_value, entity.color, float(entity.reflectance))
+			else:
+				var mesh_instance := MeshInstance3D.new()
+				mesh_instance.mesh = _mesh(entity)
+				mesh_instance.material_override = _material(entity.color, float(entity.reflectance))
+				new_instance = mesh_instance
+			_world.add_child(new_instance)
+			_instances[index] = new_instance
+			_signatures[index] = signature
+		var instance := _instances[index]
+		instance.transform = Transform3D(_basis(entity.rotation), _enu(entity.position))
+
+
 func _mesh(entity: Dictionary) -> Mesh:
-	var visual: Dictionary = {}
-	var visual_value: Variant = entity.get("visual", null)
-	if visual_value is Dictionary:
-		visual = visual_value
-	if visual.get("kind", "") == "tree_trunk":
-		return _tree_trunk_mesh(float(visual.get("height", 1.0)), float(visual.get("radius", 0.2)))
-	if visual.get("kind", "") == "tree_canopy":
-		return _tree_canopy_mesh(float(visual.get("height", 1.0)), float(visual.get("radius", 1.0)))
 	var parameters: Array = entity.parameters
 	if int(entity.type) == 0:
 		var mesh := SphereMesh.new()
@@ -206,89 +211,6 @@ func _mesh(entity: Dictionary) -> Mesh:
 			surface.add_vertex(_vector(entity.vertices[int(vertex)]))
 	surface.generate_normals()
 	return surface.commit()
-
-
-func _tree_trunk_mesh(height: float, radius: float) -> Mesh:
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var trunk_radius: float = maxf(radius, 0.05)
-	_add_cylinder_between(surface, Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, height), trunk_radius, trunk_radius * 0.48, 10)
-	# A few tapered branches make the silhouette read as a tree at low frame rates.
-	for index in range(5):
-		var angle := TAU * float(index) / 5.0 + 0.35
-		var branch_height := height * (0.42 + 0.09 * float(index % 3))
-		var branch_start := Vector3(0.0, 0.0, branch_height)
-		var branch_end := Vector3(cos(angle) * radius * 2.3, sin(angle) * radius * 2.3, branch_height + height * 0.14)
-		_add_cylinder_between(surface, branch_start, branch_end, trunk_radius * 0.28, trunk_radius * 0.08, 7)
-	surface.generate_normals()
-	return surface.commit()
-
-
-func _tree_canopy_mesh(height: float, radius: float) -> Mesh:
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Overlapping low-poly ellipsoids provide a clustered canopy rather than cones.
-	var centers := [
-		Vector3(0.0, 0.0, height * 0.14),
-		Vector3(-radius * 0.38, radius * 0.08, height * 0.32),
-		Vector3(radius * 0.34, -radius * 0.12, height * 0.38),
-		Vector3(-radius * 0.12, -radius * 0.34, height * 0.54),
-		Vector3(radius * 0.16, radius * 0.28, height * 0.62),
-		Vector3(0.0, 0.0, height * 0.82),
-	]
-	var scales := [
-		Vector3(radius * 0.72, radius * 0.67, height * 0.25),
-		Vector3(radius * 0.55, radius * 0.48, height * 0.24),
-		Vector3(radius * 0.58, radius * 0.52, height * 0.25),
-		Vector3(radius * 0.48, radius * 0.43, height * 0.22),
-		Vector3(radius * 0.46, radius * 0.42, height * 0.24),
-		Vector3(radius * 0.38, radius * 0.36, height * 0.28),
-	]
-	for index in range(centers.size()):
-		_add_ellipsoid(surface, centers[index], scales[index], 5, 8)
-	surface.generate_normals()
-	return surface.commit()
-
-
-func _add_ellipsoid(surface: SurfaceTool, center: Vector3, radii: Vector3, rings: int, segments: int) -> void:
-	for ring in range(rings):
-		var phi0 := PI * float(ring) / float(rings)
-		var phi1 := PI * float(ring + 1) / float(rings)
-		for segment in range(segments):
-			var theta0 := TAU * float(segment) / float(segments)
-			var theta1 := TAU * float(segment + 1) / float(segments)
-			var a := center + Vector3(sin(phi0) * cos(theta0) * radii.x, sin(phi0) * sin(theta0) * radii.y, cos(phi0) * radii.z)
-			var b := center + Vector3(sin(phi0) * cos(theta1) * radii.x, sin(phi0) * sin(theta1) * radii.y, cos(phi0) * radii.z)
-			var c := center + Vector3(sin(phi1) * cos(theta1) * radii.x, sin(phi1) * sin(theta1) * radii.y, cos(phi1) * radii.z)
-			var d := center + Vector3(sin(phi1) * cos(theta0) * radii.x, sin(phi1) * sin(theta0) * radii.y, cos(phi1) * radii.z)
-			surface.add_triangle_fan(PackedVector3Array([a, b, c]))
-			surface.add_triangle_fan(PackedVector3Array([a, c, d]))
-
-
-func _add_cylinder_between(surface: SurfaceTool, start: Vector3, finish: Vector3, start_radius: float, finish_radius: float, segments: int) -> void:
-	var direction := finish - start
-	var length := direction.length()
-	if length <= 0.001:
-		return
-	var axis := direction / length
-	var helper := Vector3.UP if absf(axis.y) < 0.9 else Vector3.RIGHT
-	var side := axis.cross(helper).normalized()
-	var other := axis.cross(side).normalized()
-	for index in range(segments):
-		var angle0 := TAU * float(index) / float(segments)
-		var angle1 := TAU * float(index + 1) / float(segments)
-		var radial0 := side * cos(angle0) + other * sin(angle0)
-		var radial1 := side * cos(angle1) + other * sin(angle1)
-		surface.add_triangle_fan(PackedVector3Array([
-			start + radial0 * start_radius,
-			start + radial1 * start_radius,
-			finish + radial1 * finish_radius,
-		]))
-		surface.add_triangle_fan(PackedVector3Array([
-			start + radial0 * start_radius,
-			finish + radial1 * finish_radius,
-			finish + radial0 * finish_radius,
-		]))
 
 
 func _material(rgb: Array, reflectance: float) -> StandardMaterial3D:
