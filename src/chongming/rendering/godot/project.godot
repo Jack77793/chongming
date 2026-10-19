@@ -1,0 +1,24 @@
+; Godot 4.7.2 graphics worker used by the virtual-scene renderer.
+; The worker is intentionally a small process boundary: Python owns time,
+; truth and evidence; Godot owns procedural visuals, scene objects and pixels.
+
+config_version=5
+
+[application]
+
+config/name="Chongming Virtual Scene Renderer"
+run/main_scene="res://worker.tscn"
+
+[display]
+
+window/size/viewport_width=64
+window/size/viewport_height=48
+window/size/no_focus=true
+window/size/borderless=true
+window/vsync/vsync_mode=0
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0, 0, 0, 1)
