@@ -1,0 +1,57 @@
+{
+  "format": "scenario-authoring-v2",
+  "scenario_id": "photography-review",
+  "duration_s": 8,
+  "fps": 30,
+  "stations": [
+    {"id": "station-01", "position_enu_m": [0, -20, 3], "main_yaw_deg": 0, "main_elevation_deg": 8}
+  ],
+  "targets": [
+    {"id": "aircraft", "geometry": {"type": "aircraft"},
+     "motion": {"type": "constant_velocity", "position_enu_m": [-8, 150, 23], "velocity_enu_mps": [2, 0, 0]}}
+  ],
+  "world_objects": [
+    {"id": "near-building", "position_enu_m": [-14, 80, 8],
+     "geometry": {"type": "box", "half_extents_m": [7, 9, 8]},
+     "appearance": {"linear_rgb": [0.22, 0.25, 0.29], "diffuse_reflectance": 0.8}},
+    {"id": "far-building", "position_enu_m": [90, 950, 70],
+     "geometry": {"type": "box", "half_extents_m": [60, 35, 70]},
+     "appearance": {"linear_rgb": [0.22, 0.25, 0.29], "diffuse_reflectance": 0.8}}
+  ],
+  "vegetation": [
+    {"id": "oak-left", "position_enu_m": [-17, 34, 0], "height_m": 11, "crown_radius_m": 3.5},
+    {"id": "oak-right", "position_enu_m": [18, 46, 0], "height_m": 13, "crown_radius_m": 4},
+    {"id": "hedge-left", "type": "shrub", "position_enu_m": [-7, 30, 0],
+     "height_m": 2.2, "radius_m": 2.8},
+    {"id": "meadow", "type": "grass", "position_enu_m": [7, 26, 0],
+     "size_m": [16, 9], "blade_height_m": 0.55, "density_per_m2": 13}
+  ],
+  "environment": {
+    "sun_direction_enu_unit": [0.18, 1, 0.24],
+    "illuminance_lux": 85000,
+    "sky_linear_rgb": [0.42, 0.63, 0.86],
+    "atmospheric_visibility_m": 6000,
+    "sun_angular_diameter_deg": 0.53,
+    "glare_strength": 0.35
+  },
+  "clouds": [
+    {"layer_altitude_m": 1800, "optical_density": 0.48,
+     "drift_velocity_enu_mps": [1.6, 0.35, 0]},
+    {"layer_altitude_m": 3600, "optical_density": 0.22,
+     "drift_velocity_enu_mps": [-0.45, 0.7, 0]}
+  ],
+  "rendering": {
+    "terrain_detail_strength": 0.8,
+    "ssao_intensity": 0.7,
+    "fxaa_enabled": true,
+    "god_rays_strength": 0.28,
+    "vegetation_lod_near_m": 130,
+    "vegetation_lod_far_m": 700
+  },
+  "camera_jitter": {
+    "angular_amplitude_deg": [0.006, 0.008, 0.004],
+    "pixel_amplitude_px": [0.35, 0.25],
+    "frequency_hz": 7,
+    "roles": ["main"]
+  }
+}

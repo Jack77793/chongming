@@ -38,6 +38,7 @@ from chongming.preview import (
 from chongming.rendering.geometry import optical_rays, surface_hits
 from chongming.rendering.godot import (
     GodotRenderer,
+    _request,
     projected_footprints,
     quantize_rgb8,
     render_rgb8,
@@ -87,6 +88,101 @@ def render_gpu(
 
 
 class SceneConfigurationTests(unittest.TestCase):
+    def test_environment_and_camera_jitter_are_configurable_and_replayable(self) -> None:
+        document = demo_authoring()
+        document["environment"] = {
+            "sun_direction_enu_unit": [1, 2, 3],
+            "illuminance_lux": 65000,
+            "sky_linear_rgb": [0.35, 0.55, 0.8],
+            "atmospheric_visibility_m": 8000,
+            "sun_angular_diameter_deg": 0.53,
+            "glare_strength": 0.4,
+        }
+        document["camera_jitter"] = {
+            "angular_amplitude_deg": [0.01, 0.02, 0.005],
+            "pixel_amplitude_px": [0.4, 0.3],
+            "frequency_hz": 8.0,
+            "roles": ["main"],
+        }
+        document["clouds"] = [
+            {"layer_altitude_m": 1800, "optical_density": 0.5,
+             "drift_velocity_enu_mps": [1.5, 0.25, 0]},
+        ]
+        document["rendering"] = {
+            "terrain_detail_strength": 0.75,
+            "ssao_intensity": 0.8,
+            "fxaa_enabled": True,
+            "god_rays_strength": 0.3,
+            "vegetation_lod_near_m": 120,
+            "vegetation_lod_far_m": 640,
+        }
+        spec = compile_authoring(document)
+        illumination = spec.scene_definition.illumination
+        self.assertAlmostEqual(sum(value * value for value in illumination.sun_direction_enu_unit), 1.0)
+        self.assertEqual(illumination.atmospheric_visibility_m, 8000)
+        self.assertEqual(len(spec.perturbations.camera_jitter), len(spec.station_configs))
+        self.assertEqual(spec.perturbations.clouds[0].drift_velocity_enu_mps, (1.5, 0.25, 0.0))
+        self.assertTrue(spec.scene_definition.render_effects.fxaa_enabled)
+        logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
+        logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
+        first = logic.sample(s.SimulationTime("demo-clock", 123_000_000, 4))
+        replay = logic.sample(s.SimulationTime("demo-clock", 123_000_000, 999))
+        later = logic.sample(s.SimulationTime("demo-clock", 173_000_000, 5))
+        main = next(camera for camera in first.cameras if camera.camera_role is m.CameraRole.MAIN)
+        replay_main = next(camera for camera in replay.cameras if camera.camera_role is m.CameraRole.MAIN)
+        later_main = next(camera for camera in later.cameras if camera.camera_role is m.CameraRole.MAIN)
+        self.assertEqual(main.optical_state, replay_main.optical_state)
+        self.assertNotEqual(main.optical_state.rotation_enu_from_body, later_main.optical_state.rotation_enu_from_body)
+        np.testing.assert_allclose(
+            np.asarray(main.optical_state.rotation_enu_from_body).T
+            @ np.asarray(main.optical_state.rotation_enu_from_body),
+            np.eye(3),
+            atol=1e-12,
+        )
+        before = logic.sample(s.SimulationTime("demo-clock", 122_999_000, 0)).cameras[0]
+        after = logic.sample(s.SimulationTime("demo-clock", 123_001_000, 0)).cameras[0]
+        derivative = (
+            np.asarray(after.optical_state.rotation_enu_from_body)
+            - np.asarray(before.optical_state.rotation_enu_from_body)
+        ) / 2e-6
+        body_spin = np.asarray(main.optical_state.rotation_enu_from_body).T @ derivative
+        np.testing.assert_allclose(
+            (body_spin[2, 1], body_spin[0, 2], body_spin[1, 0]),
+            main.optical_state.angular_velocity_body_radps,
+            atol=1e-8,
+        )
+        nominal = snapshot(replace(spec, perturbations=replace(spec.perturbations, camera_jitter=())),
+                           123_000_000)
+        self.assertEqual(first.cameras[1].optical_state, nominal.cameras[1].optical_state)
+        request = _request(first, main, [])
+        self.assertEqual(request["atmosphericVisibility"], 8000)
+        self.assertEqual(request["sunDiameter"], 0.53)
+        self.assertEqual(request["glareStrength"], 0.4)
+        self.assertEqual(request["clouds"][0]["altitude"], 1800)
+        self.assertEqual(request["cloudTime"], 0.123)
+        self.assertEqual(request["ssaoIntensity"], 0.8)
+
+    def test_environment_and_camera_jitter_reject_invalid_values(self) -> None:
+        invalid = (
+            {"environment": {"atmospheric_visibility_m": 0}},
+            {"environment": {"sun_direction_enu_unit": [0, 0, 0]}},
+            {"environment": {"glare_strength": 3}},
+            {"camera_jitter": {"frequency_hz": 0}},
+            {"camera_jitter": {"pixel_amplitude_px": [-1, 0]}},
+            {"camera_jitter": {"roles": ["rear"]}},
+            {"clouds": [{"layer_altitude_m": 0, "optical_density": 0.5}]},
+            {"clouds": [{"layer_altitude_m": 1000, "optical_density": 2}]},
+            {"clouds": [{"layer_altitude_m": 1000, "optical_density": 0.5}] * 3},
+            {"rendering": {"fxaa_enabled": 1}},
+            {"rendering": {"vegetation_lod_near_m": 500,
+                            "vegetation_lod_far_m": 100}},
+        )
+        for update in invalid:
+            document = demo_authoring()
+            document.update(update)
+            with self.subTest(update=update), self.assertRaises((TypeError, ValueError)):
+                compile_authoring(document)
+
     def test_tree_geometry_wind_is_replayable_and_moves_occlusion_state(self) -> None:
         document = demo_authoring()
         document["vegetation"] = [
@@ -141,6 +237,29 @@ class SceneConfigurationTests(unittest.TestCase):
         self.assertEqual(tree_payload[0]["visual"]["radius"], first.vegetation[1].visual.radius_m)
         self.assertIsNone(tree_payload[0]["vertices"])
         self.assertIsNone(tree_payload[0]["triangles"])
+
+    def test_shrub_and_grass_compile_to_semantic_visuals_and_simple_proxies(self) -> None:
+        document = demo_authoring()
+        document["vegetation"] = [
+            {"id": "shrub-01", "type": "shrub", "position_enu_m": [2, 20, 0],
+             "height_m": 2.0, "radius_m": 2.5},
+            {"id": "grass-01", "type": "grass", "position_enu_m": [-3, 16, 0],
+             "size_m": [12, 8], "blade_height_m": 0.5, "density_per_m2": 14},
+        ]
+        spec = compile_authoring(document)
+        shrub, grass = spec.scene_definition.vegetation
+        self.assertIsInstance(shrub.visual, s.ShrubVisualSpec)
+        self.assertIsInstance(grass.visual, s.GrassVisualSpec)
+        self.assertTrue(shrub.occludes_sight_lines)
+        self.assertFalse(grass.occludes_sight_lines)
+        scene = snapshot(spec)
+        from chongming.rendering.godot import _entities
+
+        payloads = {item["object_id"]: item["visual"] for item in _entities(scene)
+                    if item["visual"] is not None}
+        self.assertEqual(payloads["shrub-01/shrub"]["kind"], "shrub")
+        self.assertEqual(payloads["grass-01/grass"]["kind"], "grass")
+        self.assertEqual(payloads["grass-01/grass"]["lod_near"], 140)
 
     def test_tree_and_wind_authoring_rejects_invalid_dimensions_and_ids(self) -> None:
         for update in (
@@ -236,6 +355,132 @@ class SceneConfigurationTests(unittest.TestCase):
     "Godot 4 executable is required for pixel integration tests",
 )
 class SurfaceRenderingTests(unittest.TestCase):
+    def test_solar_pixels_exposure_and_occlusion_reset_without_frame_history(self) -> None:
+        scene = snapshot(test_scene(s.SphereGeometry(1.0)))
+        direction = np.array((0.0, 1.0, 0.25))
+        direction /= np.linalg.norm(direction)
+        camera = replace(
+            scene.cameras[0],
+            optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, math.atan(0.25))),
+            actual_intrinsics=replace(
+                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
+                focal_x_px=300.0, focal_y_px=300.0, principal_x_px=150.0, principal_y_px=65.0,
+            ),
+        )
+        illumination = s.IlluminationSpec(tuple(direction), 85000, (0.42, 0.63, 0.86),
+                                        None, 2.0, 0.0)
+        scene = replace(scene, cameras=(camera,), flying_objects=(), illumination=illumination)
+        blocker = s.WorldObjectSpec(
+            s.WorldObjectId("solar-blocker"), "solar-blocker", s.WorldObjectKind.OBSTACLE,
+            "test", state(tuple(direction * 40 + (0, 0, 3))), s.BoxGeometry((2, 2, 2)),
+            s.SurfaceAppearance((0.01, 0.01, 0.01), 1.0), True,
+        )
+        renderer = GodotRenderer()
+        self.addCleanup(renderer.close)
+
+        def pixels(view: s.LogicalSceneSnapshot) -> np.ndarray:
+            raw, _ = renderer.render(view, camera)
+            return np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
+
+        legacy = replace(scene, illumination=replace(illumination, sun_angular_diameter_deg=0))
+        baseline = pixels(legacy)
+        solar = pixels(scene)
+        enhanced = pixels(replace(scene, illumination=replace(illumination, glare_strength=0.5)))
+        occluded = replace(scene, world_objects=(blocker,))
+        hidden = pixels(occluded)
+        hidden_optics = pixels(replace(occluded, illumination=replace(illumination, glare_strength=0.5)))
+        beams = pixels(replace(
+            scene, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)
+        ))
+        hidden_beams = pixels(replace(
+            occluded, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)
+        ))
+        self.assertGreater(np.count_nonzero(np.min(solar, axis=2) > 245), 20)
+        self.assertEqual(np.count_nonzero(np.min(hidden, axis=2) > 245), 0)
+        # An off-centre principal point must still align solar image metering.
+        region = np.s_[10:40, 10:50, :]
+        suppression = float(solar[region].mean() - enhanced[region].mean())
+        blocked_suppression = float(hidden[region].mean() - hidden_optics[region].mean())
+        self.assertGreater(suppression, 10)
+        self.assertLess(blocked_suppression, suppression * 0.5)
+        beam_delta = float(np.abs(beams.astype(int) - solar.astype(int)).mean())
+        hidden_beam_delta = float(np.abs(hidden_beams.astype(int) - hidden.astype(int)).mean())
+        self.assertGreater(beam_delta, 0.05)
+        self.assertLess(hidden_beam_delta, beam_delta * 0.25)
+        self.assertLess(float(np.abs(pixels(legacy).astype(int) - baseline).mean()), 0.5)
+        # Returning to a previous snapshot after another camera/environment is stable.
+        self.assertLess(float(np.abs(pixels(scene).astype(int) - solar).mean()), 0.5)
+        diagnostics = renderer._diagnostics()
+        self.assertNotIn("SCRIPT ERROR", diagnostics)
+        self.assertNotIn("ERROR:", diagnostics)
+
+    def test_aerial_perspective_attenuates_distant_objects_more_than_near_objects(self) -> None:
+        scene = snapshot(test_scene(s.SphereGeometry(0.6), (-1.0, 10.0, 3.0)))
+        camera = replace(
+            scene.cameras[0], optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, 0.0)),
+            actual_intrinsics=replace(
+                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
+                focal_x_px=300.0, focal_y_px=300.0, principal_x_px=127.5, principal_y_px=95.5,
+            ),
+        )
+        distant = replace(scene.flying_objects[0], truth_object_id=s.TruthObjectId("distant"),
+                          geometry=s.SphereGeometry(6.0), state=state((10.0, 100.0, 3.0)))
+        scene = replace(scene, cameras=(camera,), flying_objects=scene.flying_objects + (distant,),
+                        illumination=s.IlluminationSpec((0.0, -0.8, 0.6), 85000, (0.42, 0.63, 0.86)))
+        renderer = GodotRenderer()
+        self.addCleanup(renderer.close)
+        raw, _ = renderer.render(scene, camera)
+        baseline = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
+        hazed = replace(scene, illumination=replace(scene.illumination, atmospheric_visibility_m=500))
+        raw, _ = renderer.render(hazed, camera)
+        enhanced = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
+        near_lift = enhanced[92:99, 94:101].mean() - baseline[92:99, 94:101].mean()
+        far_lift = enhanced[92:99, 154:161].mean() - baseline[92:99, 154:161].mean()
+        self.assertGreater(far_lift, near_lift + 10)
+        raw, _ = renderer.render(scene, camera)
+        restored = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
+        self.assertLess(float(np.abs(restored.astype(int) - baseline).mean()), 0.5)
+
+    def test_cloud_layers_replay_at_one_time_and_drift_with_experiment_time(self) -> None:
+        scene = snapshot(test_scene(s.SphereGeometry(1.0)))
+        camera = replace(
+            scene.cameras[0],
+            optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, math.radians(32))),
+            actual_intrinsics=replace(
+                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
+                focal_x_px=230.0, focal_y_px=230.0, principal_x_px=127.5, principal_y_px=95.5,
+            ),
+        )
+        cloud = s.CloudPerturbation(1600.0, 0.82, (12.0, 4.0, 0.0))
+        scene = replace(
+            scene,
+            cameras=(camera,),
+            flying_objects=(),
+            illumination=s.IlluminationSpec((0.3, 0.8, 0.5), 80000, (0.42, 0.63, 0.86),
+                                            None, 0.53, 0.0),
+            clouds=(cloud,),
+            sample_time=s.SimulationTime("cloud-test", 2_000_000_000, 1),
+        )
+        renderer = GodotRenderer()
+        self.addCleanup(renderer.close)
+
+        def render(view: s.LogicalSceneSnapshot) -> np.ndarray:
+            raw, _ = renderer.render(view, camera)
+            return np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
+
+        first = render(scene)
+        replay = render(scene)
+        later = render(replace(
+            scene, sample_time=s.SimulationTime("cloud-test", 12_000_000_000, 999)
+        ))
+        clear = render(replace(scene, clouds=()))
+        self.assertLess(float(np.abs(first.astype(int) - replay.astype(int)).mean()), 0.5)
+        self.assertGreater(float(np.abs(first.astype(int) - later.astype(int)).mean()), 1.0)
+        self.assertGreater(float(np.abs(first.astype(int) - clear.astype(int)).mean()), 2.5)
+        diagnostics = renderer._diagnostics()
+        self.assertNotIn("SCRIPT ERROR", diagnostics)
+        self.assertNotIn("ERROR:", diagnostics)
+
     def test_pixels_match_rotated_off_axis_projection_without_stale_frames(self) -> None:
         scene = snapshot(test_scene(s.SphereGeometry(0.35)))
         original = scene.cameras[0]

@@ -235,9 +235,17 @@ def _lerp(a: Vec3M, b: Vec3M, fraction: float) -> Vec3M:
 
 
 def _rotation_from_small_angle(offset: Vec3M) -> Matrix3x3:
-    """First-order camera-frame perturbation, sufficient for the baseline model."""
-    x, y, z = offset
-    return ((1.0, -z, y), (z, 1.0, -x), (-y, x, 1.0))
+    """Rodrigues rotation of a camera-frame rotation vector; remains orthonormal."""
+    angle = math.sqrt(_dot(offset, offset))
+    if angle < 1e-15:
+        return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    x, y, z = _scale(offset, 1.0 / angle)
+    c, s, v = math.cos(angle), math.sin(angle), 1.0 - math.cos(angle)
+    return (
+        (c + x*x*v, x*y*v - z*s, x*z*v + y*s),
+        (y*x*v + z*s, c + y*y*v, y*z*v - x*s),
+        (z*x*v - y*s, z*y*v + x*s, c + z*z*v),
+    )
 
 
 def _mat_mul(left: Matrix3x3, right: Matrix3x3) -> Matrix3x3:
@@ -738,6 +746,9 @@ class SceneLogicModule(ModuleShell):
         camera_perturbations = {
             (item.station_id, item.camera_role): item for item in perturbations.camera_pose
         }
+        jitter_perturbations = {
+            (item.station_id, item.camera_role): item for item in perturbations.camera_jitter
+        }
         cameras: list[CameraStateTruth] = []
         for camera_spec in scene.cameras:
             state = self.trajectory_sampler.sample(camera_spec.optical_pose_trajectory, time)
@@ -757,6 +768,48 @@ class SceneLogicModule(ModuleShell):
                     angular_velocity_body_radps=_add(
                         state.angular_velocity_body_radps,
                         perturbation.drift_rotation_camera_radps,
+                    ),
+                )
+            jitter = jitter_perturbations.get((camera_spec.station_id, camera_spec.camera_role))
+            if jitter is not None:
+                # Physical rotation, never an image-only shift: the same pose drives
+                # projection, visibility, ordinary rays, protected truth and Godot.
+                # Pixel amplitudes describe equivalent small angular motion at the
+                # nominal focal length. No frame counter or wall-clock history.
+                intrinsics = camera_spec.actual_intrinsics
+                amplitudes = (
+                    jitter.angular_amplitude_rad[0]
+                    + math.atan(jitter.pixel_amplitude_px[1] / intrinsics.focal_y_px),
+                    jitter.angular_amplitude_rad[1]
+                    + math.atan(jitter.pixel_amplitude_px[0] / intrinsics.focal_x_px),
+                    jitter.angular_amplitude_rad[2],
+                )
+                angles, rates = [], []
+                for axis_index, amplitude in enumerate(amplitudes):
+                    phase = math.tau * _deterministic_unit_interval(
+                        self._random_seed,
+                        f"{jitter.random_stream}/{camera_spec.station_id}/{camera_spec.camera_role.value}/{axis_index}",
+                    )
+                    omega = math.tau * jitter.frequency_hz * (1.0 + axis_index * 0.173)
+                    angle = omega * time.time_ns / 1e9 + phase
+                    angles.append(amplitude * math.sin(angle))
+                    rates.append(amplitude * omega * math.cos(angle))
+                rotation_vector: Vec3M = tuple(angles)  # type: ignore[assignment]
+                jitter_rotation = _rotation_from_small_angle(rotation_vector)
+                # Right Jacobian maps the rotation-vector derivative to body omega.
+                theta = math.sqrt(_dot(rotation_vector, rotation_vector))
+                rate: Vec3M = tuple(rates)  # type: ignore[assignment]
+                cross_rate = _cross(rotation_vector, rate)
+                a = (1.0 - math.cos(theta)) / theta**2 if theta > 1e-5 else 0.5
+                b = (theta - math.sin(theta)) / theta**3 if theta > 1e-5 else 1.0 / 6.0
+                body_rate = _add(_sub(rate, _scale(cross_rate, a)),
+                                 _scale(_cross(rotation_vector, cross_rate), b))
+                state = replace(
+                    state,
+                    rotation_enu_from_body=_mat_mul(state.rotation_enu_from_body, jitter_rotation),
+                    angular_velocity_body_radps=_add(
+                        _mat_vec(tuple(zip(*jitter_rotation)), state.angular_velocity_body_radps),
+                        body_rate,
                     ),
                 )
             cameras.append(
@@ -926,6 +979,8 @@ class SceneLogicModule(ModuleShell):
             target_visibility=tuple(target_visibility),
             landmark_visibility=tuple(landmark_visibility),
             illumination=scene.illumination,
+            clouds=perturbations.clouds,
+            render_effects=scene.render_effects,
         )
 
 

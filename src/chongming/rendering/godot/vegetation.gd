@@ -3,12 +3,21 @@ extends RefCounted
 ## No SceneTree clock, global RNG, Python vertices, or external assets are used.
 
 static var _leaf_prototype: ArrayMesh
+static var _grass_prototype: ArrayMesh
 const BOUGHS := 18
 const TWIGS := 6
 const LEAVES_PER_TWIG := 24
 
 
 static func create(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
+	if visual.kind == "shrub":
+		return _create_shrub(visual, rgb, reflectance)
+	if visual.kind == "grass":
+		return _create_grass(visual, rgb, reflectance)
+	return _create_tree(visual, rgb, reflectance)
+
+
+static func _create_tree(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
 	var root := Node3D.new()
 	root.name = "ProceduralTree"
 	var rng := RandomNumberGenerator.new()
@@ -26,6 +35,105 @@ static func create(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D
 	bark.mesh = wood.commit()
 	bark.material_override = _wood_material()
 	root.add_child(bark)
+	_set_detailed_ranges(root, float(visual.get("lod_near", 140.0)))
+	var far: MeshInstance3D
+	if visual.kind == "tree_trunk":
+		far = _far_trunk(height, radius)
+	else:
+		far = _far_crown(height, radius)
+	far.name = "FarProxy"
+	far.material_override = _foliage_material(rgb, reflectance) if visual.kind == "tree_canopy" else _wood_material()
+	_set_far_ranges(far, float(visual.get("lod_near", 140.0)), float(visual.get("lod_far", 750.0)))
+	root.add_child(far)
+	return root
+
+
+static func _create_shrub(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
+	var root := Node3D.new()
+	root.name = "ProceduralShrub"
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42 ^ int(visual.get("seed", 0))
+	var height := float(visual.height)
+	var radius := float(visual.radius)
+	var wood := SurfaceTool.new()
+	wood.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for branch_index in range(11):
+		var angle := TAU * float(branch_index) / 11.0 + rng.randf_range(-0.28, 0.28)
+		var start := Vector3(rng.randf_range(-0.08, 0.08), rng.randf_range(-0.08, 0.08), 0.0) * radius
+		var end := Vector3(cos(angle) * radius * rng.randf_range(0.55, 0.95),
+			sin(angle) * radius * rng.randf_range(0.55, 0.95), height * rng.randf_range(0.55, 1.0))
+		_tube(wood, start, end, radius * 0.025, radius * 0.006, 5)
+	var branches := MeshInstance3D.new()
+	branches.name = "Branches"
+	branches.mesh = wood.commit()
+	branches.material_override = _wood_material()
+	root.add_child(branches)
+	var leaves := MultiMesh.new()
+	leaves.transform_format = MultiMesh.TRANSFORM_3D
+	leaves.use_colors = true
+	leaves.mesh = leaf_mesh()
+	leaves.instance_count = 420
+	var leaf_bounds := leaves.mesh.get_aabb()
+	var bounds := AABB()
+	for leaf_index in range(leaves.instance_count):
+		var vertical := pow(rng.randf(), 0.72)
+		var radial_limit := radius * sqrt(maxf(0.08, 1.0 - pow(vertical - 0.46, 2.0) * 2.1))
+		var radial := radial_limit * sqrt(rng.randf())
+		var angle := rng.randf_range(0.0, TAU)
+		var position := Vector3(cos(angle) * radial, sin(angle) * radial, vertical * height)
+		var size := radius * rng.randf_range(0.055, 0.105)
+		var rotation := Basis.from_euler(Vector3(rng.randf_range(-1.2, 1.2), rng.randf_range(-1.2, 1.2), rng.randf_range(0.0, TAU)))
+		var leaf_transform := Transform3D(rotation.scaled(Vector3(size, size, size)), position)
+		leaves.set_instance_transform(leaf_index, leaf_transform)
+		leaves.set_instance_color(leaf_index, Color(rng.randf_range(0.72, 1.02), rng.randf_range(0.82, 1.08), rng.randf_range(0.65, 0.94)))
+		bounds = bounds.merge(leaf_transform * leaf_bounds)
+	leaves.custom_aabb = bounds
+	var foliage := MultiMeshInstance3D.new()
+	foliage.name = "Leaves"
+	foliage.multimesh = leaves
+	foliage.material_override = _foliage_material(rgb, reflectance)
+	root.add_child(foliage)
+	_set_detailed_ranges(root, float(visual.get("lod_near", 140.0)))
+	var far := _far_crown(height, radius)
+	far.name = "FarProxy"
+	far.material_override = _foliage_material(rgb, reflectance)
+	_set_far_ranges(far, float(visual.get("lod_near", 140.0)), float(visual.get("lod_far", 750.0)))
+	root.add_child(far)
+	return root
+
+
+static func _create_grass(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
+	var root := Node3D.new()
+	root.name = "ProceduralGrassPatch"
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42 ^ int(visual.get("seed", 0))
+	var width := float(visual.width)
+	var depth := float(visual.depth)
+	var height := float(visual.height)
+	var count := mini(4096, maxi(1, roundi(width * depth * float(visual.density))))
+	var blades := MultiMesh.new()
+	blades.transform_format = MultiMesh.TRANSFORM_3D
+	blades.use_colors = true
+	blades.mesh = grass_mesh()
+	blades.instance_count = count
+	var blade_bounds := blades.mesh.get_aabb()
+	var bounds := AABB()
+	for blade_index in range(count):
+		var position := Vector3(rng.randf_range(-width * 0.5, width * 0.5),
+			rng.randf_range(-depth * 0.5, depth * 0.5), 0.0)
+		var size := height * rng.randf_range(0.72, 1.18)
+		var rotation := Basis.from_euler(Vector3(0.0, rng.randf_range(-0.12, 0.12), rng.randf_range(0.0, TAU)))
+		var blade_transform := Transform3D(rotation.scaled(Vector3(size, size, size)), position)
+		blades.set_instance_transform(blade_index, blade_transform)
+		blades.set_instance_color(blade_index, Color(rng.randf_range(0.62, 0.96), rng.randf_range(0.8, 1.1), rng.randf_range(0.5, 0.8)))
+		bounds = bounds.merge(blade_transform * blade_bounds)
+	blades.custom_aabb = bounds
+	var patch := MultiMeshInstance3D.new()
+	patch.name = "Blades"
+	patch.multimesh = blades
+	patch.material_override = _foliage_material(rgb, reflectance)
+	patch.visibility_range_end = float(visual.get("lod_near", 140.0))
+	root.add_child(patch)
 	return root
 
 
@@ -86,15 +194,7 @@ static func _canopy(root: Node3D, wood: SurfaceTool, height: float, radius: floa
 	var foliage := MultiMeshInstance3D.new()
 	foliage.name = "Leaves"
 	foliage.multimesh = leaves
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(float(rgb[0]) * reflectance * 0.5, float(rgb[1]) * reflectance * 0.5, float(rgb[2]) * reflectance * 0.5).linear_to_srgb()
-	material.vertex_color_use_as_albedo = true
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	material.roughness = 0.85
-	material.metallic_specular = 0.15
-	material.backlight_enabled = true
-	material.backlight = Color(0.12, 0.18, 0.05)
-	foliage.material_override = material
+	foliage.material_override = _foliage_material(rgb, reflectance)
 	root.add_child(foliage)
 
 
@@ -115,6 +215,73 @@ static func leaf_mesh() -> ArrayMesh:
 	surface.generate_normals()
 	_leaf_prototype = surface.commit()
 	return _leaf_prototype
+
+
+static func grass_mesh() -> ArrayMesh:
+	if _grass_prototype != null:
+		return _grass_prototype
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for angle in [0.0, PI * 0.5]:
+		var side := Vector3(cos(angle), sin(angle), 0.0) * 0.055
+		var left := -side
+		var right := side
+		var top := Vector3(0.0, 0.0, 1.0)
+		_triangle(surface, left, right, top)
+		_triangle(surface, right, left, top)
+	surface.generate_normals()
+	_grass_prototype = surface.commit()
+	return _grass_prototype
+
+
+static func _far_trunk(height: float, radius: float) -> MeshInstance3D:
+	var instance := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.height = height
+	mesh.top_radius = radius * 0.5
+	mesh.bottom_radius = radius
+	mesh.radial_segments = 6
+	mesh.rings = 1
+	instance.mesh = mesh
+	instance.rotation.x = PI * 0.5
+	instance.position.z = height * 0.5
+	return instance
+
+
+static func _far_crown(height: float, radius: float) -> MeshInstance3D:
+	var instance := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 1.0
+	mesh.height = 2.0
+	mesh.radial_segments = 8
+	mesh.rings = 4
+	instance.mesh = mesh
+	instance.scale = Vector3(radius, radius, height * 0.5)
+	instance.position.z = height * 0.5
+	return instance
+
+
+static func _set_detailed_ranges(root: Node3D, end_distance: float) -> void:
+	for child in root.get_children():
+		if child is GeometryInstance3D:
+			child.visibility_range_end = end_distance
+
+
+static func _set_far_ranges(instance: GeometryInstance3D, begin_distance: float, end_distance: float) -> void:
+	instance.visibility_range_begin = begin_distance
+	instance.visibility_range_end = end_distance
+
+
+static func _foliage_material(rgb: Array, reflectance: float) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(float(rgb[0]) * reflectance * 0.5, float(rgb[1]) * reflectance * 0.5, float(rgb[2]) * reflectance * 0.5).linear_to_srgb()
+	material.vertex_color_use_as_albedo = true
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.roughness = 0.85
+	material.metallic_specular = 0.15
+	material.backlight_enabled = true
+	material.backlight = Color(0.12, 0.18, 0.05)
+	return material
 
 
 static func _triangle(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:

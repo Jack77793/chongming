@@ -23,9 +23,11 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 from chongming.contracts.model import CameraRole, PixelFormat
 from chongming.contracts.scene import (
     SCENE_RANDOM_SEED,
+    CylinderGeometry,
+    GrassVisualSpec,
     ScenarioSpec,
     SceneCameraSpec,
-    CylinderGeometry,
+    ShrubVisualSpec,
     TerrainModel,
     WorldObjectId,
 )
@@ -251,6 +253,43 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
             raise ValueError(f"duplicate {label}")
 
     unique([c.metadata.camera_id for c in scene.cameras], "camera ID")
+    illumination = scene.illumination
+    if (
+        sum(value * value for value in illumination.sun_direction_enu_unit) <= 0
+        or illumination.illuminance_lux < 0
+        or any(not 0 <= value <= 1 for value in illumination.sky_linear_rgb)
+        or (illumination.atmospheric_visibility_m is not None
+            and illumination.atmospheric_visibility_m <= 0)
+        or not 0 <= illumination.sun_angular_diameter_deg <= 5
+        or not 0 <= illumination.glare_strength <= 2
+    ):
+        raise ValueError("invalid scene illumination/environment")
+    effects = scene.render_effects
+    if (
+        not 0 <= effects.terrain_detail_strength <= 1
+        or not 0 <= effects.ssao_intensity <= 4
+        or not 0 <= effects.god_rays_strength <= 2
+        or effects.vegetation_lod_near_m <= 0
+        or effects.vegetation_lod_far_m <= effects.vegetation_lod_near_m
+    ):
+        raise ValueError("invalid render effects")
+    if len(spec.perturbations.clouds) > 2 or any(
+        cloud.layer_altitude_m <= 0
+        or not 0 <= cloud.optical_density <= 1
+        for cloud in spec.perturbations.clouds
+    ):
+        raise ValueError("invalid cloud layers")
+    camera_keys = {(camera.station_id, camera.camera_role) for camera in scene.cameras}
+    unique([(item.station_id, item.camera_role) for item in spec.perturbations.camera_jitter],
+           "camera jitter")
+    for jitter in spec.perturbations.camera_jitter:
+        if (
+            (jitter.station_id, jitter.camera_role) not in camera_keys
+            or jitter.frequency_hz <= 0
+            or any(value < 0 for value in (*jitter.angular_amplitude_rad, *jitter.pixel_amplitude_px))
+            or not jitter.random_stream.strip()
+        ):
+            raise ValueError("invalid camera jitter")
     unique([c.station_id for c in spec.station_configs], "station config")
     unique([d.station_id for d in scene.edge_devices], "edge device")
     unique([t.truth_object_id for t in scene.flying_objects], "target ID")
@@ -266,6 +305,14 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
     for vegetation_item in scene.vegetation:
         if vegetation_item.motion_model.value not in {"static", "periodic", "wind_driven"}:
             raise ValueError(f"unsupported vegetation motion model: {vegetation_item.motion_model!r}")
+        visual = vegetation_item.visual
+        if isinstance(visual, ShrubVisualSpec) and min(visual.height_m, visual.radius_m) <= 0:
+            raise ValueError("invalid shrub visual")
+        if isinstance(visual, GrassVisualSpec) and (
+            min(visual.width_m, visual.depth_m, visual.blade_height_m, visual.density_per_m2) <= 0
+            or visual.density_per_m2 > 200
+        ):
+            raise ValueError("invalid grass visual")
     vegetation_perturbation_ids = [item.object_id for item in spec.perturbations.vegetation]
     unique(vegetation_perturbation_ids, "vegetation perturbation")
     canopy_ids = {
@@ -486,13 +533,11 @@ def validate_supported_features(spec: ScenarioSpec) -> None:
     ):
         raise ValueError("Godot cameras require zero skew and square pixels")
     if (
-        p.clouds
-        or p.fog
+        p.fog
         or p.rain
-        or p.camera_jitter
         or p.communication
     ):
-        raise ValueError("configured cloud/fog/rain/camera-jitter/transport effects are not implemented")
+        raise ValueError("configured fog/rain/transport effects are not implemented")
     if (
         a.auto_exposure_enabled
         or a.dynamic_range_stops is not None

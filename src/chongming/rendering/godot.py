@@ -30,9 +30,12 @@ from chongming.contracts.scene import (
     BoxGeometry,
     CameraStateTruth,
     GeometrySpec,
+    GrassVisualSpec,
     KinematicState,
     LogicalSceneSnapshot,
+    ShrubVisualSpec,
     SphereGeometry,
+    TreeVisualSpec,
     TriangleMeshGeometry,
 )
 
@@ -57,6 +60,8 @@ def _entity(
     *,
     object_id: str | None = None,
     visual: dict[str, Any] | None = None,
+    surface_kind: str | None = None,
+    surface_detail: float = 0.0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": entity_type,
@@ -69,6 +74,8 @@ def _entity(
         "triangles": None,
         "object_id": object_id,
         "visual": visual,
+        "surface": surface_kind,
+        "surface_detail": surface_detail,
     }
     if visual is not None:
         # Godot generates this visual model from semantic dimensions.
@@ -99,7 +106,16 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
             angular_velocity_body_radps=(0.0, 0.0, 0.0),
         )
         entities.append(
-            _entity(2, pose.position_enu_m, pose, terrain.heightfield_geometry, terrain.appearance)
+            _entity(
+                2,
+                pose.position_enu_m,
+                pose,
+                terrain.heightfield_geometry,
+                terrain.appearance,
+                object_id=str(terrain.terrain_id),
+                surface_kind="terrain",
+                surface_detail=scene.render_effects.terrain_detail_strength,
+            )
         )
     for world_item in scene.world_objects:
         entities.append(
@@ -112,7 +128,7 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
             )
         )
     for vegetation_item in scene.vegetation:
-        visual = _vegetation_visual(vegetation_item)
+        visual = _vegetation_visual(vegetation_item, scene.render_effects)
         entities.append(
             _entity(
                 _geometry_type(vegetation_item.geometry),
@@ -137,7 +153,7 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
     return entities
 
 
-def _vegetation_visual(item: Any) -> dict[str, Any] | None:
+def _vegetation_visual(item: Any, effects: Any) -> dict[str, Any] | None:
     """Describe vegetation to Godot without shipping its Python mesh.
 
     The logical cylinder remains available to the truth resolver.  It is deliberately
@@ -146,14 +162,32 @@ def _vegetation_visual(item: Any) -> dict[str, Any] | None:
     visual = getattr(item, "visual", None)
     if visual is None:
         return None
-    return {
-        "kind": f"tree_{visual.part.value}",
-        "height": visual.height_m,
-        "radius": visual.radius_m,
+    payload = {
         "seed": int.from_bytes(
             hashlib.blake2s(str(item.vegetation_id).encode(), digest_size=4).digest(), "little"
         ),
+        "lod_near": effects.vegetation_lod_near_m,
+        "lod_far": effects.vegetation_lod_far_m,
     }
+    if isinstance(visual, TreeVisualSpec):
+        return {
+            **payload,
+            "kind": f"tree_{visual.part.value}",
+            "height": visual.height_m,
+            "radius": visual.radius_m,
+        }
+    if isinstance(visual, ShrubVisualSpec):
+        return {**payload, "kind": "shrub", "height": visual.height_m, "radius": visual.radius_m}
+    if isinstance(visual, GrassVisualSpec):
+        return {
+            **payload,
+            "kind": "grass",
+            "width": visual.width_m,
+            "depth": visual.depth_m,
+            "height": visual.blade_height_m,
+            "density": visual.density_per_m2,
+        }
+    raise TypeError(f"unsupported vegetation visual: {type(visual).__name__}")
 
 
 def _geometry_type(geometry: GeometrySpec) -> int:
@@ -182,6 +216,22 @@ def _request(
         "sky": list(scene.illumination.sky_linear_rgb),
         "sun": list(scene.illumination.sun_direction_enu_unit),
         "illuminance": scene.illumination.illuminance_lux,
+        "atmosphericVisibility": scene.illumination.atmospheric_visibility_m,
+        "sunDiameter": scene.illumination.sun_angular_diameter_deg,
+        "glareStrength": scene.illumination.glare_strength,
+        "cloudTime": scene.sample_time.time_ns / 1e9,
+        "clouds": [
+            {
+                "altitude": cloud.layer_altitude_m,
+                "density": cloud.optical_density,
+                "drift": list(cloud.drift_velocity_enu_mps),
+            }
+            for cloud in scene.clouds
+        ],
+        "terrainDetail": scene.render_effects.terrain_detail_strength,
+        "ssaoIntensity": scene.render_effects.ssao_intensity,
+        "fxaaEnabled": scene.render_effects.fxaa_enabled,
+        "godRaysStrength": scene.render_effects.god_rays_strength,
         "terrainElevation": scene.terrain.base_elevation_m,
         "terrainColor": list(scene.terrain.appearance.linear_rgb),
         "terrainReflectance": scene.terrain.appearance.diffuse_reflectance,
@@ -210,8 +260,10 @@ def projected_footprints(
                 for y in (-1.0, 1.0)
                 for z in (-1.0, 1.0)
             ]
-        else:
+        elif isinstance(item.geometry, TriangleMeshGeometry):
             local = list(item.geometry.vertices_body_m)
+        else:
+            raise TypeError(f"unsupported aircraft geometry: {type(item.geometry).__name__}")
         projected: list[tuple[float, float]] = []
         for point in local:
             world = tuple(

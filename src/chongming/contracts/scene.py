@@ -189,6 +189,27 @@ class TreeVisualSpec:
 
 
 @dataclass(frozen=True)
+class ShrubVisualSpec:
+    """Semantic shrub envelope; Godot generates branches and foliage."""
+
+    height_m: float
+    radius_m: float
+
+
+@dataclass(frozen=True)
+class GrassVisualSpec:
+    """Semantic grass patch; blade instances are render-only geometry."""
+
+    width_m: float
+    depth_m: float
+    blade_height_m: float
+    density_per_m2: float
+
+
+VegetationVisualSpec = TreeVisualSpec | ShrubVisualSpec | GrassVisualSpec
+
+
+@dataclass(frozen=True)
 class SurfaceAppearance:
     linear_rgb: tuple[float, float, float]
     diffuse_reflectance: float
@@ -249,7 +270,7 @@ class VegetationSpec:
     appearance: SurfaceAppearance
     motion_model: VegetationMotionModel
     occludes_sight_lines: bool
-    visual: TreeVisualSpec | None = None
+    visual: VegetationVisualSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -355,6 +376,21 @@ class IlluminationSpec:
     sun_direction_enu_unit: Vec3
     illuminance_lux: float
     sky_linear_rgb: tuple[float, float, float]
+    atmospheric_visibility_m: float | None = None
+    sun_angular_diameter_deg: float = 0.0
+    glare_strength: float = 0.0
+
+
+@dataclass(frozen=True)
+class RenderEffectsSpec:
+    """Low-cost renderer controls; all effects are optional except vegetation LOD."""
+
+    terrain_detail_strength: float = 0.0
+    ssao_intensity: float = 0.0
+    fxaa_enabled: bool = False
+    god_rays_strength: float = 0.0
+    vegetation_lod_near_m: float = 140.0
+    vegetation_lod_far_m: float = 750.0
 
 
 @dataclass(frozen=True)
@@ -407,6 +443,7 @@ class SceneDefinition:
     reference_landmarks: tuple[ReferenceLandmarkSpec, ...]
     illumination: IlluminationSpec
     vegetation: tuple[VegetationSpec, ...] = ()
+    render_effects: RenderEffectsSpec = field(default_factory=RenderEffectsSpec)
 
 
 @dataclass(frozen=True)
@@ -627,6 +664,8 @@ class LogicalSceneSnapshot:
     target_visibility: tuple[TargetVisibilityTruth, ...]
     landmark_visibility: tuple[LandmarkVisibilityTruth, ...]
     illumination: IlluminationSpec
+    clouds: tuple[CloudPerturbation, ...] = ()
+    render_effects: RenderEffectsSpec = field(default_factory=RenderEffectsSpec)
 
 
 @dataclass(frozen=True)
