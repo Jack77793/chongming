@@ -112,7 +112,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 
 每棵树/灌木近距离绘制详细枝叶，越过 `vegetation_lod_near_m` 后切到低面数树干/树冠代理，越过 `vegetation_lod_far_m` 后剔除；草在 near 距离直接剔除。当前使用 Godot 几何实例的距离范围，切换没有交叉淡入，阈值附近可能出现轻微 pop。草单 patch 最多 4096 片，较大草地应拆成多个 patch，既能分块剔除也避免一个巨型 AABB 常驻视锥。
 
-当前 OSM 路线参考 [godot-openstreetmap](https://github.com/RodZill4/godot-openstreetmap)，目标是轻量导入固定 OSM 数据并优先生成建筑外轮廓；尚未接入。此前 OSM2World 方案调研作为历史记录保留在 [调研记录](../docs/OSM2World调研.md)。
+当前 OSM 路线使用固定本地数据并优先生成建筑外轮廓，尚未接入。参考仓库、固定代码版本、数据/许可约束和预期配置影响见 [OSM 地景整合说明](../docs/OSM地景整合说明.md)。
 
 较大的地形网格放在独立 JSON 中，场景只保留位置、间距和 `"asset": {"uri": "assets/ridge.json", "sha256": "…"}`。资产只含 `{"heights_m": [[0, 1], [2, 3]]}`：至少 2×2 的矩形有限非负高度，单位米、相对基础高程。原点和间距留在场景中，同一网格可复用。URI 相对场景文件目录解析，也支持本地绝对路径/file URI；不下载远程资产。Python 调用 `load_scenario` 可用 `asset_root` 指定素材目录。
 
