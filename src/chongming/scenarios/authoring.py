@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -311,6 +313,7 @@ def compile_authoring(
         "camera_jitter",
         "clouds",
         "rendering",
+        "osm",
     }:
         unknown = set(document) - {
             "format",
@@ -329,6 +332,7 @@ def compile_authoring(
             "camera_jitter",
             "clouds",
             "rendering",
+            "osm",
         }
         raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
     if document.get("format") != AUTHORING_FORMAT:
@@ -881,6 +885,22 @@ def compile_authoring(
             ),
         ),
     )
+    if "osm" in document:
+        from chongming.scenarios.osm import attach_landscape, load_landscape
+
+        osm = _fields(document["osm"], {"asset"}, "osm")
+        asset = _fields(_required(osm, "asset"), {"uri", "sha256"}, "osm.asset")
+        if asset_root is None:
+            raise ValueError("compiling OSM requires asset_root")
+        spec = attach_landscape(
+            spec,
+            load_landscape(
+                _identifier(_required(asset, "uri"), "osm.asset.uri"),
+                _identifier(_required(asset, "sha256"), "osm.asset.sha256"),
+                asset_root,
+            ),
+        )
+
     from chongming.scenarios.serialization import validate_scenario_spec
 
     validate_scenario_spec(spec)
@@ -903,7 +923,25 @@ def save_authoring(document: dict[str, Any], path: Path) -> None:
     if document.get("format") != AUTHORING_FORMAT:
         raise ValueError("document is not scenario-authoring-v2")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+    payload = (json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
+    # Publishing is a transaction: an editor crash or a failed validation must
+    # never leave a half-written authoring document visible to the loader.
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def demo_authoring(*, stations: int = 1, fps: int = 30, duration_s: float = 24.0) -> dict[str, Any]:

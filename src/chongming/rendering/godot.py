@@ -62,7 +62,15 @@ def _entity(
     visual: dict[str, Any] | None = None,
     surface_kind: str | None = None,
     surface_detail: float = 0.0,
+    category: str | None = None,
+    resources: _EntityResources | None = None,
 ) -> dict[str, Any]:
+    if resources is not None:
+        return resources.encode(
+            entity_type, position, state, geometry, appearance,
+            object_id=object_id, visual=visual, surface_kind=surface_kind,
+            surface_detail=surface_detail, category=category,
+        )
     payload: dict[str, Any] = {
         "type": entity_type,
         "position": [float(value) for value in position],
@@ -76,6 +84,7 @@ def _entity(
         "visual": visual,
         "surface": surface_kind,
         "surface_detail": surface_detail,
+        "category": category,
     }
     if visual is not None:
         # Godot generates this visual model from semantic dimensions.
@@ -94,7 +103,52 @@ def _entity(
     return payload
 
 
-def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
+class _EntityResources:
+    """One renderer's bounded resource registry; immutable geometry is compared by identity."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, tuple[Any, ...]] = {}
+        self._serial = 0
+        self.definitions: list[dict[str, Any]] = []
+        self.active: set[str] = set()
+
+    def begin(self) -> None:
+        self.definitions = []
+        self.active = set()
+
+    def encode(
+        self, entity_type: int, position: tuple[float, float, float], state: KinematicState,
+        geometry: GeometrySpec, appearance: Any, *, object_id: str | None,
+        visual: dict[str, Any] | None, surface_kind: str | None,
+        surface_detail: float, category: str | None,
+    ) -> dict[str, Any]:
+        if object_id is None:
+            raise ValueError("streamed render entities require stable IDs")
+        old = self._items.get(object_id)
+        semantics = (entity_type, appearance, visual, surface_kind, surface_detail, category)
+        if old is None or old[0] is not geometry or old[1] != semantics:
+            self._serial += 1
+            token = str(self._serial)
+            definition = _entity(
+                entity_type, position, state, geometry, appearance, object_id=object_id,
+                visual=visual, surface_kind=surface_kind, surface_detail=surface_detail,
+                category=category,
+            )
+            definition["resource"] = token
+            self.definitions.append(definition)
+            self._items[object_id] = (geometry, semantics, token)
+        else:
+            token = old[2]
+        self.active.add(object_id)
+        return {"resource": token, "position": list(position), "rotation": _rotation(state)}
+
+    def finish(self) -> None:
+        self._items = {key: value for key, value in self._items.items() if key in self.active}
+
+
+def _entities(
+    scene: LogicalSceneSnapshot, resources: _EntityResources | None = None,
+) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     terrain = scene.terrain
     if terrain.heightfield_geometry is not None and terrain.heightfield_origin_enu_m is not None:
@@ -115,6 +169,8 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
                 object_id=str(terrain.terrain_id),
                 surface_kind="terrain",
                 surface_detail=scene.render_effects.terrain_detail_strength,
+                category="terrain",
+                resources=resources,
             )
         )
     for world_item in scene.world_objects:
@@ -125,6 +181,9 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
                 world_item.pose,
                 world_item.geometry,
                 world_item.appearance,
+                object_id=str(world_item.object_id),
+                category=world_item.category,
+                resources=resources,
             )
         )
     for vegetation_item in scene.vegetation:
@@ -138,6 +197,8 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
                 vegetation_item.appearance,
                 object_id=str(vegetation_item.vegetation_id),
                 visual=visual,
+                category="vegetation",
+                resources=resources,
             )
         )
     for flying_item in scene.flying_objects:
@@ -148,6 +209,8 @@ def _entities(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
                 flying_item.state,
                 flying_item.geometry,
                 flying_item.appearance,
+                object_id=f"aircraft/{flying_item.truth_object_id}",
+                resources=resources,
             )
         )
     return entities
@@ -237,6 +300,39 @@ def _request(
         "terrainReflectance": scene.terrain.appearance.diffuse_reflectance,
         "entities": entities,
     }
+
+
+def _editor_markers(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
+    """Serialize only the non-sensor gizmos used by the Godot freeview."""
+    markers: list[dict[str, Any]] = []
+    for camera in scene.cameras:
+        markers.append(
+            {
+                "kind": "camera",
+                "id": f"{camera.station_id}/{camera.camera_role.value}",
+                "position": list(camera.optical_state.position_enu_m),
+                "rotation": _rotation(camera.optical_state),
+                "focal": [
+                    camera.actual_intrinsics.focal_x_px,
+                    camera.actual_intrinsics.focal_y_px,
+                    camera.actual_intrinsics.principal_x_px,
+                    camera.actual_intrinsics.principal_y_px,
+                ],
+                "width": camera.actual_intrinsics.image_width_px,
+                "height": camera.actual_intrinsics.image_height_px,
+                "length": 34.0 if camera.camera_role.value == "main" else 22.0,
+            }
+        )
+    for item in scene.flying_objects:
+        markers.append(
+            {
+                "kind": "target",
+                "id": str(item.truth_object_id),
+                "position": list(item.state.position_enu_m),
+                "rotation": _rotation(item.state),
+            }
+        )
+    return markers
 
 
 def projected_footprints(
@@ -411,8 +507,7 @@ class GodotRenderer:
         )
         self._socket: socket.socket | None = None
         self._lock = threading.Lock()
-        self._entity_scene: LogicalSceneSnapshot | None = None
-        self._entity_payload: list[dict[str, Any]] | None = None
+        self._resources = _EntityResources()
         deadline = time.monotonic() + startup_timeout
         last_error = ""
         while time.monotonic() < deadline:
@@ -486,11 +581,12 @@ class GodotRenderer:
             sock = self._socket
             if sock is None:
                 raise RuntimeError("Godot renderer is closed")
-            if self._entity_scene is not scene:
-                self._entity_scene, self._entity_payload = scene, _entities(scene)
-            payload = json.dumps(
-                _request(scene, camera, self._entity_payload or []), separators=(",", ":")
-            ).encode()
+            self._resources.begin()
+            entities = _entities(scene, self._resources)
+            self._resources.finish()
+            request = _request(scene, camera, entities)
+            request["resources"] = self._resources.definitions
+            payload = json.dumps(request, separators=(",", ":")).encode()
             if len(payload) >= 2**32 or len(payload) > _MAX_REQUEST:
                 raise ValueError("Godot render request is too large")
             sock.sendall(_REQUEST_HEADER.pack(len(payload)) + payload)
@@ -502,6 +598,47 @@ class GodotRenderer:
                     f"Godot renderer returned {pixel_length} bytes, expected {expected}"
                 )
             return _read_exact(sock, pixel_length), render_ns / 1_000_000.0
+
+    def editor_update(
+        self,
+        scene: LogicalSceneSnapshot,
+        camera: CameraStateTruth,
+        *,
+        enabled: bool = True,
+        realtime: bool = True,
+        reopen: bool = False,
+    ) -> bool:
+        """Push a scene snapshot to Godot's interactive freeview.
+
+        The editor view is deliberately a separate protocol mode: it produces
+        no sensor pixels and therefore cannot be mistaken for an experiment
+        exposure. During editing Godot draws at its own display cadence;
+        otherwise the view only redraws on a scene update or navigation.
+        """
+        with self._lock:
+            sock = self._socket
+            if sock is None:
+                raise RuntimeError("Godot renderer is closed")
+            self._resources.begin()
+            entities = _entities(scene, self._resources)
+            self._resources.finish()
+            request = _request(scene, camera, entities)
+            request["mode"] = "editor"
+            request["editor_enabled"] = bool(enabled)
+            request["editor_realtime"] = bool(realtime)
+            request["editor_reopen"] = bool(reopen)
+            request["editor_markers"] = _editor_markers(scene)
+            request["resources"] = self._resources.definitions
+            payload = json.dumps(request, separators=(",", ":")).encode()
+            if len(payload) >= 2**32 or len(payload) > _MAX_REQUEST:
+                raise ValueError("Godot editor request is too large")
+            sock.sendall(_REQUEST_HEADER.pack(len(payload)) + payload)
+            status_length, _render_ns = _RESPONSE_HEADER.unpack(
+                _read_exact(sock, _RESPONSE_HEADER.size)
+            )
+            if status_length != 1:
+                raise RuntimeError("Godot freeview returned an invalid status")
+            return _read_exact(sock, 1) == b"\x01"
 
 
 _default_renderer: GodotRenderer | None = None

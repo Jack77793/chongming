@@ -6,6 +6,7 @@ No camera, experiment clock, or window is owned by this module.
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 
 import numpy as np
@@ -21,6 +22,7 @@ from chongming.contracts.scene import (
     SceneCameraIntrinsics,
     SceneDistortionModel,
     SphereGeometry,
+    TriangleMeshGeometry,
 )
 
 FloatArray = NDArray[np.float64]
@@ -46,9 +48,7 @@ def optical_rays(
     )
     yd = (rows.ravel() - intrinsics.principal_y_px) / intrinsics.focal_y_px
     xd = (
-        columns.ravel()
-        - intrinsics.principal_x_px
-        - intrinsics.skew_px * yd
+        columns.ravel() - intrinsics.principal_x_px - intrinsics.skew_px * yd
     ) / intrinsics.focal_x_px
     x, y = xd.copy(), yd.copy()
     if distortion.model is SceneDistortionModel.BROWN_CONRADY:
@@ -191,13 +191,88 @@ def surface_hits(
     return depth, normals @ rotation.T
 
 
+@lru_cache(maxsize=512)
+def _closed_mesh(geometry: TriangleMeshGeometry) -> bool:
+    edges: dict[tuple[int, int], int] = {}
+    for a, b, c in geometry.triangle_vertex_indices:
+        for u, v in ((a, b), (b, c), (c, a)):
+            edges[u, v] = edges.get((u, v), 0) + 1
+    return bool(edges) and all(
+        count == 1 and edges.get((v, u)) == 1 for (u, v), count in edges.items()
+    )
+
+
 def contains_point(origin: Vec3M, pose: KinematicState, geometry: GeometrySpec) -> bool:
-    """Closed solid containment for sphere/box camera-inside-blocker cases."""
+    """Containment for primitives and closed meshes, including cameras inside blockers."""
     point = (np.asarray(origin) - pose.position_enu_m) @ np.asarray(pose.rotation_enu_from_body)
     if isinstance(geometry, SphereGeometry):
         return bool(point @ point < geometry.radius_m**2)
     if isinstance(geometry, BoxGeometry):
         return bool(np.all(np.abs(point) < geometry.half_extents_body_m))
     if isinstance(geometry, CylinderGeometry):
-        return bool(point[0] ** 2 + point[1] ** 2 < geometry.radius_m**2 and 0.0 < point[2] < geometry.height_m)
-    return False
+        return bool(
+            point[0] ** 2 + point[1] ** 2 < geometry.radius_m**2
+            and 0.0 < point[2] < geometry.height_m
+        )
+    # A closed, consistently wound mesh subtends 4*pi steradians from inside.
+    # This covers cameras/targets inside concave OSM prisms.
+    vertices = np.asarray(geometry.vertices_body_m, dtype=np.float64)
+    if (
+        np.any(point < vertices.min(axis=0))
+        or np.any(point > vertices.max(axis=0))
+        or not _closed_mesh(geometry)
+    ):
+        return False
+    vertices = vertices - point
+    if np.any(np.linalg.norm(vertices, axis=1) < 1e-9):
+        return True
+    triangles = vertices[np.asarray(geometry.triangle_vertex_indices)]
+    a, b, c = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+    la, lb, lc = (np.linalg.norm(v, axis=1) for v in (a, b, c))
+    numerator = np.einsum("ij,ij->i", a, np.cross(b, c))
+    denominator = (
+        la * lb * lc
+        + np.einsum("ij,ij->i", a, b) * lc
+        + np.einsum("ij,ij->i", b, c) * la
+        + np.einsum("ij,ij->i", c, a) * lb
+    )
+    angle = float(np.sum(2 * np.arctan2(numerator, denominator)))
+    return abs(abs(angle) - 4 * math.pi) < 1e-5
+
+
+@lru_cache(maxsize=512)
+def _mesh_bounds(geometry: TriangleMeshGeometry) -> tuple[Vec3M, Vec3M]:
+    vertices = np.asarray(geometry.vertices_body_m)
+    minimum = tuple(float(value) for value in vertices.min(axis=0))
+    maximum = tuple(float(value) for value in vertices.max(axis=0))
+    assert len(minimum) == len(maximum) == 3
+    return minimum, maximum
+
+
+def mesh_segment_may_intersect(
+    origin: Vec3M, target: Vec3M, pose: KinematicState, geometry: TriangleMeshGeometry
+) -> bool:
+    """Conservative slab test before expensive triangle/solid-angle queries.
+
+    This only rejects segments outside the mesh's body-space bounds. It never
+    replaces the exact surface/containment tests for a possible intersection.
+    """
+    if not geometry.vertices_body_m:
+        return False
+    rotation = np.asarray(pose.rotation_enu_from_body)
+    start = (np.asarray(origin) - pose.position_enu_m) @ rotation
+    end = (np.asarray(target) - pose.position_enu_m) @ rotation
+    minimum, maximum = _mesh_bounds(geometry)
+    entry, exit = 0.0, 1.0
+    for axis in range(3):
+        lo, hi = minimum[axis] - 1e-7, maximum[axis] + 1e-7
+        delta = end[axis] - start[axis]
+        if abs(delta) < 1e-12:
+            if start[axis] < lo or start[axis] > hi:
+                return False
+            continue
+        a, b = (lo - start[axis]) / delta, (hi - start[axis]) / delta
+        entry, exit = max(entry, min(a, b)), min(exit, max(a, b))
+        if entry > exit:
+            return False
+    return True

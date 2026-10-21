@@ -9,7 +9,7 @@
 </style>
 </head>
 <body>
-<header><div><h1>重明 <span style="color:var(--dim);font-weight:400">/ 虚拟场景</span></h1><div class="subtitle">世界物体 · 摄像机 · 飞行物</div></div><div class="controls"><span id="state" class="status" role="status">正在启动…</span><button id="play" disabled>暂停</button><button id="step" disabled>单步</button><button id="restart" disabled>回到起点</button></div></header>
+<header><div><h1>重明 <span style="color:var(--dim);font-weight:400">/ 虚拟场景</span></h1><div class="subtitle">世界物体 · 摄像机 · 飞行物</div></div><div class="controls"><span id="state" class="status" role="status">正在启动…</span><button id="play" disabled>暂停</button><button id="step" disabled>单步</button><button id="restart" disabled>回到起点</button><button id="freeviewToggle">打开 freeview</button><button id="editBegin">进入编辑</button></div></header>
 <main>
 <div id="error" role="alert"></div>
 <div class="metrics"><div class="metric"><span>实验时间</span><strong id="time">—</strong></div><div class="metric"><span>播放轮次 / 步数</span><strong id="progress">—</strong></div><div class="metric"><span>场景对象</span><strong id="counts">—</strong></div><div class="metric"><span>校准事件 / 射线 / 诊断</span><strong id="packets" style="font-size:14px">—</strong></div><div class="metric"><span>生成 / PNG 编码</span><strong id="render" style="font-size:14px">—</strong></div><div class="metric"><span>全部逻辑步 p50 / p95 / 最大</span><strong id="generationStats" style="font-size:14px">—</strong></div><div class="metric"><span>实际渲染步 p50 / p95 / 最大</span><strong id="renderedStats" style="font-size:14px">—</strong></div><div class="metric"><span>逻辑 / 渲染 / 全跳过步 / 绘图请求</span><strong id="samplingCounts" style="font-size:14px">—</strong></div><div class="metric"><span>Godot / 其余成像</span><strong id="gpu" style="font-size:14px">—</strong></div><div class="metric"><span>请求 / JSON 解析</span><strong id="request" style="font-size:14px" title="请求含服务端按需编码、等待及传输；JSON 不含图像解码">—</strong></div><div class="metric"><span>浏览器解码 / 绘制调用</span><strong id="browser" style="font-size:14px" title="绘制调用不含完整 GPU 合成及屏幕呈现">—</strong></div><div class="metric"><span>相机配置 / 渲染时钟</span><strong id="profile" style="font-size:14px">—</strong></div></div>
@@ -18,11 +18,57 @@
 <div><section class="panel"><div class="panel-head"><h2>场景总览</h2><button id="viewReset">重置视角</button></div><canvas id="world" tabindex="0" aria-label="三维场景总览，可拖动旋转、滚轮缩放，方向键旋转">三维场景总览需要支持 Canvas 的浏览器。</canvas><div class="world-hint">拖动旋转 · 滚轮缩放 · 方向键调整视角</div><div class="legend"><span><i class="dot" style="background:#8294a9"></i>世界物体</span><span><i class="dot" style="background:#67c9ed"></i>摄像机 / 视锥</span><span><i class="dot" style="background:#edb173"></i>飞行物</span><span><i class="dot" style="background:#e5d06f"></i>虚拟射线</span></div></section>
 <section class="panel" style="margin-top:16px"><div class="panel-head"><h2>飞行物状态</h2><span class="hint">ENU / 米</span></div><div class="table-wrap"><table><thead><tr><th>对象</th><th>位置 E / N / U</th><th>速度 m/s</th><th>主相机捕获</th></tr></thead><tbody id="objects"></tbody></table></div></section></div>
 </div>
+<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>场景编辑</h2><div class="controls"><span id="editState" class="hint">未锁定</span><button id="editCancel" disabled>撤销</button><button id="editCommit" disabled>提交 JSON</button></div></div><div style="padding:14px 16px;display:grid;gap:12px"><div class="controls"><label>对象<select id="editObject" disabled></select></label><button id="editAddStation" disabled>添加相机站</button><button id="editAddTarget" disabled>添加飞行物</button><button id="editDelete" disabled>删除所选</button><label>地景<select id="editLandscape" disabled></select></label></div><div class="controls"><label>E <input id="editE" type="number" step="0.1" disabled></label><label>N <input id="editN" type="number" step="0.1" disabled></label><label>U <input id="editU" type="number" step="0.1" disabled></label><label id="editAngleLabel">偏航角 ° <input id="editAngle" type="number" step="0.1" disabled></label><label id="editElevationLabel">俯仰角 ° <input id="editElevation" type="number" step="0.1" disabled></label><label id="editSpeedLabel">速度 E <input id="editSpeedE" type="number" step="0.1" disabled></label><label id="editSpeedNLabel">速度 N <input id="editSpeedN" type="number" step="0.1" disabled></label><label id="editSpeedULabel">速度 U <input id="editSpeedU" type="number" step="0.1" disabled></label><button id="editApply" disabled>应用修改</button></div></div></section>
 <div class="notice">视频是 Godot 3D 渲染器输出的 sRGB RGB8 帧；真值标签只在预览中叠加。绿色线段表示可捕获的目标中心，红色线段表示被遮挡，黄色虚线表示普通虚拟射线，绿色箭头表示速度。<br>主 1080p / 对角 FOV 60°，辅 VGA / 水平 FOV 2.6°。有限场景结束后自动循环；暂停后可单步检查。页面刷新与多个预览窗口不会改变实验采样。</div>
 </main><footer>本地虚拟场景预览 · 平面地形 / 基础光照 / 确定性轨迹</footer>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);let latest=null,lastSequence=-1,lastState='',videoImages=new Map(),yaw=-.55,tilt=.65,zoom=5,drag=null,closed=false,decodeMs=0;
+let editDocument=null,editLandscapes=[],editActive=false,editLocked=false,freeviewEnabled=false,editToken=sessionStorage.getItem('scene-edit-token');
+function renderFreeview(){ $('freeviewToggle').textContent=freeviewEnabled?'关闭 freeview':'打开 freeview';$('freeviewToggle').disabled=editLocked }
+$('freeviewToggle').onclick=async()=>{try{const response=await fetch('/api/freeview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!freeviewEnabled})});const result=await response.json();if(!response.ok)throw Error(result.error||'预览切换失败');freeviewEnabled=!!result.freeview;renderFreeview();error('')}catch(e){error(e.message)}};
+async function editor(action,body={}){
+ if(action!=='begin')body={...body,token:editToken};
+ const response=await fetch('/api/editor/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const result=await response.json();if(!response.ok)throw Error(result.error||'场景编辑失败');
+ if(action==='begin'){editToken=result.token||null;if(editToken)sessionStorage.setItem('scene-edit-token',editToken)}
+ if(action==='cancel'||action==='commit'){editToken=null;sessionStorage.removeItem('scene-edit-token')}
+ editDocument=result.document;editLandscapes=result.landscapes||[];editLocked=!!result.locked;editActive=editLocked&&!!editToken;freeviewEnabled=!!result.freeview;renderFreeview();renderEditor();return result;
+}
+function renderEditor(){
+ const active=!!editDocument&&editActive;
+ for(const id of ['editCancel','editCommit','editObject','editE','editN','editU','editAngle','editElevation','editSpeedE','editSpeedN','editSpeedU','editApply','editAddStation','editAddTarget','editDelete','editLandscape'])$(id).disabled=!active;
+ $('editState').textContent=active?'编辑中':editLocked?'已被其他窗口锁定':'未锁定';
+ $('editBegin').disabled=editLocked;
+ for(const id of ['play','step','restart'])$(id).disabled=editLocked||lastState==='failed';
+ const previous=$('editObject').value;
+ $('editObject').replaceChildren();
+ for(const kind of ['stations','targets'])for(const item of editDocument?.[kind]||[]){const option=document.createElement('option');option.value=(kind==='stations'?'station:':'target:')+item.id;option.textContent=`${kind==='stations'?'相机站':'飞行物'} · ${item.display_name||item.id}`;$('editObject').append(option)}
+ if([...$('editObject').options].some(option=>option.value===previous))$('editObject').value=previous;
+ const currentLandscape=document.createElement('option');currentLandscape.value='';currentLandscape.textContent='保持当前地景';currentLandscape.disabled=true;
+ $('editLandscape').replaceChildren(currentLandscape,...editLandscapes.map(name=>{const option=document.createElement('option');option.value=option.textContent=name;return option}));
+ const current=editDocument?.osm?.asset?.uri||'';
+ $('editLandscape').value=current.includes('hannover')?'hannover':'';
+ loadEditorSelection();
+}
+function loadEditorSelection(){const [kind,id]=$('editObject').value.split(':');const item=editDocument?.[kind==='station'?'stations':'targets']?.find(value=>value.id===id);const position=kind==='station'?item?.position_enu_m:item?.motion?.[item?.motion?.type==='orbit'?'center_enu_m':'position_enu_m'];[ 'editE','editN','editU'].forEach((key,index)=>{$(key).value=position?.[index]??''});const station=kind==='station';for(const key of ['editAngleLabel','editElevationLabel'])$(key).hidden=!station;for(const key of ['editSpeedLabel','editSpeedNLabel','editSpeedULabel'])$(key).hidden=station||item?.motion?.type!=='constant_velocity';$('editAngle').value=item?.main_yaw_deg??0;$('editElevation').value=item?.main_elevation_deg??0;['editSpeedE','editSpeedN','editSpeedU'].forEach((key,index)=>{$(key).value=item?.motion?.velocity_enu_mps?.[index]??0})}
+$('editObject').onchange=loadEditorSelection;
+$('editBegin').onclick=async()=>{try{await editor('begin');error('')}catch(e){error(e.message)}};
+$('editCancel').onclick=async()=>{try{await editor('cancel');error('')}catch(e){error(e.message)}};
+$('editCommit').onclick=async()=>{try{await editor('commit');error('')}catch(e){error(e.message)}};
+$('editAddStation').onclick=()=>addEditorObject('station');$('editAddTarget').onclick=()=>addEditorObject('target');
+async function addEditorObject(kind){const id=prompt('新对象 ID（ASCII 字母、数字、_、-）');if(!id)return;try{await editor('create',{kind,id});$('editObject').value=kind+':'+id;loadEditorSelection();error('')}catch(e){error(e.message)}}
+$('editDelete').onclick=async()=>{const [kind,id]=$('editObject').value.split(':');if(!id||!confirm(`删除 ${id}？`))return;try{await editor('delete',{kind,id});error('')}catch(e){error(e.message)}};
+$('editLandscape').onchange=async()=>{if(!$('editLandscape').value)return;try{await editor('landscape',{landscape_id:$('editLandscape').value});error('')}catch(e){error(e.message)}};
+$('editApply').onclick=async()=>{try{const [kind,id]=$('editObject').value.split(':');const position=['editE','editN','editU'].map(key=>Number($(key).value));if(position.some(n=>!Number.isFinite(n)))throw Error('位置必须是有限数值');const item=editDocument[kind==='station'?'stations':'targets'].find(value=>value.id===id);let patch;if(kind==='station'){patch={position_enu_m:position,main_yaw_deg:Number($('editAngle').value),main_elevation_deg:Number($('editElevation').value)}}else{const motion={...item.motion,[item.motion.type==='orbit'?'center_enu_m':'position_enu_m']:position};if(motion.type==='constant_velocity')motion.velocity_enu_mps=['editSpeedE','editSpeedN','editSpeedU'].map(key=>Number($(key).value));patch={motion}}await editor('update',{kind,id,patch});error('')}catch(e){error(e.message)}};
+async function syncEditorStatus(){
+ try{const response=await fetch('/api/editor');if(!response.ok)return;const result=await response.json();
+  freeviewEnabled=!!result.freeview;renderFreeview();
+  if(!result.locked&&editToken){editToken=null;sessionStorage.removeItem('scene-edit-token')}
+  if(editLocked!==!!result.locked||!editDocument){editDocument=result.document;editLandscapes=result.landscapes||[];editLocked=!!result.locked;editActive=editLocked&&!!editToken;renderEditor()}
+ }catch(_error){}
+}
+syncEditorStatus();setInterval(syncEditorStatus,2000);
 const add=(a,b)=>a.map((v,i)=>v+b[i]),mul=(a,s)=>a.map(v=>v*s),rotate=(r,p)=>r.map(row=>row.reduce((s,v,i)=>s+v*p[i],0));
 const text=(id,value)=>{$(id).textContent=value};
 function error(message){$('error').style.display=message?'block':'none';$('error').textContent=message||''}
@@ -72,7 +118,7 @@ function drawWorld(){
 }
 $('world').addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];$('world').setPointerCapture(e.pointerId)});$('world').addEventListener('pointerup',()=>drag=null);$('world').addEventListener('pointercancel',()=>drag=null);$('world').addEventListener('pointermove',e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.007;tilt=Math.max(.15,Math.min(1.4,tilt+(e.clientY-drag[1])*.005));drag=[e.clientX,e.clientY];drawWorld()});$('world').addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(1.5,Math.min(12,zoom*Math.exp(-e.deltaY*.001)));drawWorld()},{passive:false});$('world').addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();yaw+=(e.key==='ArrowLeft'?-.1:e.key==='ArrowRight'?.1:0);tilt=Math.max(.15,Math.min(1.4,tilt+(e.key==='ArrowUp'?.05:e.key==='ArrowDown'?-.05:0)));drawWorld()});window.addEventListener('resize',drawWorld);
 async function poll(){
- try{const station=selectedStation(),requested=performance.now();const r=await fetch('/api/preview?station='+encodeURIComponent(station)+'&after='+lastSequence);if(!r.ok)throw Error('预览服务不可用');const body=await r.text(),received=performance.now();const data=JSON.parse(body),parsed=performance.now();if(station!==selectedStation())return;text('request',`${(received-requested).toFixed(1)} / ${(parsed-received).toFixed(1)} ms`);lastState=data.state;text('state',data.state==='failed'?'生成失败':data.state==='paused'?'已暂停':'播放中');text('play',data.state==='paused'?'播放':'暂停');text('profile',`标准输出 · 渲染时钟 ${data.render_clock_fps} Hz`);error(data.error);for(const id of ['play','step','restart'])$(id).disabled=data.state==='failed';
+ try{const station=selectedStation(),requested=performance.now();const r=await fetch('/api/preview?station='+encodeURIComponent(station)+'&after='+lastSequence);if(!r.ok)throw Error('预览服务不可用');const body=await r.text(),received=performance.now();const data=JSON.parse(body),parsed=performance.now();if(station!==selectedStation())return;text('request',`${(received-requested).toFixed(1)} / ${(parsed-received).toFixed(1)} ms`);lastState=data.state;text('state',data.state==='failed'?'生成失败':data.state==='paused'?'已暂停':'播放中');text('play',data.state==='paused'?'播放':'暂停');text('profile',`标准输出 · 渲染时钟 ${data.render_clock_fps} Hz`);error(data.error);for(const id of ['play','step','restart'])$(id).disabled=data.state==='failed'||editLocked;
   const statsText=s=>s?.sample_count?`${s.p50} / ${s.p95} / ${s.max} ms`:'—';text('generationStats',statsText(data.generation_stats_ms));text('renderedStats',statsText(data.rendered_generation_stats_ms));text('samplingCounts',`${data.logical_step_count} / ${data.rendered_step_count} / ${data.skipped_step_count} / ${data.gpu_submissions}`);
   if(data.snapshot&&data.snapshot.sequence!==lastSequence){const snap=data.snapshot;const decodeStarted=performance.now();const decoded=await Promise.all(snap.video.map(async f=>{const im=new Image();im.src='data:image/png;base64,'+f.png;await im.decode();return [f.station_id+'/'+f.role,im]}));if(station!==selectedStation())return;decodeMs=performance.now()-decodeStarted;latest=snap;videoImages=new Map(decoded);lastSequence=snap.sequence;
    const stations=[...new Set(snap.monitor.cameras.map(c=>c.station_id))];if($('station').options.length!==stations.length){$('station').replaceChildren(...stations.map(id=>{const option=document.createElement('option');option.value=option.textContent=id;return option}))}

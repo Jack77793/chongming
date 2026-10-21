@@ -297,6 +297,26 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         [scene.terrain.terrain_id, *(o.object_id for o in scene.world_objects)], "world object ID"
     )
     unique([v.vegetation_id for v in scene.vegetation], "vegetation ID")
+    if scene.osm_landscape is not None:
+        from chongming.scenarios.osm import landscape_objects, landscape_vegetation
+        from chongming.scenarios.osm_elevation import terrain_from_elevation
+
+        landscape = scene.osm_landscape
+        expected_buildings = landscape_objects(landscape.imported)
+        actual_buildings = tuple(o for o in scene.world_objects if o.category.startswith("osm-"))
+        if expected_buildings != actual_buildings:
+            raise ValueError("OSM world geometry disagrees with the canonical asset")
+        if landscape_vegetation(landscape.imported) != tuple(
+            v for v in scene.vegetation if str(v.vegetation_id).startswith("osm/")
+        ):
+            raise ValueError("OSM vegetation disagrees with the canonical asset")
+        if scene.terrain != terrain_from_elevation(scene.terrain, landscape.imported.elevation):
+            raise ValueError("OSM terrain disagrees with the canonical asset")
+        anchor = landscape.imported.config.anchor
+        if scene.world.geodetic_anchor != anchor or any(
+            c.geodetic_anchor != anchor for c in spec.station_configs
+        ):
+            raise ValueError("OSM and scene/station geodetic anchors must agree")
     unique(
         [scene.terrain.terrain_id, *(o.object_id for o in scene.world_objects),
          *(WorldObjectId(str(v.vegetation_id)) for v in scene.vegetation)],
@@ -500,6 +520,12 @@ def verify_external_asset(path: Path, expected_digest: str) -> None:
 
 def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
     """Verify every currently supported external asset reference before a run."""
+    landscape = spec.scene_definition.osm_landscape
+    if landscape is not None:
+        from chongming.scenarios.osm import load_landscape
+
+        if load_landscape(landscape.asset_uri, landscape.asset_sha256, asset_root) != landscape:
+            raise ValueError("compiled OSM metadata disagrees with the verified asset")
     terrain = spec.scene_definition.terrain
     if terrain.heightfield_asset_uri is None:
         return

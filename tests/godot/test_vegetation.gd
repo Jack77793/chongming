@@ -3,14 +3,23 @@ extends SceneTree
 const Vegetation = preload("res://vegetation.gd")
 const Worker = preload("res://worker.gd")
 
+class PreviewWorker extends Worker:
+	func _ready() -> void:
+		pass
+
 var failures: Array[String] = []
 
 
 func _initialize() -> void:
+	_run.call_deferred()
+
+
+func _run() -> void:
 	# Dummy RenderingServer discards MultiMesh buffers; validate the real resource backend.
 	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
 	_test_generator()
 	_test_worker_cache()
+	await _test_freeview_world()
 	if failures.is_empty():
 		print("vegetation tests passed")
 		quit(0)
@@ -18,6 +27,33 @@ func _initialize() -> void:
 		for failure in failures:
 			push_error(failure)
 		quit(1)
+
+
+func _test_freeview_world() -> void:
+	var worker := PreviewWorker.new()
+	root.add_child(worker)
+	worker.set_process(false)
+	worker._setup_world()
+	var box := MeshInstance3D.new()
+	box.mesh = BoxMesh.new()
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.albedo_color = Color.RED
+	box.material_override = material
+	box.position.y = 1.0
+	worker._world.add_child(box)
+	worker._free_camera.position = Vector3(0.0, 1.0, 4.0)
+	worker._free_camera.look_at(Vector3(0.0, 1.0, 0.0))
+	worker._free_camera.make_current()
+	worker._free_viewport.size = Vector2i(64, 64)
+	await process_frame
+	worker._free_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	RenderingServer.force_draw(false)
+	var image := worker._free_viewport.get_texture().get_image()
+	var center := image.get_pixel(32, 32)
+	_check(center.r > 0.8 and center.g < 0.1 and center.b < 0.1,
+		"freeview must render geometry from the sensor's shared 3D world")
+	worker.free()
 
 
 func _test_generator() -> void:
@@ -84,6 +120,21 @@ func _test_worker_cache() -> void:
 	_check(worker._instances[0] != original, "visual parameter changes must rebuild the tree")
 	worker._sync_entities([])
 	_check(worker._instances.is_empty() and worker._signatures.is_empty(), "removed entities must leave no cached nodes")
+	# The production protocol uploads immutable definitions once and then sends
+	# only a resource token plus pose. This path must preserve the same cache rule.
+	var definition := _tree_entity(54321)
+	definition["resource"] = "tree-resource"
+	worker._sync_resources([definition])
+	var light := {"resource": "tree-resource", "position": [1.0, 2.0, 3.0],
+		"rotation": entity.rotation}
+	worker._sync_entities([light])
+	var resource_instance := worker._instances[0]
+	light["position"] = [4.0, 5.0, 6.0]
+	worker._sync_entities([light])
+	_check(worker._instances[0] == resource_instance, "resource-token pose updates must reuse generated resources")
+	_check(worker._instances[0].position == Vector3(4.0, 6.0, -5.0), "resource-token pose must reach cached tree")
+	worker._sync_entities([])
+	_check(worker._resources.is_empty(), "unused resource definitions must be pruned")
 	worker._world.free()
 	worker.free()
 

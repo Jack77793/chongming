@@ -1,0 +1,16 @@
+{
+  "anchor": {
+    "anchor_id": "osm-demo-anchor",
+    "datum": "WGS84",
+    "datum_epoch": "2026.0",
+    "latitude_deg": 31.23,
+    "longitude_deg": 121.47,
+    "height_m": 0.0,
+    "height_reference": "ellipsoidal"
+  },
+  "bounds_wgs84": [121.469, 31.229, 121.471, 31.231],
+  "default_height_m": 9.0,
+  "level_height_m": 3.0,
+  "maximum_height_m": 200.0,
+  "base_elevation_m": 0.0
+}

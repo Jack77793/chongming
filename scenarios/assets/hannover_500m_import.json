@@ -1,0 +1,18 @@
+{
+  "anchor": {
+    "anchor_id": "hannover-zoo-local",
+    "latitude_deg": 52.38,
+    "longitude_deg": 9.77,
+    "height_m": 0.0,
+    "datum": "WGS84",
+    "datum_epoch": "2026-10-20",
+    "height_reference": "ellipsoidal"
+  },
+  "bounds_wgs84": [9.76265, 52.3755, 9.77735, 52.3845],
+  "default_height_m": 10.0,
+  "level_height_m": 3.0,
+  "maximum_height_m": 250.0,
+  "base_elevation_m": 0.0,
+  "forest_spacing_m": 60.0,
+  "maximum_forest_trees": 128
+}

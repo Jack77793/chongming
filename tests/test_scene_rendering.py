@@ -8,10 +8,12 @@ import json
 import math
 import os
 import shutil
+import tempfile
 import threading
 import time
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -38,13 +40,14 @@ from chongming.preview import (
 from chongming.rendering.geometry import optical_rays, surface_hits
 from chongming.rendering.godot import (
     GodotRenderer,
+    _editor_markers,
     _request,
     projected_footprints,
     quantize_rgb8,
     render_rgb8,
     srgb_to_linear,
 )
-from chongming.scenarios.authoring import compile_authoring, demo_authoring
+from chongming.scenarios.authoring import compile_authoring, demo_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec, optical_rotation, state
 from tests.fixtures import architecture_specs
 
@@ -788,6 +791,163 @@ class SurfaceRenderingTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_freeview_is_independent_of_sensor_pixels_and_experiment_controls(self) -> None:
+        scene = snapshot(test_scene(s.SphereGeometry(1.0)))
+        camera = replace(scene.cameras[0], actual_intrinsics=replace(
+            scene.cameras[0].actual_intrinsics, image_width_px=96, image_height_px=64,
+            focal_x_px=65, focal_y_px=65, principal_x_px=47.5, principal_y_px=31.5,
+        ))
+        with_renderer = GodotRenderer()
+        try:
+            original, _ = with_renderer.render(scene, camera)
+            self.assertTrue(with_renderer.editor_update(scene, camera, realtime=False, reopen=True))
+            viewed, _ = with_renderer.render(scene, camera)
+            self.assertEqual(viewed, original, "freeview gizmos must not enter sensor pixels")
+            self.assertFalse(with_renderer.editor_update(scene, camera, enabled=False))
+        finally:
+            with_renderer.close()
+
+        runtime = PreviewRuntime(demo_spec(fps=2), video_enabled=False)
+        runtime.control("pause")
+        runtime.start()
+        try:
+            runtime.control("step")
+            self.wait_snapshot(runtime, lambda data: data["snapshot"] is not None)
+            before = runtime.snapshot()["snapshot"]["sequence"]
+            self.assertTrue(runtime.set_freeview(True)["freeview"])
+            self.assertTrue(runtime._paused)
+            runtime.control("step")
+            self.wait_snapshot(runtime, lambda data: data["snapshot"]["sequence"] > before)
+            self.assertTrue(runtime.editor_status()["freeview"])
+            self.assertFalse(runtime.set_freeview(False)["freeview"])
+            self.assertEqual(runtime.snapshot()["gpu_submissions"], 0)
+            self.assertTrue(runtime._thread.is_alive())
+        finally:
+            runtime.close()
+
+    def test_editor_markers_include_cameras_and_flying_objects(self) -> None:
+        scene = snapshot(test_scene(s.SphereGeometry(1.0)))
+        markers = _editor_markers(scene)
+        self.assertEqual(
+            {marker["id"] for marker in markers if marker["kind"] == "camera"},
+            {f"{camera.station_id}/{camera.camera_role.value}" for camera in scene.cameras},
+        )
+        target = next(marker for marker in markers if marker["kind"] == "target")
+        self.assertEqual(target["id"], "target")
+        self.assertEqual(target["position"], list(scene.flying_objects[0].state.position_enu_m))
+
+    def test_editor_reloads_disk_json_and_rejects_external_changes(self) -> None:
+        document = demo_authoring(stations=1, duration_s=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.json"
+            save_authoring(document, path)
+            runtime = PreviewRuntime(
+                compile_authoring(document), authoring_document=document, authoring_path=path,
+                video_enabled=False,
+            )
+            document["stations"][0]["position_enu_m"] = [25, 12, 8]
+            save_authoring(document, path)
+            begun = runtime.begin_edit()
+            self.assertEqual(begun["document"], document)
+            runtime.edit_update("station", document["stations"][0]["id"],
+                                {"position_enu_m": [35, 12, 8]}, token=begun["token"])
+            document["duration_s"] = 2
+            save_authoring(document, path)
+            with self.assertRaisesRegex(ValueError, "changed outside"):
+                runtime.commit_edit(token=begun["token"])
+            self.assertEqual(runtime.cancel_edit(token=begun["token"])["document"], document)
+            self.assertEqual(json.loads(path.read_bytes()), document)
+            reopened = runtime.begin_edit()
+            self.assertEqual(reopened["document"], document)
+            runtime.cancel_edit(token=reopened["token"])
+
+    def test_editor_updates_native_view_without_sensor_frames_and_cancel_restores_state(self) -> None:
+        document = demo_authoring(stations=1, duration_s=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.json"
+            save_authoring(document, path)
+            original = path.read_bytes()
+            runtime = PreviewRuntime(
+                compile_authoring(document), authoring_document=document, authoring_path=path,
+                video_enabled=False,
+            )
+            runtime.start()
+            try:
+                session = runtime.begin_edit()
+                token = session["token"]
+                with self.assertRaisesRegex(ValueError, "locked"):
+                    runtime.control("play")
+                with self.assertRaisesRegex(ValueError, "lock"):
+                    runtime.begin_edit()
+                with runtime._condition:
+                    self.assertTrue(runtime._condition.wait_for(
+                        lambda: runtime._latest_step is not None and not runtime._producing,
+                        timeout=5,
+                    ))
+                first = runtime.snapshot()["logical_step_count"]
+                self.assertTrue(runtime._latest_step.truth.camera_frames)
+                self.assertFalse(runtime._latest_step.video.frames)
+                runtime.edit_update("station", document["stations"][0]["id"],
+                                    {"position_enu_m": [35, 12, 8]}, token=token)
+                with runtime._condition:
+                    self.assertTrue(runtime._condition.wait_for(
+                        lambda: runtime._latest_step is not None
+                        and runtime._latest_step.truth.logical_scene.cameras[0].optical_state.position_enu_m[0] == 35
+                        and not runtime._producing, timeout=5,
+                    ))
+                self.assertEqual(runtime.snapshot()["gpu_submissions"], 0)
+                count = runtime.snapshot()["logical_step_count"]
+                time.sleep(0.1)
+                self.assertEqual(runtime.snapshot()["logical_step_count"], count)
+                self.assertGreaterEqual(count, first + 1)
+                runtime.cancel_edit(token=token)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertFalse(runtime._paused)
+                self.assertFalse(runtime._editing)
+            finally:
+                runtime.close()
+
+    def test_editor_http_requires_session_token_and_commits_authoring_json(self) -> None:
+        document = demo_authoring(stations=1, duration_s=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.json"
+            save_authoring(document, path)
+            runtime = PreviewRuntime(
+                compile_authoring(document), authoring_document=document, authoring_path=path
+            )
+            server = preview_server(runtime, 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def post(route: str, body: dict) -> tuple[int, dict]:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/editor/{route}",
+                    data=json.dumps(body).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                try:
+                    response = urlopen(request, timeout=2)
+                except HTTPError as error:
+                    return error.code, json.loads(error.read())
+                with response:
+                    return response.status, json.loads(response.read())
+
+            try:
+                status, begun = post("begin", {})
+                self.assertEqual(status, 200)
+                token = begun["token"]
+                self.assertEqual(post("create", {"kind": "target", "id": "unauthorized"})[0], 400)
+                self.assertEqual(post("create", {"kind": "target", "id": "target-b", "token": token})[0], 200)
+                self.assertEqual(post("commit", {})[0], 409)
+                status, committed = post("commit", {"token": token})
+                self.assertEqual(status, 200)
+                self.assertFalse(committed["active"])
+                self.assertIn("target-b", {item["id"] for item in json.loads(path.read_text())["targets"]})
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+                server.server_close()
+
     def test_step_budget_counts_visible_frames_and_all_logical_timings(self) -> None:
         runtime = PreviewRuntime(demo_spec(fps=15), render_fps=7.5)
         runtime.control("pause")
