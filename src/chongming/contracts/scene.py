@@ -342,10 +342,52 @@ class OSMImport:
 
 
 @dataclass(frozen=True)
+class OSMVegetationConfig:
+    """Bounded procedural vegetation policy for OSM forest and grass surfaces.
+
+    Densities are target plant counts per hectare of surface category. Existing
+    OSM tree points and the legacy ``forest_points`` stand layer always take
+    precedence and count towards the forest target; procedure adds only the
+    difference. Budgets cap procedural additions, so the canonical import stays
+    unchanged while the authored scenery remains reproducible.
+    """
+
+    seed: int = 42
+    forest_tree_density_per_ha: float = 120.0
+    grass_tree_density_per_ha: float = 8.0
+    forest_shrub_density_per_ha: float = 35.0
+    grass_shrub_density_per_ha: float = 20.0
+    forest_grass_density_per_ha: float = 25.0
+    grass_grass_density_per_ha: float = 30.0
+    tree_height_m: float = 13.0
+    tree_height_jitter: float = 0.30
+    tree_crown_radius_m: float = 3.0
+    tree_crown_radius_jitter: float = 0.30
+    shrub_height_m: float = 1.6
+    shrub_height_jitter: float = 0.35
+    shrub_radius_m: float = 1.6
+    shrub_radius_jitter: float = 0.35
+    grass_patch_size_m: float = 12.0
+    grass_patch_size_jitter: float = 0.30
+    grass_blade_height_m: float = 0.35
+    grass_blade_height_jitter: float = 0.30
+    grass_density_per_m2: float = 4.0
+    forest_clustering: float = 0.35
+    grass_clustering: float = 0.80
+    maximum_trees_per_area: int = 192
+    maximum_trees_total: int = 768
+    maximum_shrubs_per_area: int = 160
+    maximum_shrubs_total: int = 640
+    maximum_grass_patches_per_area: int = 192
+    maximum_grass_patches_total: int = 1200
+
+
+@dataclass(frozen=True)
 class OSMLandscape:
     asset_uri: str
     asset_sha256: str
     imported: OSMImport
+    vegetation: OSMVegetationConfig = field(default_factory=OSMVegetationConfig)
 
 
 class VegetationMotionModel(StrEnum):

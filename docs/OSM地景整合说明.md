@@ -43,7 +43,47 @@ uv run chongming-osm scenarios/assets/osm_demo.osm \
 - 道路支持 motorway/trunk/primary/secondary/tertiary 及 link、residential/unclassified/service/living_street、pedestrian/track/footway/path/cycleway/steps；按中心线缓冲成简单路面，宽度取有效 `width`（0.3–40 m）或类别默认值（1.5–12 m）。不生成交通图、车道、桥梁和隧道；`lanes` 不用于推断宽度。
 - 树点支持 `natural=tree`，高度限 1–60 m，缺失回退 10 m；冠幅取有效 `diameter_crown`，否则冠半径取高度的 1/4。逻辑沿用树干/树冠圆柱代理，视觉沿用既有 Godot 语义树木。
 - 森林为 `natural=wood` / `landuse=forest`；绿地支持 grass/meadow/recreation_ground/village_green、natural grassland、park/garden；水体支持 `natural=water` / `waterway=riverbank`。闭合 way 和可完整拼接的 multipolygon 支持内洞，缺成员或破损关系整体拒绝。道路及地表裁到选区，建筑边界策略仍为整栋保留/拒绝。
-- 森林树按 `forest_spacing_m`（至少 10 m，默认 60 m）、`maximum_forest_trees`（默认 256，上限 2000）确定性分布，排除洞、建筑、水体、道路及已标树冠。绿地仅绘制面，不自动铺满草实例；水体是随粗 DEM 贴地的颜色面，不反演水平水位或湖底。建筑基础没有地基开挖/坡地基础拟合。
+- 森林树按 `forest_spacing_m`（至少 10 m，默认 60 m）、`maximum_forest_trees`（默认 256，上限 2000）确定性分布，排除洞、建筑、水体、道路及已标树冠。该层始终保留；`osm.vegetation.forest_tree_density_per_ha` 以“每公顷目标株数（含已有点要素树和森林基础树）”补齐差额，因此不会重复种植基础树。绿地、公园和林地再按各自密度生成乔木、灌木和草 patch；水体是随粗 DEM 贴地的颜色面，不反演水平水位或湖底。建筑基础没有地基开挖/坡地基础拟合。
+
+### 程序化植被配置（可选）
+
+绿色面要素（`forest` 与 `grass`，含 park/garden/meadow 等）的额外植被由场景 JSON 的可选 `osm.vegetation` 控制；省略时使用契约默认值，旧场景无需改动。所有密度是每公顷目标值，预算只统计该配置新增的实例，既有 OSM 树点与 `forest_points` 基础林仍由 `OSMImportConfig` 管束。
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `seed` | `42` | 确定性哈希种子；相同资产+配置必定生成相同实例 |
+| `forest_tree_density_per_ha` | `120` | 森林目标乔木密度（含既有树点/基础林），不足部分补植 |
+| `grass_tree_density_per_ha` | `8` | 绿地/公园目标乔木密度（含绿地内既有树点） |
+| `forest_shrub_density_per_ha` / `grass_shrub_density_per_ha` | `35` / `20` | 林下/绿地灌木密度 |
+| `forest_grass_density_per_ha` / `grass_grass_density_per_ha` | `25` / `30` | 草 patch 密度 |
+| `tree_height_m` / `tree_height_jitter` | `13` / `0.30` | 乔木高度均值与相对抖动（0–1） |
+| `tree_crown_radius_m` / `tree_crown_radius_jitter` | `3.0` / `0.30` | 冠幅半径均值与相对抖动 |
+| `shrub_height_m` / `shrub_height_jitter` | `1.6` / `0.35` | 灌木高度均值与相对抖动 |
+| `shrub_radius_m` / `shrub_radius_jitter` | `1.6` / `0.35` | 灌木半径均值与相对抖动 |
+| `grass_patch_size_m` / `grass_patch_size_jitter` | `12` / `0.30` | 草 patch 边长均值与相对抖动 |
+| `grass_blade_height_m` / `grass_blade_height_jitter` | `0.35` / `0.30` | 草叶高度均值与相对抖动 |
+| `grass_density_per_m2` | `4.0` | 每平方米叶片实例数，上限 200 |
+| `forest_clustering` / `grass_clustering` | `0.35` / `0.80` | 0 为细碎均匀、1 为强团簇；森林较低、公园较高 |
+| `maximum_*_per_area` / `maximum_*_total` | 见契约默认值 | 每面/全局实例预算，防止异常选区拖垮渲染 |
+
+示例：
+
+```json
+"osm": {
+  "asset": {"uri": "landscape-dem.json", "sha256": "<64位小写摘要>"},
+  "vegetation": {
+    "seed": 42,
+    "forest_tree_density_per_ha": 120,
+    "grass_tree_density_per_ha": 6,
+    "forest_shrub_density_per_ha": 40,
+    "grass_grass_density_per_ha": 24,
+    "tree_height_m": 14,
+    "maximum_trees_total": 512
+  }
+}
+```
+
+未知字段、非有限数、负密度或越界尺寸会被拒绝；配置随 `OSMLandscape.vegetation` 写入编译场景，因此 `save_compiled_scenario`/`load_compiled_scenario` 必须重新生成完全相同的植被。`scenarios/README.md` 的字段表也列出该入口。
 
 场景入口示例见 `scenarios/osm.json`：
 
@@ -53,7 +93,7 @@ uv run chongming-osm scenarios/assets/osm_demo.osm \
 
 资产加载在 JSON 解析前校验 SHA-256，拒绝远程 URI；编译结果中的建筑网格、来源和锚点必须与资产一致。场景和所有站点采用同一个资产锚点，站点配置摘要同步更新；已有手写 ENU 物体/站点坐标由作者保证与此锚点相符，不自动重投影。manifest 通过现有完整场景序列化保存来源、配置、诊断与规范几何。
 
-实时预览使用 Python 接口 `prepare_osm(content, config, *, source_url, data_date, elevation=None, preview=callback)`。每次本地配置/选区变更后重新调用，成功校验后调用 `callback(OSMImport)`；`landscape_objects(imported)`、`landscape_vegetation(imported)` 与 `terrain_from_elevation(...)` 返回不可变场景描述，交给现有 Godot 快照路径。`attach_landscape` 已组合这三步。消费者替换上一批 `osm-*` 物体与 `osm/` 植被，并展示 OSM/DEM 署名和诊断。回调同步运行；界面可自行在后台调度导入并忽略过期请求。本接口不启动新渲染器、不控制实验时钟，也不修改正在运行的实验。正式实验仍使用固定摘要资产。
+实时预览使用 Python 接口 `prepare_osm(content, config, *, source_url, data_date, elevation=None, preview=callback)`。每次本地配置/选区变更后重新调用，成功校验后调用 `callback(OSMImport)`；`landscape_objects(imported)`、`landscape_vegetation(imported, vegetation=None)` 与 `terrain_from_elevation(...)` 返回不可变场景描述，交给现有 Godot 快照路径。`attach_landscape` 已组合这三步，并把 `OSMLandscape.vegetation` 传给植被生成。消费者替换上一批 `osm-*` 物体与 `osm/` 植被，并展示 OSM/DEM 署名和诊断。回调同步运行；界面可自行在后台调度导入并忽略过期请求。本接口不启动新渲染器、不控制实验时钟，也不修改正在运行的实验。正式实验仍使用固定摘要资产。
 
 Python 和 Godot 共用同一 footprint 派生的闭合挤出网格与同一 DEM 三角网格，Python 仍为遮挡真值权威。闭合网格有内部点判定，开放地表不当作实心体；道路/颜色地表不增加独立视线遮挡。视线求交先以保守局部包围盒排除不相交线段，再保留原三角求交/包含判定。渲染沿用已有网格缓存和稳定 ID，未增加另一套几何推导。更大样区的轻量代理、合批或瓦片策略需要单独测量后再决定。
 

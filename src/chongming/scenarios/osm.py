@@ -122,6 +122,76 @@ def validate_config(config: s.OSMImportConfig) -> None:
         raise ValueError("OSM forest policy requires spacing >= 10 m and budget 0..2000 trees")
 
 
+def validate_vegetation_config(config: s.OSMVegetationConfig) -> None:
+    """Reject unbounded or non-finite procedural vegetation policy."""
+    floats = (
+        config.forest_tree_density_per_ha,
+        config.grass_tree_density_per_ha,
+        config.forest_shrub_density_per_ha,
+        config.grass_shrub_density_per_ha,
+        config.forest_grass_density_per_ha,
+        config.grass_grass_density_per_ha,
+        config.tree_height_m,
+        config.tree_height_jitter,
+        config.tree_crown_radius_m,
+        config.tree_crown_radius_jitter,
+        config.shrub_height_m,
+        config.shrub_height_jitter,
+        config.shrub_radius_m,
+        config.shrub_radius_jitter,
+        config.grass_patch_size_m,
+        config.grass_patch_size_jitter,
+        config.grass_blade_height_m,
+        config.grass_blade_height_jitter,
+        config.grass_density_per_m2,
+        config.forest_clustering,
+        config.grass_clustering,
+    )
+    integers = (
+        config.seed,
+        config.maximum_trees_per_area,
+        config.maximum_trees_total,
+        config.maximum_shrubs_per_area,
+        config.maximum_shrubs_total,
+        config.maximum_grass_patches_per_area,
+        config.maximum_grass_patches_total,
+    )
+    if any(isinstance(v, bool) or not math.isfinite(v) for v in floats) or any(
+        type(v) is not int for v in integers
+    ):
+        raise ValueError("OSM vegetation configuration requires finite numbers and integer budgets")
+    densities = floats[:6]
+    if any(not 0 <= v <= 2000 for v in densities):
+        raise ValueError("OSM vegetation densities must lie in 0..2000 per hectare")
+    if not 0 <= config.seed <= 2**31 - 1:
+        raise ValueError("OSM vegetation seed must lie in 0..2^31-1")
+    if not (
+        1 <= config.tree_height_m <= 60
+        and 0.2 <= config.tree_crown_radius_m <= 30
+        and 0 <= config.tree_height_jitter <= 1
+        and 0 <= config.tree_crown_radius_jitter <= 1
+    ):
+        raise ValueError("OSM vegetation tree dimensions/jitter are out of range")
+    if not (
+        0.1 <= config.shrub_height_m <= 10
+        and 0.05 <= config.shrub_radius_m <= 10
+        and 0 <= config.shrub_height_jitter <= 1
+        and 0 <= config.shrub_radius_jitter <= 1
+    ):
+        raise ValueError("OSM vegetation shrub dimensions/jitter are out of range")
+    if not (
+        0.5 <= config.grass_patch_size_m <= 50
+        and 0 <= config.grass_patch_size_jitter <= 1
+        and 0.02 <= config.grass_blade_height_m <= 2
+        and 0 <= config.grass_blade_height_jitter <= 1
+        and 0 < config.grass_density_per_m2 <= 200
+    ):
+        raise ValueError("OSM vegetation grass patch dimensions/density are out of range")
+    if not (0 <= config.forest_clustering <= 1 and 0 <= config.grass_clustering <= 1):
+        raise ValueError("OSM vegetation clustering must lie in 0..1")
+    if any(not 0 <= value <= 20000 for value in integers[1:]) or not 0 <= integers[0] <= 2**31 - 1:
+        raise ValueError("OSM vegetation budgets must lie in 0..20000")
+
 def project_enu(longitude: float, latitude: float, anchor: GeodeticAnchor) -> Point:
     """WGS84 geodetic -> ECEF -> local east/north metres.
 
@@ -592,14 +662,18 @@ def landscape_objects(imported: s.OSMImport) -> tuple[s.WorldObjectSpec, ...]:
     return building_objects(imported) + feature_objects(imported)
 
 
-def landscape_vegetation(imported: s.OSMImport) -> tuple[s.VegetationSpec, ...]:
+def landscape_vegetation(
+    imported: s.OSMImport, vegetation: s.OSMVegetationConfig | None = None
+) -> tuple[s.VegetationSpec, ...]:
+    """Procedural OSM vegetation; the config must travel with the landscape."""
     from chongming.scenarios.osm_features import tree_objects
 
-    return tree_objects(imported)
+    return tree_objects(imported, vegetation)
 
 
 def attach_landscape(spec: s.ScenarioSpec, landscape: s.OSMLandscape) -> s.ScenarioSpec:
     """Attach imported geometry and align all geographic metadata to its anchor."""
+    validate_vegetation_config(landscape.vegetation)
     anchor = landscape.imported.config.anchor
     scene = spec.scene_definition
     from chongming.scenarios.osm_elevation import terrain_from_elevation
@@ -636,7 +710,7 @@ def attach_landscape(spec: s.ScenarioSpec, landscape: s.OSMLandscape) -> s.Scena
             vegetation=tuple(
                 v for v in scene.vegetation if not str(v.vegetation_id).startswith("osm/")
             )
-            + landscape_vegetation(landscape.imported),
+            + landscape_vegetation(landscape.imported, landscape.vegetation),
             terrain=terrain_from_elevation(scene.terrain, landscape.imported.elevation),
         ),
     )

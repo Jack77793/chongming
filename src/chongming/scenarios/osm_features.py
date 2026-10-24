@@ -6,7 +6,7 @@ import hashlib
 import math
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from shapely import constrained_delaunay_triangles
 from shapely.geometry import LineString, Point, Polygon, box
@@ -465,124 +465,535 @@ def forest_points(imported: s.OSMImport) -> tuple[s.OSMPointFeature, ...]:
     return tuple(result)
 
 
-def tree_objects(imported: s.OSMImport) -> tuple[s.VegetationSpec, ...]:
+def _unit(digest: bytes, offset: int) -> float:
+    return int.from_bytes(digest[offset : offset + 4], "big") / 2**32
+
+
+@dataclass(frozen=True)
+class _PlantCandidate:
+    priority: float
+    tiebreak: bytes
+    x: float
+    y: float
+    ix: int
+    iy: int
+    pass_index: int
+
+
+class _PlacementIndex:
+    """Small deterministic spatial hash used to keep generated trunks apart."""
+
+    def __init__(self, cell_size: float = 8.0) -> None:
+        self.cell_size = cell_size
+        self.cells: dict[tuple[int, int], list[tuple[float, float]]] = {}
+
+    def add(self, x: float, y: float) -> None:
+        key = (math.floor(x / self.cell_size), math.floor(y / self.cell_size))
+        self.cells.setdefault(key, []).append((x, y))
+
+    def conflicts(self, x: float, y: float, clearance: float) -> bool:
+        reach = max(1, math.ceil(clearance / self.cell_size))
+        cx, cy = math.floor(x / self.cell_size), math.floor(y / self.cell_size)
+        for ix in range(cx - reach, cx + reach + 1):
+            for iy in range(cy - reach, cy + reach + 1):
+                for px, py in self.cells.get((ix, iy), ()):
+                    if math.hypot(px - x, py - y) < clearance:
+                        return True
+        return False
+
+
+def _area_factor(seed: int, element_id: str) -> float:
+    digest = hashlib.sha256(f"osm-vegetation/{seed}/area/{element_id}".encode()).digest()
+    return 0.75 + 0.5 * _unit(digest, 0)
+
+
+def _density_target(
+    mask: BaseGeometry, density: float, factor: float, per_area_budget: int
+) -> int:
+    return min(per_area_budget, round(density * mask.area / 10_000.0 * factor))
+
+
+def _plant_candidates(
+    mask: BaseGeometry,
+    density: float,
+    *,
+    seed: int,
+    token: str,
+    clustering: float,
+    pass_index: int = 0,
+) -> list[_PlantCandidate]:
+    """Jittered-grid candidates sorted into deterministic vegetation clusters.
+
+    Sorting by a blend of fine and coarse hashes first fills locations inside
+    coherent clusters; the remainder of the sorted list acts as clearings and
+    slope/exclusion fallbacks. No wall clock or global RNG is involved.
+    """
+    if density <= 0 or mask.is_empty:
+        return []
+    spacing = max(3.0, min(50.0, math.sqrt(10_000.0 / density) * 0.72))
+    left, bottom, right, top = mask.bounds
+    x0, x1 = math.floor(left / spacing), math.ceil(right / spacing)
+    y0, y1 = math.floor(bottom / spacing), math.ceil(top / spacing)
+    if (x1 - x0) * (y1 - y0) > 250_000:
+        raise ValueError("OSM vegetation candidate budget exceeded; reduce the selected area")
+    cluster = max(1, round(45.0 / spacing))
+    prefix = f"osm-vegetation/{seed}/{token}/pass/{pass_index}"
+    candidates: list[_PlantCandidate] = []
+    for ix in range(x0, x1):
+        for iy in range(y0, y1):
+            digest = hashlib.sha256(f"{prefix}/{ix}/{iy}".encode()).digest()
+            x = (ix + 0.2 + 0.6 * _unit(digest, 0)) * spacing
+            y = (iy + 0.2 + 0.6 * _unit(digest, 4)) * spacing
+            if not mask.covers(Point(x, y)):
+                continue
+            coarse = hashlib.sha256(
+                f"{prefix}/cluster/{ix // cluster}/{iy // cluster}".encode()
+            ).digest()
+            priority = (1.0 - clustering) * _unit(digest, 8) + clustering * _unit(coarse, 0)
+            candidates.append(
+                _PlantCandidate(priority, digest[12:16], x, y, ix, iy, pass_index)
+            )
+    candidates.sort(key=lambda item: (item.priority, item.tiebreak))
+    return candidates
+
+
+def _hard_surface_exclusions(
+    imported: s.OSMImport,
+    *,
+    building_margin: float,
+    road_margin: float,
+    water_margin: float,
+) -> BaseGeometry | None:
     from shapely.ops import unary_union
 
-    from chongming.scenarios.osm_elevation import elevation_at
-
-    objects = []
-    for point in (*imported.points, *forest_points(imported)):
-        x, y = point.position_enu_m
-        pose = s.KinematicState(
-            (x, y, elevation_at(imported, x, y)),
-            (0.0, 0.0, 0.0),
-            ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-            (0.0, 0.0, 0.0),
-        )
-        for part, offset, height, radius, color in (
-            (
-                s.TreePart.TRUNK,
-                0.0,
-                point.height_m * 0.4,
-                min(0.4, point.radius_m * 0.1),
-                (0.22, 0.12, 0.05),
-            ),
-            (
-                s.TreePart.CANOPY,
-                point.height_m * 0.3,
-                point.height_m * 0.7,
-                point.radius_m,
-                (0.1, 0.28, 0.06),
-            ),
-        ):
-            objects.append(
-                s.VegetationSpec(
-                    s.VegetationId(f"osm/tree/{point.osm_node_id}/{part.value}"),
-                    f"OSM tree {point.osm_node_id}",
-                    replace(pose, position_enu_m=(x, y, pose.position_enu_m[2] + offset)),
-                    s.CylinderGeometry(radius, height),
-                    s.SurfaceAppearance(color, 0.9),
-                    s.VegetationMotionModel.STATIC,
-                    True,
-                    s.TreeVisualSpec(part, height, radius),
-                )
-            )
-    # Grass polygons receive bounded, deterministic patches. The polygon remains
-    # the logical land-cover surface; these are only visual instances, so they do
-    # not add hundreds of per-blade occlusion tests to the CPU truth path. Keep a
-    # conservative exclusion mask so a square patch cannot spill into a road,
-    # building, water or a neighboring forest polygon at its corners.
-    exclusions = [Polygon(building.footprint_enu_m).buffer(1.5) for building in imported.buildings]
+    exclusions: list[BaseGeometry] = [
+        Polygon(building.footprint_enu_m).buffer(building_margin)
+        for building in imported.buildings
+    ]
     exclusions.extend(
-        LineString(road.centerline_enu_m).buffer(road.width_m / 2 + 1.5)
+        LineString(road.centerline_enu_m).buffer(road.width_m / 2 + road_margin)
         for road in imported.roads
     )
     exclusions.extend(
-        Polygon(area.rings_enu_m[0], area.rings_enu_m[1:]).buffer(1.5)
+        Polygon(area.rings_enu_m[0], area.rings_enu_m[1:]).buffer(water_margin)
         for area in imported.areas
-        if area.category in {"water", "forest"}
+        if area.category == "water"
     )
-    exclusions.extend(Point(*point.position_enu_m).buffer(point.radius_m + 1.5) for point in imported.points)
-    excluded = unary_union(exclusions) if exclusions else None
-    total_patches = 0
-    max_total_patches = 2048
-    max_area_patches = 256
-    for area in imported.areas:
-        if area.category != "grass":
-            continue
-        mask = Polygon(area.rings_enu_m[0], area.rings_enu_m[1:])
-        inset: BaseGeometry = mask.buffer(-9.0)
-        if excluded is not None:
-            inset = inset.difference(excluded)
-        if inset.is_empty:
-            continue
-        left, bottom, right, top = inset.bounds
-        spacing = 18.0
-        if (math.ceil((right - left) / spacing) + 2) * (math.ceil((top - bottom) / spacing) + 2) > 250_000:
-            raise ValueError("grass candidate budget exceeded; reduce the selected area")
-        patch_index = 0
-        for ix in range(math.floor(left / spacing), math.ceil(right / spacing)):
-            for iy in range(math.floor(bottom / spacing), math.ceil(top / spacing)):
-                if patch_index >= max_area_patches or total_patches >= max_total_patches:
-                    break
-                digest = hashlib.sha256(
-                    f"osm-grass-42/{area.element_id}/{ix}/{iy}".encode()
-                ).digest()
-                x = (ix + 0.25 + 0.5 * int.from_bytes(digest[:4], "big") / 2**32) * spacing
-                y = (iy + 0.25 + 0.5 * int.from_bytes(digest[4:8], "big") / 2**32) * spacing
-                # A low-frequency deterministic thinning gives parks a natural
-                # patch pattern while retaining exact replay across runs.
-                if digest[9] / 255.0 > 0.78 or not inset.covers(Point(x, y)):
-                    continue
-                width = depth = 12.0
-                height = 0.24 + digest[8] / 255.0 * 0.18
-                grass_pose = _grass_pose(imported, x, y, width)
-                if grass_pose is None:
-                    continue
-                rotation = grass_pose.rotation_enu_from_body
-                footprint = Polygon([
-                    (x + rotation[0][0] * a + rotation[0][1] * b,
-                     y + rotation[1][0] * a + rotation[1][1] * b)
-                    for a, b in ((-6.0, -6.0), (6.0, -6.0), (6.0, 6.0), (-6.0, 6.0))
-                ])
-                if not mask.covers(footprint) or (excluded is not None and excluded.intersects(footprint)):
-                    continue
-                objects.append(
-                    s.VegetationSpec(
-                        s.VegetationId(f"osm/grass/{area.element_id}/{patch_index}"),
-                        f"OSM grass {area.element_id}",
-                        grass_pose,
-                        s.CylinderGeometry(math.hypot(width, depth) * 0.5, height),
-                        s.SurfaceAppearance((0.17, 0.34, 0.08), 0.82),
-                        s.VegetationMotionModel.STATIC,
-                        False,
-                        s.GrassVisualSpec(width, depth, height, 0.75),
-                    )
+    return unary_union(exclusions) if exclusions else None
+
+
+def _with_point_exclusions(
+    excluded: BaseGeometry | None,
+    points: tuple[s.OSMPointFeature, ...],
+    margin: float,
+) -> BaseGeometry | None:
+    from shapely.ops import unary_union
+
+    buffers = [Point(*point.position_enu_m).buffer(point.radius_m + margin) for point in points]
+    if not buffers:
+        return excluded
+    combined = unary_union(buffers)
+    return combined if excluded is None else unary_union((excluded, combined))
+
+
+def _upright_pose(
+    imported: s.OSMImport, x: float, y: float, base_radius: float
+) -> s.KinematicState | None:
+    """Place an upright plant on locally flat ground; reject DEM creases.
+
+    The coarse DEM is piecewise planar. Rejecting a steep local gradient or a
+    large elevation step under the bole prevents trunks from floating or being
+    buried at a terrain break. Grass patches use the stricter ``_grass_pose``.
+    """
+    from chongming.scenarios.osm_elevation import elevation_at
+
+    z = elevation_at(imported, x, y)
+    tolerance = max(0.35, base_radius * 0.75)
+    for dx, dy in (
+        (base_radius, 0.0),
+        (-base_radius, 0.0),
+        (0.0, base_radius),
+        (0.0, -base_radius),
+    ):
+        if abs(elevation_at(imported, x + dx, y + dy) - z) > tolerance:
+            return None
+    dx = (elevation_at(imported, x + 1.0, y) - elevation_at(imported, x - 1.0, y)) / 2.0
+    dy = (elevation_at(imported, x, y + 1.0) - elevation_at(imported, x, y - 1.0)) / 2.0
+    if math.hypot(dx, dy) > 1.0:
+        return None
+    return s.KinematicState(
+        (x, y, z),
+        (0.0, 0.0, 0.0),
+        ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        (0.0, 0.0, 0.0),
+    )
+
+
+def _tree_specs(
+    tree_id: str,
+    display_name: str,
+    pose: s.KinematicState,
+    height: float,
+    crown_radius: float,
+    canopy_color: tuple[float, float, float],
+) -> tuple[s.VegetationSpec, ...]:
+    """One semantic tree composed of the existing trunk and canopy visuals."""
+    x, y, z = pose.position_enu_m
+    trunk_height = height * 0.4
+    trunk_radius = min(0.45, max(0.12, crown_radius * 0.1))
+    canopy_height = height * 0.7
+    specs: list[s.VegetationSpec] = []
+    for part, offset, part_height, part_radius, color in (
+        (
+            s.TreePart.TRUNK,
+            0.0,
+            trunk_height,
+            trunk_radius,
+            (0.22, 0.12, 0.05),
+        ),
+        (
+            s.TreePart.CANOPY,
+            height * 0.3,
+            canopy_height,
+            crown_radius,
+            canopy_color,
+        ),
+    ):
+        specs.append(
+            s.VegetationSpec(
+                s.VegetationId(f"{tree_id}/{part.value}"),
+                f"{display_name} {part.value}",
+                replace(pose, position_enu_m=(x, y, z + offset)),
+                s.CylinderGeometry(part_radius, part_height),
+                s.SurfaceAppearance(color, 0.9),
+                s.VegetationMotionModel.STATIC,
+                True,
+                s.TreeVisualSpec(part, part_height, part_radius),
+            )
+        )
+    return tuple(specs)
+
+
+def _trees_inside(mask: BaseGeometry, points: tuple[s.OSMPointFeature, ...]) -> int:
+    return sum(1 for point in points if mask.covers(Point(*point.position_enu_m)))
+
+
+def tree_objects(
+    imported: s.OSMImport, vegetation: s.OSMVegetationConfig | None = None
+) -> tuple[s.VegetationSpec, ...]:
+    """Deterministic trees, shrubs and grass patches on OSM forest/grass areas.
+
+    OSM tree points and the legacy ``forest_points`` stand remain canonical.
+    Procedural additions are bounded by per-area/total budgets and use only
+    semantic visuals (two specs per tree, one per shrub, one per grass patch).
+    """
+    from chongming.scenarios.osm import validate_vegetation_config
+
+    config = vegetation if vegetation is not None else s.OSMVegetationConfig()
+    validate_vegetation_config(config)
+
+    objects: list[s.VegetationSpec] = []
+    base_trees = forest_points(imported)
+    canonical_trees = (*imported.points, *base_trees)
+    for point in canonical_trees:
+        x, y = point.position_enu_m
+        pose = _upright_pose(imported, x, y, 0.6)
+        if pose is None:
+            from chongming.scenarios.osm_elevation import elevation_at
+
+            pose = s.KinematicState(
+                (x, y, elevation_at(imported, x, y)),
+                (0.0, 0.0, 0.0),
+                ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                (0.0, 0.0, 0.0),
+            )
+        objects.extend(
+            _tree_specs(
+                f"osm/tree/{point.osm_node_id}",
+                f"OSM tree {point.osm_node_id}",
+                pose,
+                point.height_m,
+                point.radius_m,
+                (0.10, 0.28, 0.06),
+            )
+        )
+
+    tree_index = _PlacementIndex()
+    for point in canonical_trees:
+        tree_index.add(*point.position_enu_m)
+    shrub_index = _PlacementIndex()
+
+    tree_excluded = _hard_surface_exclusions(
+        imported, building_margin=0.8, road_margin=1.0, water_margin=1.0
+    )
+    tree_excluded = _with_point_exclusions(tree_excluded, canonical_trees, margin=1.0)
+    shrub_excluded = _hard_surface_exclusions(
+        imported, building_margin=0.6, road_margin=0.6, water_margin=0.8
+    )
+    grass_excluded = _hard_surface_exclusions(
+        imported, building_margin=1.0, road_margin=1.5, water_margin=1.5
+    )
+
+    generated_trees = 0
+    generated_shrubs = 0
+    generated_grass = 0
+
+    def add_tree(
+        area: s.OSMArea, candidate: _PlantCandidate, remaining: int
+    ) -> bool:
+        nonlocal generated_trees
+        if remaining <= 0 or generated_trees >= config.maximum_trees_total:
+            return False
+        if tree_index.conflicts(candidate.x, candidate.y, 2.0):
+            return False
+        if tree_excluded is not None and tree_excluded.covers(Point(candidate.x, candidate.y)):
+            return False
+        pose = _upright_pose(imported, candidate.x, candidate.y, 0.6)
+        if pose is None:
+            return False
+        digest = hashlib.sha256(
+            f"osm-vegetation/{config.seed}/{area.element_id}/tree/{candidate.pass_index}/{candidate.ix}/{candidate.iy}".encode()
+        ).digest()
+        height = config.tree_height_m * (
+            1.0 + config.tree_height_jitter * (2.0 * _unit(digest, 0) - 1.0)
+        )
+        crown = config.tree_crown_radius_m * (
+            1.0 + config.tree_crown_radius_jitter * (2.0 * _unit(digest, 4) - 1.0)
+        )
+        tree_index.add(candidate.x, candidate.y)
+        canopy_color = (
+            (0.09, 0.25, 0.05) if area.category == "forest" else (0.11, 0.29, 0.07)
+        )
+        objects.extend(
+            _tree_specs(
+                f"osm/tree/{area.element_id}/{candidate.pass_index}/{candidate.ix}/{candidate.iy}",
+                f"OSM {area.category} tree {area.element_id}",
+                pose,
+                max(1.0, height),
+                max(0.2, crown),
+                canopy_color,
+            )
+        )
+        generated_trees += 1
+        return True
+
+    def add_shrub(area: s.OSMArea, candidate: _PlantCandidate, remaining: int) -> bool:
+        nonlocal generated_shrubs
+        if remaining <= 0 or generated_shrubs >= config.maximum_shrubs_total:
+            return False
+        if shrub_index.conflicts(candidate.x, candidate.y, 1.0):
+            return False
+        if tree_index.conflicts(candidate.x, candidate.y, 0.9):
+            return False
+        if shrub_excluded is not None and shrub_excluded.covers(
+            Point(candidate.x, candidate.y)
+        ):
+            return False
+        pose = _upright_pose(imported, candidate.x, candidate.y, 0.8)
+        if pose is None:
+            return False
+        digest = hashlib.sha256(
+            f"osm-vegetation/{config.seed}/{area.element_id}/shrub/{candidate.pass_index}/{candidate.ix}/{candidate.iy}".encode()
+        ).digest()
+        height = config.shrub_height_m * (
+            1.0 + config.shrub_height_jitter * (2.0 * _unit(digest, 0) - 1.0)
+        )
+        radius = config.shrub_radius_m * (
+            1.0 + config.shrub_radius_jitter * (2.0 * _unit(digest, 4) - 1.0)
+        )
+        height, radius = max(0.1, height), max(0.05, radius)
+        shrub_index.add(candidate.x, candidate.y)
+        color = (0.08, 0.22, 0.05) if area.category == "forest" else (0.11, 0.27, 0.065)
+        objects.append(
+            s.VegetationSpec(
+                s.VegetationId(
+                    f"osm/shrub/{area.element_id}/{candidate.pass_index}/{candidate.ix}/{candidate.iy}"
+                ),
+                f"OSM {area.category} shrub {area.element_id}",
+                replace(pose, position_enu_m=(candidate.x, candidate.y, pose.position_enu_m[2] + 0.02)),
+                s.CylinderGeometry(radius, height),
+                s.SurfaceAppearance(color, 0.85),
+                s.VegetationMotionModel.STATIC,
+                True,
+                s.ShrubVisualSpec(height, radius),
+            )
+        )
+        generated_shrubs += 1
+        return True
+
+    def add_grass(area: s.OSMArea, candidate: _PlantCandidate, remaining: int) -> bool:
+        nonlocal generated_grass
+        if remaining <= 0 or generated_grass >= config.maximum_grass_patches_total:
+            return False
+        digest = hashlib.sha256(
+            f"osm-vegetation/{config.seed}/{area.element_id}/grass/{candidate.pass_index}/{candidate.ix}/{candidate.iy}".encode()
+        ).digest()
+        width = config.grass_patch_size_m * (
+            1.0 + config.grass_patch_size_jitter * (2.0 * _unit(digest, 0) - 1.0)
+        )
+        depth = config.grass_patch_size_m * (
+            1.0 + config.grass_patch_size_jitter * (2.0 * _unit(digest, 4) - 1.0)
+        )
+        width, depth = max(0.5, width), max(0.5, depth)
+        blade_height = config.grass_blade_height_m * (
+            1.0 + config.grass_blade_height_jitter * (2.0 * _unit(digest, 8) - 1.0)
+        )
+        blade_height = max(0.02, blade_height)
+        grass_pose = _grass_pose(imported, candidate.x, candidate.y, max(width, depth))
+        if grass_pose is None:
+            return False
+        rotation = grass_pose.rotation_enu_from_body
+        footprint = Polygon(
+            [
+                (
+                    candidate.x + rotation[0][0] * a + rotation[0][1] * b,
+                    candidate.y + rotation[1][0] * a + rotation[1][1] * b,
                 )
-                patch_index += 1
-                total_patches += 1
-            if patch_index >= max_area_patches or total_patches >= max_total_patches:
-                break
+                for a, b in (
+                    (-width / 2, -depth / 2),
+                    (width / 2, -depth / 2),
+                    (width / 2, depth / 2),
+                    (-width / 2, depth / 2),
+                )
+            ]
+        )
+        if not mask.covers(footprint):
+            return False
+        if grass_excluded is not None and grass_excluded.intersects(footprint):
+            return False
+        objects.append(
+            s.VegetationSpec(
+                s.VegetationId(
+                    f"osm/grass/{area.element_id}/{candidate.pass_index}/{candidate.ix}/{candidate.iy}"
+                ),
+                f"OSM {area.category} grass {area.element_id}",
+                grass_pose,
+                s.CylinderGeometry(math.hypot(width, depth) * 0.5, blade_height),
+                s.SurfaceAppearance(
+                    (0.12, 0.28, 0.06) if area.category == "forest" else (0.16, 0.32, 0.075),
+                    0.82,
+                ),
+                s.VegetationMotionModel.STATIC,
+                False,
+                s.GrassVisualSpec(
+                    width, depth, blade_height, config.grass_density_per_m2
+                ),
+            )
+        )
+        generated_grass += 1
+        return True
+
+    areas_by_category = {
+        "forest": [area for area in imported.areas if area.category == "forest"],
+        "grass": [area for area in imported.areas if area.category == "grass"],
+    }
+    masks = {
+        area.element_id: Polygon(area.rings_enu_m[0], area.rings_enu_m[1:])
+        for area in imported.areas
+        if area.category in areas_by_category
+    }
+
+    # Park trees first so a low total budget can never leave parks treeless.
+    for category in ("grass", "forest"):
+        for area in areas_by_category[category]:
+            mask = masks[area.element_id]
+            factor = _area_factor(config.seed, area.element_id)
+            if category == "grass":
+                density = config.grass_tree_density_per_ha
+                clustering = config.grass_clustering
+                existing = _trees_inside(mask, imported.points)
+            else:
+                density = config.forest_tree_density_per_ha
+                clustering = config.forest_clustering
+                existing = _trees_inside(mask, canonical_trees)
+            target = _density_target(
+                mask, density, factor, config.maximum_trees_per_area
+            )
+            remaining = max(0, target - existing)
+            if not remaining:
+                continue
+            candidates = _plant_candidates(
+                mask,
+                density,
+                seed=config.seed,
+                token=f"{area.element_id}/tree",
+                clustering=clustering,
+            )
+            for candidate in candidates:
+                if add_tree(area, candidate, remaining):
+                    remaining -= 1
+                    if not remaining:
+                        break
+
+    for category in ("forest", "grass"):
+        density = (
+            config.forest_shrub_density_per_ha
+            if category == "forest"
+            else config.grass_shrub_density_per_ha
+        )
+        for area in areas_by_category[category]:
+            mask = masks[area.element_id]
+            target = _density_target(
+                mask,
+                density,
+                _area_factor(config.seed, area.element_id),
+                config.maximum_shrubs_per_area,
+            )
+            if not target:
+                continue
+            candidates = _plant_candidates(
+                mask,
+                density,
+                seed=config.seed,
+                token=f"{area.element_id}/shrub",
+                clustering=0.6,
+            )
+            remaining = target
+            for candidate in candidates:
+                if add_shrub(area, candidate, remaining):
+                    remaining -= 1
+                    if not remaining:
+                        break
+
+    for category in ("forest", "grass"):
+        density = (
+            config.forest_grass_density_per_ha
+            if category == "forest"
+            else config.grass_grass_density_per_ha
+        )
+        for area in areas_by_category[category]:
+            mask = masks[area.element_id]
+            target = _density_target(
+                mask,
+                density,
+                _area_factor(config.seed, area.element_id),
+                config.maximum_grass_patches_per_area,
+            )
+            if not target:
+                continue
+            remaining = min(
+                target, config.maximum_grass_patches_total - generated_grass
+            )
+            # Terrain creases, narrow polygons and hard surfaces reject many
+            # 12 m patches. Additional deterministic grid passes fill the target
+            # without forcing a larger per-pass candidate list.
+            for attempt in range(12):
+                if remaining <= 0:
+                    break
+                candidates = _plant_candidates(
+                    mask,
+                    density,
+                    seed=config.seed,
+                    token=f"{area.element_id}/grass",
+                    clustering=0.55,
+                    pass_index=attempt,
+                )
+                for candidate in candidates:
+                    if add_grass(area, candidate, remaining):
+                        remaining -= 1
+                        if not remaining:
+                            break
+
     return tuple(objects)
 
 

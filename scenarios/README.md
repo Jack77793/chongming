@@ -36,6 +36,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 | `terrain` | flat 或 heightfield + origin_enu_m/spacing_m；内嵌 heights_m 或外部 asset 二选一，高度行从南到北、每行从西到东，网格外为平面 |
 | `search` | min_enu_m、max_enu_m、step_enu_m 三个向量，控制中心搜索盒；范围外目标仍可发射线 |
 | `appearance` | 可选 linear_rgb 三个 0–1 数和 diffuse_reflectance；只影响外观 |
+| `osm` | 可选固定本地 OSM 资产：`asset.uri`/`asset.sha256`，以及可选的 `vegetation` 程序化植被配置（三类密度、尺寸、预算与固定种子） |
 
 未写 `world_objects` 时保留内置建筑、球形地物和每站标志物；相机朝向未指定时采用演示朝向。主相机对角线 FOV 60°，辅助相机水平 FOV 2.6°、俯仰角 0，朝向 10 m 外自己的横向 A4 棋盘；标志物 ID 为 `<station-id>-a4`，角点与站配置绑定。仅在主视场内且中心视线未被地形、地物或其他飞行器挡住时发包。校准为理想有效状态，覆盖全部配置时长。
 
@@ -112,7 +113,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 
 每棵树/灌木近距离绘制详细枝叶，越过 `vegetation_lod_near_m` 后切到低面数树干/树冠代理，越过 `vegetation_lod_far_m` 后剔除；草在 near 距离直接剔除。当前使用 Godot 几何实例的距离范围，切换没有交叉淡入，阈值附近可能出现轻微 pop。草单 patch 最多 4096 片，较大草地应拆成多个 patch，既能分块剔除也避免一个巨型 AABB 常驻视锥。
 
-OSM 地景支持固定本地建筑、道路、树点、森林/绿地/水体和可选 HGT DEM；示例为 `scenarios/osm_landscape.json`（CC0 合成 fixture，非真实地图）。用 `uv run chongming-preview --scenario scenarios/osm_landscape.json` 复查；用 `chongming-osm` 离线清洗/导入 XML，再将 `osm.asset.uri` 和 SHA-256 写入场景。真实 Hannover 样区的配置、来源和复现命令见 [OSM 地景整合说明](../docs/OSM地景整合说明.md)，本地复查产物写入被忽略的 `output/` 目录。选区使用 WGS84 包围框，预览回调和固定 Hannover 地景切换已经接入；任意选区 UI 尚未实现。
+OSM 地景支持固定本地建筑、道路、树点、森林/绿地/水体和可选 HGT DEM；示例为 `scenarios/osm_landscape.json`（CC0 合成 fixture，非真实地图）。用 `uv run chongming-preview --scenario scenarios/osm_landscape.json` 复查；用 `chongming-osm` 离线清洗/导入 XML，再将 `osm.asset.uri` 和 SHA-256 写入场景。森林与绿地会按 `osm.vegetation` 的每公顷密度生成乔木、灌木和草 patch：森林为较密乔木+林下灌木+地被，公园为成簇稀疏乔木+灌木+草；全部使用确定性哈希和抖动网格，排除建筑、道路、水体、既有树冠及 DEM 陡变。省略 `vegetation` 使用默认值，旧场景仍可加载；真实 Hannover 样区的配置、来源和复现命令见 [OSM 地景整合说明](../docs/OSM地景整合说明.md)，本地复查产物写入被忽略的 `output/` 目录。选区使用 WGS84 包围框，预览回调和固定 Hannover 地景切换已经接入；任意选区 UI 尚未实现。
 
 较大的地形网格放在独立 JSON 中，场景只保留位置、间距和 `"asset": {"uri": "assets/ridge.json", "sha256": "…"}`。资产只含 `{"heights_m": [[0, 1], [2, 3]]}`：至少 2×2 的矩形有限非负高度，单位米、相对基础高程。原点和间距留在场景中，同一网格可复用。URI 相对场景文件目录解析，也支持本地绝对路径/file URI；不下载远程资产。Python 调用 `load_scenario` 可用 `asset_root` 指定素材目录。
 

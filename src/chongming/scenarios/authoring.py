@@ -12,7 +12,7 @@ import json
 import math
 import os
 import tempfile
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +290,39 @@ def _target(spec: s.FlyingObjectSpec, document: dict[str, Any]) -> s.FlyingObjec
         geometry=geometry,
         appearance=appearance,
     )
+
+
+_OSM_VEGETATION_INTEGERS = frozenset(
+    {
+        "seed",
+        "maximum_trees_per_area",
+        "maximum_trees_total",
+        "maximum_shrubs_per_area",
+        "maximum_shrubs_total",
+        "maximum_grass_patches_per_area",
+        "maximum_grass_patches_total",
+    }
+)
+
+
+def _osm_vegetation(value: Any) -> s.OSMVegetationConfig:
+    """Parse optional procedural vegetation policy; every field keeps a default."""
+    if value is None:
+        return s.OSMVegetationConfig()
+    _fields(value, {field.name for field in fields(s.OSMVegetationConfig)}, "osm.vegetation")
+    kwargs: dict[str, Any] = {
+        key: (
+            _integer(item, f"osm.vegetation.{key}")
+            if key in _OSM_VEGETATION_INTEGERS
+            else _number(item, f"osm.vegetation.{key}")
+        )
+        for key, item in value.items()
+    }
+    config = s.OSMVegetationConfig(**kwargs)
+    from chongming.scenarios.osm import validate_vegetation_config
+
+    validate_vegetation_config(config)
+    return config
 
 
 def compile_authoring(
@@ -888,18 +921,18 @@ def compile_authoring(
     if "osm" in document:
         from chongming.scenarios.osm import attach_landscape, load_landscape
 
-        osm = _fields(document["osm"], {"asset"}, "osm")
+        osm = _fields(document["osm"], {"asset", "vegetation"}, "osm")
         asset = _fields(_required(osm, "asset"), {"uri", "sha256"}, "osm.asset")
         if asset_root is None:
             raise ValueError("compiling OSM requires asset_root")
-        spec = attach_landscape(
-            spec,
-            load_landscape(
-                _identifier(_required(asset, "uri"), "osm.asset.uri"),
-                _identifier(_required(asset, "sha256"), "osm.asset.sha256"),
-                asset_root,
-            ),
+        landscape = load_landscape(
+            _identifier(_required(asset, "uri"), "osm.asset.uri"),
+            _identifier(_required(asset, "sha256"), "osm.asset.sha256"),
+            asset_root,
         )
+        if "vegetation" in osm:
+            landscape = replace(landscape, vegetation=_osm_vegetation(osm["vegetation"]))
+        spec = attach_landscape(spec, landscape)
 
     from chongming.scenarios.serialization import validate_scenario_spec
 

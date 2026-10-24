@@ -12,7 +12,7 @@ import base64
 import json
 import math
 import sys
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, fields, is_dataclass, replace
 from enum import Enum
 from functools import cache
 from itertools import pairwise
@@ -298,15 +298,20 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
     )
     unique([v.vegetation_id for v in scene.vegetation], "vegetation ID")
     if scene.osm_landscape is not None:
-        from chongming.scenarios.osm import landscape_objects, landscape_vegetation
+        from chongming.scenarios.osm import (
+            landscape_objects,
+            landscape_vegetation,
+            validate_vegetation_config,
+        )
         from chongming.scenarios.osm_elevation import terrain_from_elevation
 
         landscape = scene.osm_landscape
+        validate_vegetation_config(landscape.vegetation)
         expected_buildings = landscape_objects(landscape.imported)
         actual_buildings = tuple(o for o in scene.world_objects if o.category.startswith("osm-"))
         if expected_buildings != actual_buildings:
             raise ValueError("OSM world geometry disagrees with the canonical asset")
-        if landscape_vegetation(landscape.imported) != tuple(
+        if landscape_vegetation(landscape.imported, landscape.vegetation) != tuple(
             v for v in scene.vegetation if str(v.vegetation_id).startswith("osm/")
         ):
             raise ValueError("OSM vegetation disagrees with the canonical asset")
@@ -522,9 +527,14 @@ def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
     """Verify every currently supported external asset reference before a run."""
     landscape = spec.scene_definition.osm_landscape
     if landscape is not None:
-        from chongming.scenarios.osm import load_landscape
+        from chongming.scenarios.osm import load_landscape, validate_vegetation_config
 
-        if load_landscape(landscape.asset_uri, landscape.asset_sha256, asset_root) != landscape:
+        validate_vegetation_config(landscape.vegetation)
+        loaded = load_landscape(landscape.asset_uri, landscape.asset_sha256, asset_root)
+        # The optional procedural vegetation policy is authored per scenario and
+        # deliberately not part of the canonical OSM asset digest. Everything
+        # else in the compiled landscape must still match the verified file.
+        if replace(loaded, vegetation=landscape.vegetation) != landscape:
             raise ValueError("compiled OSM metadata disagrees with the verified asset")
     terrain = spec.scene_definition.terrain
     if terrain.heightfield_asset_uri is None:
