@@ -15,16 +15,14 @@
 
 ## 开发环境与运行
 
-可使用 Nix Flake 一次性准备 Python、`uv.lock` 中的运行/开发依赖、Godot 4.7.2 stable 和开发工具，支持 `x86_64-linux`、`aarch64-linux`、`aarch64-darwin`：
+可使用 Nix Flake 准备 Python、锁定依赖、Godot 4.7.2 stable 和开发工具：
 
 ```sh
 nix develop
 chongming-center --scenario scenarios/center_clean.json --check
 ```
 
-也可直接运行 `nix run .#preview -- --scenario scenarios/review.json`，或用 `nix run .#center -- --scenario scenarios/center_clean.json --check` 只校验配置。实际场景运行即使停用视频也需要图形上下文。Linux 无桌面测试可使用 `nix develop .#software` 配合 `xvfb-run`。
-
-完整说明、锁文件策略、检查命令和已知检查基线问题见 [Nix 开发环境](docs/Nix开发环境.md)。不使用 Nix 时仍可沿用 `uv sync`，并按 [虚拟场景运行说明](docs/虚拟场景预览.md) 手工准备 Godot 和图形环境。
+运行、格式化、检查和图形环境准备见 [Nix 开发环境](docs/Nix开发环境.md)。不使用 Nix 时可沿用 `uv sync`，并按 [虚拟场景运行说明](docs/虚拟场景预览.md) 准备 Godot 和图形环境。
 
 ## 实施共识
 
