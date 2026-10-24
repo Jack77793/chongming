@@ -17,7 +17,7 @@ Flake 同时提供可编辑开发环境和固定源码的运行包。Python 依�
 | Python 3.12 | `flake.lock` 固定的 Nixpkgs；满足项目 `>=3.12,<3.15` 和工具的 Python 3.12 目标 |
 | NumPy、Pillow、Ruff、mypy 及间接 Python 依赖 | 原有 `uv.lock` 的精确版本与文件哈希 |
 | Godot | Nixpkgs 中的 **4.7.2-stable**，另有求值断言防止静默升级 |
-| uv、Git、nixfmt、Linux 的 Xvfb 与 Mesa | `flake.lock` 固定的 Nixpkgs |
+| uv、Git、treefmt、nixfmt、Prettier、Linux 的 Xvfb 与 Mesa | `flake.lock` 固定的 Nixpkgs |
 | Hatchling 等构建后端，以及 editable 构建需要的 editables | `flake.lock` 固定的 `pyproject-build-systems` |
 
 构建后端不在现有 `uv.lock` 的运行/开发依赖中，因此通过固定的构建系统输入提供。Flake 优先使用锁定 wheel，Nix 负责 Linux 动态库修补，无需系统级 pip 安装或手工设置 NumPy/Pillow 的库路径。
@@ -52,7 +52,7 @@ chongming-center --scenario scenarios/center_clean.json --check
 
 - 可编辑安装的项目、NumPy、Pillow 和 `uv.lock` 中的全部开发依赖；
 - Godot 4.7.2 stable，自动设置 `CHONGMING_GODOT`；
-- uv、Git 和 nixfmt；Linux 额外提供 `xvfb-run`。
+- uv、Git、treefmt、nixfmt 和 Prettier；Linux 额外提供 `xvfb-run`。treefmt 的 Python 格式化器仍使用 `uv.lock` 固定的 Ruff，Prettier 3.9.10 来自原有 Nixpkgs 锁定快照。
 
 `python`、`ruff`、`mypy` 和三个 `chongming-*` 命令都可直接使用；也兼容已有的 `uv run ...` 调用：
 
@@ -134,8 +134,15 @@ nix develop .#software -c \
 ## 6. 检查
 
 ```sh
-# 格式化 flake.nix；也可通过 nix fmt -- --check flake.nix 只检查
+# 使用 treefmt 格式化 Nix、Python、JSON、HTML、JS、CSS 和 Markdown，会修改工作区
 nix fmt
+
+# 只格式化指定文件
+nix fmt -- flake.nix nix/check-environment.py
+
+# dry-run：只在 Nix 构建沙箱的源码副本中格式化，不改写工作区
+system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+nix build --no-link -L ".#checks.${system}.treefmt"
 
 # 求值三个系统的全部输出，不构建或运行检查
 nix flake check --all-systems --no-build
@@ -150,7 +157,41 @@ Flake checks 包含：
 - `architecture`：7 项无显示架构测试；
 - `scenarios`：校验仓库内全部场景 JSON；
 - `lint`、`format`、`types`：原有 Ruff / mypy 命令；
-- `nix-format`：Nix 格式检查。
+- `nix-format`：Nix 格式检查；
+- `treefmt`：在沙箱副本中检查配置覆盖的全部文件；
+- `treefmt-smoke`：用沙箱中的最小样例验证三种格式化器、Prettier 的五类文件、资产/锁文件/输出目录排除规则，以及格式化后再次检查的幂等性。
+
+### treefmt 范围与 dry-run
+
+仓库的 `treefmt.toml` 配置三种格式化器：
+
+| 文件 | 格式化器 |
+| --- | --- |
+| `*.nix` | 原有 nixfmt |
+| `*.py` | `uv.lock` 固定的 Ruff，仅执行 `ruff format`，不执行 lint 自动修复 |
+| `*.json`、`*.html`、`*.js`、`*.mjs`、`*.cjs`、`*.css`、`*.md`、`*.markdown` | Prettier 3.9.10，使用默认格式规则，也格式化 HTML 中可识别的内嵌 JS/CSS |
+
+生成环境、缓存、构建产物和实验输出已排除；Godot 文件不在当前格式化范围内。treefmt、Prettier 均来自现有 Nixpkgs 锁定快照，接入时没有更新任何锁文件或已有工具版本。
+
+**按原始字节校验的资产与锁文件除外：**`scenarios/assets/` 中的 JSON 被场景配置以 SHA-256 引用，修改空白也会破坏校验，因此不格式化这些资产；普通场景 JSON 仍会格式化。生成的 `package-lock.json` / `npm-shrinkwrap.json` 也被排除，`flake.lock` / `uv.lock` 本身不匹配扩展名。根目录 `.prettierignore` 同样保护这些文件及生成目录，供直接调用 Prettier 时使用。若确需改变资产格式，必须另行审查原始文件和摘要更新，不能顺手重写摘要。
+
+以下三个入口使用同一套配置和固定的工具路径，不依赖宿主机 PATH 中的其他 Ruff/nixfmt/Prettier：
+
+```sh
+nix fmt
+nix run .#treefmt -- --version
+nix develop -c treefmt --version
+```
+
+当前 treefmt 2.6.0 **没有 `--dry-run` 参数**；`--fail-on-change` 和 `--ci` 会在格式化后返回失败，但仍会改写其输入文件，不能直接当作工作区 dry-run。请使用上面的 `checks.${system}.treefmt`：它将 Flake 源码复制到可写构建目录，在副本中执行 `treefmt --ci`。需要格式化时构建以非零状态退出并输出需修改的文件路径；工作区源码不变。
+
+接入 Prettier 前，在 `aarch64-linux` 的 dry-run 遍历 100 个文件，对 56 个匹配文件执行格式化，报告 12 个原有 Python 文件需要修改：原 `src/tests` 格式检查中的 10 个文件，另加 `scripts/review_photography.py` 和 `scripts/review_vegetation.py`。退出状态为 1，属于格式基线未通过，而非工具执行失败；检查前后 100 个已跟踪或 intent-to-add 文件的 SHA-256 全部一致，未应用这些格式修改。
+
+扩展 Prettier 后，`aarch64-linux` 的 dry-run 遍历 101 个文件，对 84 个匹配文件执行格式化，报告 31 个文件需要修改：12 个 Python、11 个 Markdown、7 个普通场景 JSON 和 1 个 HTML。检查前后 101 个文件的 SHA-256 全部一致，锁文件及带摘要引用的资产未改变。沙箱 smoke test 另验证 JSON、HTML、JS、CSS、Markdown 五类样例均实际被格式化，再次执行无变化；资产、生成锁文件和输出目录保持不变。
+
+直接 `nix fmt` 则会真正格式化匹配的文件。只检查 Nix 时，可用沙箱中的 `nix-format` check，或在开发 shell 中执行 `nixfmt --check flake.nix`，不要再给 `nix fmt` 传递旧格式化器专用的 `--check` 参数。
+
+### 完整测试与检查基线
 
 完整 85 项测试需要图形上下文，因此不作为普通 `nix flake check` 的一部分。在原生图形会话运行：
 
@@ -158,7 +199,7 @@ Flake checks 包含：
 nix develop -c python -m unittest discover -s tests -v
 ```
 
-**接入时的已知基线问题：**原有 Python 文件有 10 个不符合锁定 Ruff 的格式要求，测试目录有 54 项 mypy 错误。因此 `format` 和 `types` 检查当前失败，`nix flake check` 不会全绿。本次未降低检查要求、升级工具或修改这些无关文件；它们需要另行修复。`--no-build` 通过只代表求值成功，不代表上述检查已经执行。
+**接入时的已知基线问题：**原有 Python 文件有 10 个不符合锁定 Ruff 的格式要求，测试目录有 54 项 mypy 错误。因此 `format`、`treefmt` 和 `types` 检查当前失败，`nix flake check` 不会全绿。本次未降低检查要求、升级工具或修改这些无关文件；它们需要另行修复。`--no-build` 通过只代表求值成功，不代表上述检查已经执行。
 
 ### aarch64-darwin 验证记录（2026-10-24）
 
@@ -169,7 +210,7 @@ nix develop -c python -m unittest discover -s tests -v
 | `nix flake check --all-systems --no-build` | 三平台输出全部求值通过 |
 | `nix build .#chongming .#dev-tools --no-link --print-out-paths` | 本机运行包与开发工具构建成功 |
 | `nix develop`、shell 内 `uv run` | 成功；项目导入指向工作区 `src/chongming/`，使用 Nix Python 和锁定工具 |
-| `nix fmt -- --check flake.nix` | 通过 |
+| `nix fmt -- --check flake.nix`（接入 treefmt 前的入口） | 通过 |
 | `nix flake check --keep-going` | `environment`、`architecture`、`scenarios`、`lint`、`nix-format` 通过；`format`、`types` 因上述基线问题失败 |
 | `nix develop -c python -m unittest discover -s tests -v` | 85 项测试全部通过，无跳过，耗时约 31 秒；包含原生 Godot 图形与植被测试 |
 | `nix run .#center`、`.#scene`、`.#preview` | 三个入口及实际运行通过，细节如下 |

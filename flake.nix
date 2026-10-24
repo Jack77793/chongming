@@ -74,6 +74,7 @@
         in
         {
           inherit pkgs godot;
+          ruff = pythonSet.ruff;
           runtime = pythonSet.mkVirtualEnv "chongming-runtime" workspace.deps.default;
           tools = pythonSet.mkVirtualEnv "chongming-tools" workspace.deps.all;
           editable = editableSet.mkVirtualEnv "chongming-dev" workspace.deps.all;
@@ -107,6 +108,19 @@
         {
           default = application;
           chongming = application;
+          treefmt = pkgs.writeShellApplication {
+            name = "treefmt";
+            runtimeInputs = [
+              pkgs.nixfmt
+              pkgs.prettier
+              environments.${system}.ruff
+              pkgs.git
+            ];
+            text = ''
+              exec ${lib.getExe pkgs.treefmt} --config-file ${./treefmt.toml} "$@"
+            '';
+            meta.description = "Format the project using pinned nixfmt, Ruff, and Prettier";
+          };
           inherit godot;
           python-env = runtime;
           dev-tools = tools;
@@ -128,6 +142,11 @@
           preview = app "preview";
           center = app "center";
           scene = app "scene";
+          treefmt = {
+            type = "app";
+            program = lib.getExe self.packages.${system}.treefmt;
+            meta.description = "Format the project using pinned nixfmt, Ruff, and Prettier";
+          };
         }
       );
 
@@ -145,6 +164,8 @@
                   pkgs.uv
                   pkgs.git
                   pkgs.nixfmt
+                  pkgs.prettier
+                  self.packages.${system}.treefmt
                 ]
                 ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.xvfb-run ];
                 CHONGMING_GODOT = lib.getExe godot;
@@ -181,22 +202,7 @@
         }
       );
 
-      formatter = forAllSystems (
-        system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
-        pkgs.writeShellApplication {
-          name = "chongming-nixfmt";
-          runtimeInputs = [ pkgs.nixfmt ];
-          text = ''
-            if [ "$#" -eq 0 ]; then
-              set -- flake.nix
-            fi
-            exec nixfmt "$@"
-          '';
-        }
-      );
+      formatter = forAllSystems (system: self.packages.${system}.treefmt);
 
       # Display-dependent integration tests are run explicitly in nix develop.
       checks = forAllSystems (
@@ -229,6 +235,63 @@
               chongming-center --scenario "$scenario" --check
             done
           '';
+          # Formatting happens only in the writable build copy, never the worktree.
+          treefmt = sourceCheck "chongming-treefmt" ''
+            ${lib.getExe self.packages.${system}.treefmt} --ci --walk filesystem
+          '';
+          treefmt-smoke =
+            pkgs.runCommand "chongming-treefmt-smoke"
+              {
+                nativeBuildInputs = [
+                  self.packages.${system}.treefmt
+                  pkgs.prettier
+                ];
+              }
+              ''
+                export HOME="$TMPDIR"
+                mkdir project
+                cd project
+                printf '%s\n' '{ a=1; }' > flake.nix
+                printf '%s\n' 'value=1' > example.py
+                cp flake.nix before-nix
+                mkdir results
+                cp example.py results/generated.py
+                cp example.py before-ignored
+                cp ${./.prettierignore} .prettierignore
+                printf '%s\n' '{"value":1}' > example.json
+                printf '%s\n' '<!doctype html><html><head><title>Test</title></head><body><script>const value={a:1};</script><style>body{color:red}</style></body></html>' > example.html
+                printf '%s\n' 'const value={a:1};' > example.js
+                printf '%s\n' 'body{color:red}' > example.css
+                printf '%s\n\n%s\n' '# Title' '-   item' > example.md
+                mkdir before
+                for extension in json html js css md; do
+                  cp "example.$extension" "before/$extension"
+                done
+                mkdir -p scenarios/assets
+                cp example.json scenarios/assets/ridge.json
+                cp example.json package-lock.json
+                if treefmt --ci --walk filesystem; then
+                  echo "Expected a formatting failure for the unformatted fixture." >&2
+                  exit 1
+                fi
+                if cmp -s before-nix flake.nix; then
+                  echo "The Nix formatter did not run." >&2
+                  exit 1
+                fi
+                grep -Fx 'value = 1' example.py
+                cmp before-ignored results/generated.py
+                for extension in json html js css md; do
+                  if cmp -s "before/$extension" "example.$extension"; then
+                    echo "Prettier did not format the $extension fixture." >&2
+                    exit 1
+                  fi
+                done
+                cmp before/json scenarios/assets/ridge.json
+                cmp before/json package-lock.json
+                prettier --check example.json example.html example.js example.css example.md
+                treefmt --ci --walk filesystem
+                touch "$out"
+              '';
           nix-format = pkgs.runCommand "chongming-nix-format" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
             nixfmt --check ${./flake.nix}
             touch "$out"
