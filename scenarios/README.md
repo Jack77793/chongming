@@ -4,6 +4,10 @@ JSON 描述每次重新生成的世界、相机与目标；它不是运行时 `S
 
 ## 运行
 
+使用 Nix 时，在仓库根目录执行 `nix develop` 后跳过下面的 `uv sync`，其余 `uv run` 命令保持不变；也可直接用 `nix run .#center -- ...`、`.#scene` 或 `.#preview`。具体版本、图形要求和 Linux 软件渲染测试见 [Nix 开发环境](../docs/Nix开发环境.md)。
+
+非 Nix 路线：
+
 ```sh
 uv sync
 uv run chongming-center --scenario scenarios/center_clean.json --check
