@@ -342,6 +342,7 @@ class CalibrationQuality:
     reprojection_rmse_px: float | None
     angular_residual_rad: float | None
     reason_codes: tuple[str, ...]
+    rotation_only_parallax_px: float | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

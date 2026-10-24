@@ -314,6 +314,7 @@ def compile_authoring(
         "clouds",
         "rendering",
         "osm",
+        "camera_position_offset_enu_m",
     }:
         unknown = set(document) - {
             "format",
@@ -333,6 +334,7 @@ def compile_authoring(
             "clouds",
             "rendering",
             "osm",
+            "camera_position_offset_enu_m",
         }
         raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
     if document.get("format") != AUTHORING_FORMAT:
@@ -579,6 +581,24 @@ def compile_authoring(
                     ),
                 ),
             )
+        )
+    raw_position_offset = document.get("camera_position_offset_enu_m")
+    position_offset = (
+        (0.0, 0.0, 0.0)
+        if raw_position_offset is None
+        else _vec3(raw_position_offset, "camera_position_offset_enu_m")
+    )
+    camera_pose = spec.perturbations.camera_pose
+    if raw_position_offset is not None:
+        camera_pose = tuple(
+            s.CameraPosePerturbation(
+                camera.station_id,
+                camera.camera_role,
+                position_offset,
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            )
+            for camera in cameras
         )
     spec = replace(
         spec,
@@ -861,6 +881,7 @@ def compile_authoring(
         random_seed=_integer(document.get("random_seed", s.SCENE_RANDOM_SEED), "random_seed"),
         perturbations=replace(
             spec.perturbations,
+            camera_pose=camera_pose,
             camera_jitter=camera_jitter,
             clouds=clouds,
             wind=wind,

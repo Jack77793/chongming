@@ -35,6 +35,7 @@ from PIL import Image
 
 from chongming.contracts.model import CameraFrame
 from chongming.contracts.scene import CameraFrameTruth, ScenarioSpec, ScenarioStep
+from chongming.joint_calibration import JointCalibrationRunner
 from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
@@ -46,9 +47,18 @@ logger = logging.getLogger(__name__)
 _LANDSCAPE_ASSETS = {
     "hannover": (
         Path(__file__).resolve().parents[2] / "output/osm/hannover-500m/landscape-dem.json",
-        "85a4f6bd9a4b0df848f96dcf2e003cddbf510c06f1c85cc9a6fcbea0fd4b9d78",
+        "c17d27172db7e63a5ba62c4d2ee371220a390546e17e5192620e5d3487a650b4",
     ),
 }
+
+
+def _landscape_asset_path(landscape_id: str, authoring_path: Path | None) -> Path:
+    """Resolve a pinned asset beside the active authoring file when available."""
+    configured_path, _digest = _LANDSCAPE_ASSETS[landscape_id]
+    candidates = [configured_path]
+    if authoring_path is not None:
+        candidates.insert(0, authoring_path.parent / configured_path.name)
+    return next((path for path in candidates if path.is_file()), configured_path)
 
 
 class DiscreteRenderClock:
@@ -192,6 +202,8 @@ class PreviewRuntime:
         self._reset_version = 0
         self._published: dict[str, Any] | None = None
         self._latest_step: ScenarioStep | None = None
+        self._calibration_runner = JointCalibrationRunner(spec)
+        self._calibration_latest: dict[str, dict[str, Any]] = {}
         self._encoded: dict[str, dict[str, Any]] = {}
         self._encode_lock = threading.Lock()
         self._station_ids = tuple(
@@ -200,6 +212,7 @@ class PreviewRuntime:
         self._error: str | None = None
         self._generation_samples_ms: deque[float] = deque(maxlen=120)
         self._rendered_samples_ms: deque[float] = deque(maxlen=120)
+        self._calibration_samples_ms: deque[float] = deque(maxlen=120)
         self._last_logical_timing: dict[str, Any] | None = None
         self._gpu_submissions = 0
         self._logical_step_count = 0
@@ -253,8 +266,9 @@ class PreviewRuntime:
                 "path": str(self._authoring_path) if self._authoring_path else None,
                 "freeview": self._freeview_enabled,
                 "landscapes": [
-                    name for name, (path, _digest) in _LANDSCAPE_ASSETS.items()
-                    if path.is_file()
+                    name
+                    for name in _LANDSCAPE_ASSETS
+                    if _landscape_asset_path(name, self._authoring_path).is_file()
                 ],
             }
 
@@ -293,6 +307,8 @@ class PreviewRuntime:
             self._authoring_document = copy.deepcopy(document)
             self._draft = copy.deepcopy(document)
             self.spec = compiled
+            self._calibration_runner = JointCalibrationRunner(compiled)
+            self._calibration_latest = {}
             self._editing = True
             self._edit_token = secrets.token_urlsafe(24)
             self._video_before_edit = self.video_enabled
@@ -361,6 +377,8 @@ class PreviewRuntime:
         with self._condition:
             self._draft = document
             self.spec = compiled
+            self._calibration_runner = JointCalibrationRunner(compiled)
+            self._calibration_latest = {}
             self._reset_version += 1
             self._pending_steps = 1
             self._condition.notify_all()
@@ -411,7 +429,8 @@ class PreviewRuntime:
             document = copy.deepcopy(self._require_edit(token))
             if landscape_id not in _LANDSCAPE_ASSETS or self._authoring_path is None:
                 raise ValueError("landscape is not provisioned")
-            path, digest = _LANDSCAPE_ASSETS[landscape_id]
+            _configured_path, digest = _LANDSCAPE_ASSETS[landscape_id]
+            path = _landscape_asset_path(landscape_id, self._authoring_path)
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise ValueError("local landscape asset is missing or has a different digest")
             document["osm"] = {"asset": {
@@ -435,6 +454,8 @@ class PreviewRuntime:
                 if compiled is not None:
                     self.spec = compiled
                     self._authoring_document = copy.deepcopy(document)
+                    self._calibration_runner = JointCalibrationRunner(compiled)
+                    self._calibration_latest = {}
                 self._push_editor(False)
                 self._draft = None
                 self._edit_digest = None
@@ -467,6 +488,8 @@ class PreviewRuntime:
                 self._push_editor(False)
                 self.spec = compiled
                 self._authoring_document = copy.deepcopy(document)
+                self._calibration_runner = JointCalibrationRunner(compiled)
+                self._calibration_latest = {}
                 self._station_ids = tuple(str(c.station_id) for c in compiled.station_configs)
                 self.render_every = max(
                     1, math.ceil(self.render_clock.period_ns /
@@ -526,6 +549,7 @@ class PreviewRuntime:
                 "last_logical_timing": self._last_logical_timing,
                 "generation_stats_ms": self._timing_stats(self._generation_samples_ms),
                 "rendered_generation_stats_ms": self._timing_stats(self._rendered_samples_ms),
+                "calibration_stats_ms": self._timing_stats(self._calibration_samples_ms),
             }
             step, payload, cache = self._latest_step, self._published, self._encoded
         if payload is not None and payload["sequence"] == after_sequence:
@@ -638,6 +662,14 @@ class PreviewRuntime:
                         self._skipped_step_count += 1
                     stats = self._timing_stats(self._generation_samples_ms)
                     render_stats = self._timing_stats(self._rendered_samples_ms)
+                calibration_started = time.perf_counter_ns()
+                calibration_results = self._calibration_runner.process_step(step)
+                calibration_ms = (time.perf_counter_ns() - calibration_started) / 1_000_000
+                with self._condition:
+                    self._calibration_samples_ms.append(calibration_ms)
+                    for result in calibration_results:
+                        self._calibration_latest[result["station_id"]] = result
+                    calibration_latest = copy.deepcopy(self._calibration_latest)
                 for frame in step.video.frames:
                     key = (str(frame.station_id), frame.camera_role.value)
                     latest_frames[key] = frame
@@ -664,6 +696,9 @@ class PreviewRuntime:
                     render_ms=round((generated - began) * 1000, 2),
                     generation_stats_ms=stats,
                     rendered_generation_stats_ms=render_stats,
+                    calibration=calibration_latest,
+                    calibration_ms=round(calibration_ms, 3),
+                    calibration_stats_ms=self._timing_stats(self._calibration_samples_ms),
                 )
                 with self._condition:
                     if reset_version != self._reset_version:
@@ -854,6 +889,14 @@ def main() -> None:
         default=None,
         help="从 scenario-authoring-v2 文件加载可编辑场景；提供后忽略 --stations/--fps",
     )
+    parser.add_argument(
+        "--camera-position-offset",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("E", "N", "U"),
+        help="共同主辅相机位置扰动（米）；只在内存中注入，不改写场景文件",
+    )
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--no-video", action="store_true", help="只看逻辑与事件，完全停止像素生产")
     args = parser.parse_args()
@@ -864,11 +907,17 @@ def main() -> None:
         authoring_document = None
         if authoring_path is not None:
             authoring_document = json.loads(authoring_path.read_text())
-        spec = (
-            load_scenario(authoring_path, asset_root=authoring_path.parent)
-            if authoring_path is not None
-            else demo_spec(station_count=args.stations, fps=args.fps)
-        )
+            if args.camera_position_offset is not None:
+                authoring_document["camera_position_offset_enu_m"] = list(
+                    args.camera_position_offset
+                )
+                spec = compile_authoring(authoring_document, asset_root=authoring_path.parent)
+            else:
+                spec = load_scenario(authoring_path, asset_root=authoring_path.parent)
+        else:
+            if args.camera_position_offset is not None:
+                parser.error("--camera-position-offset requires --scenario")
+            spec = demo_spec(station_count=args.stations, fps=args.fps)
         runtime = PreviewRuntime(spec, render_fps=args.render_fps, video_enabled=not args.no_video,
                                  authoring_document=authoring_document, authoring_path=authoring_path)
         server = preview_server(runtime, args.port)
