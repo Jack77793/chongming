@@ -302,7 +302,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
         first = list(demo_source(original).generate(original))
         second = list(demo_source(loaded).generate(loaded))
 
-        def normalize(steps):
+        def normalize(steps: list[scene.ScenarioStep]) -> list[tuple[object, ...]]:
             return [
                 (
                     step.video.sample_time,
@@ -371,7 +371,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 verify_scenario_assets(spec, root)
 
 
-def load_scenario_from_document(document: dict[str, object]):
+def load_scenario_from_document(document: dict[str, object]) -> scene.ScenarioSpec:
     from chongming.scenarios.serialization import scenario_from_dict
 
     return scenario_from_dict(document)

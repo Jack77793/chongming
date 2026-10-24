@@ -11,7 +11,9 @@ import shutil
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -215,8 +217,12 @@ class SceneConfigurationTests(unittest.TestCase):
         self.assertEqual(len(spec.scene_definition.vegetation), 2)
         self.assertIsInstance(spec.scene_definition.vegetation[0].geometry, s.CylinderGeometry)
         self.assertIsInstance(spec.scene_definition.vegetation[1].geometry, s.CylinderGeometry)
-        self.assertEqual(spec.scene_definition.vegetation[0].visual.part, s.TreePart.TRUNK)
-        self.assertEqual(spec.scene_definition.vegetation[1].visual.part, s.TreePart.CANOPY)
+        trunk_visual = spec.scene_definition.vegetation[0].visual
+        canopy_visual = spec.scene_definition.vegetation[1].visual
+        assert isinstance(trunk_visual, s.TreeVisualSpec)
+        assert isinstance(canopy_visual, s.TreeVisualSpec)
+        self.assertEqual(trunk_visual.part, s.TreePart.TRUNK)
+        self.assertEqual(canopy_visual.part, s.TreePart.CANOPY)
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
         first = logic.sample(s.SimulationTime("demo-clock", 1_000_000_000, 30))
@@ -229,6 +235,7 @@ class SceneConfigurationTests(unittest.TestCase):
             later.vegetation[1].base_pose.rotation_enu_from_body,
         )
         canopy = first.vegetation[1]
+        assert isinstance(canopy.visual, s.TreeVisualSpec)
         x, y, z = canopy.base_pose.position_enu_m
         hit = VisibilityModule._segment_hit(canopy, (x, y - 5, z + 1), (x, y + 5, z + 1))
         self.assertIsNotNone(hit)
@@ -244,8 +251,8 @@ class SceneConfigurationTests(unittest.TestCase):
             tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m)
         )
         self.assertEqual(tree_payload[0]["visual"]["kind"], "tree_canopy")
-        self.assertEqual(tree_payload[0]["visual"]["height"], first.vegetation[1].visual.height_m)
-        self.assertEqual(tree_payload[0]["visual"]["radius"], first.vegetation[1].visual.radius_m)
+        self.assertEqual(tree_payload[0]["visual"]["height"], canopy.visual.height_m)
+        self.assertEqual(tree_payload[0]["visual"]["radius"], canopy.visual.radius_m)
         self.assertIsNone(tree_payload[0]["vertices"])
         self.assertIsNone(tree_payload[0]["triangles"])
 
@@ -569,6 +576,7 @@ class SurfaceRenderingTests(unittest.TestCase):
             ys, xs = np.nonzero(pixels[:, :, 0].astype(int) > pixels[:, :, 1].astype(int) + 40)
             self.assertGreater(len(xs), 10)
             expected = CameraProjectionModule().project(camera, point).centroid_px
+            assert expected is not None
             np.testing.assert_allclose((xs.mean(), ys.mean()), expected, atol=0.8)
 
     def test_renderer_survives_parent_terminal_signals_and_closes_cleanly(self) -> None:
@@ -708,8 +716,8 @@ class SurfaceRenderingTests(unittest.TestCase):
         )
         rays = optical_rays(camera.actual_intrinsics, camera.actual_distortion)
         for u, v in ((0, 0), (63, 47), (32, 24)):
-            ray = tuple(float(x) for x in rays[v * 64 + u])
-            projection = CameraProjectionModule().project(camera, ray)
+            x, y, z = (float(value) for value in rays[v * 64 + u])
+            projection = CameraProjectionModule().project(camera, (x, y, z))
             assert projection.centroid_px is not None
             np.testing.assert_allclose(projection.centroid_px, (u, v), atol=1e-6)
 
@@ -766,7 +774,9 @@ class SurfaceRenderingTests(unittest.TestCase):
                 dtype=np.uint8,
             ).reshape(expected.shape),
         )
-        self.assertGreater(truth.frame_truth[0].targets[0].projected_width_px, 10)
+        projected_width = truth.frame_truth[0].targets[0].projected_width_px
+        assert projected_width is not None
+        self.assertGreater(projected_width, 10)
         artifacts = replace(imaging.sensor_artifacts, sensor_noise_std_intensity=0.02)
         noisy = replace(request, imaging_spec=replace(imaging, sensor_artifacts=artifacts))
         self.assertEqual(CameraImagingModule().render(noisy), CameraImagingModule().render(noisy))
@@ -964,7 +974,9 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(runtime.snapshot(stations[0])["snapshot"]["sequence"], 2)
             self.assertEqual(encode.call_count, 6)
 
-    def wait_snapshot(self, runtime: PreviewRuntime, predicate) -> dict:
+    def wait_snapshot(
+        self, runtime: PreviewRuntime, predicate: Callable[[dict[str, Any]], bool]
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + 5
         with runtime._condition:
             ready = runtime._condition.wait_for(
