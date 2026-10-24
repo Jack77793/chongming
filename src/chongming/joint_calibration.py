@@ -138,7 +138,9 @@ class JointCalibrationRunner:
             midpoint = (
                 frame.capture_time.exposure_start_ns + frame.capture_time.exposure_end_ns
             ) // 2
-            now = ProcessingTime(clock_domain_id=frame.capture_time.clock_domain_id, time_ns=midpoint)
+            now = ProcessingTime(
+                clock_domain_id=frame.capture_time.clock_domain_id, time_ns=midpoint
+            )
             started = time.perf_counter_ns()
             cpu_started = time.process_time_ns()
             recognition_started = time.perf_counter_ns()

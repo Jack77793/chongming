@@ -67,9 +67,16 @@ def _entity(
 ) -> dict[str, Any]:
     if resources is not None:
         return resources.encode(
-            entity_type, position, state, geometry, appearance,
-            object_id=object_id, visual=visual, surface_kind=surface_kind,
-            surface_detail=surface_detail, category=category,
+            entity_type,
+            position,
+            state,
+            geometry,
+            appearance,
+            object_id=object_id,
+            visual=visual,
+            surface_kind=surface_kind,
+            surface_detail=surface_detail,
+            category=category,
         )
     payload: dict[str, Any] = {
         "type": entity_type,
@@ -117,10 +124,18 @@ class _EntityResources:
         self.active = set()
 
     def encode(
-        self, entity_type: int, position: tuple[float, float, float], state: KinematicState,
-        geometry: GeometrySpec, appearance: Any, *, object_id: str | None,
-        visual: dict[str, Any] | None, surface_kind: str | None,
-        surface_detail: float, category: str | None,
+        self,
+        entity_type: int,
+        position: tuple[float, float, float],
+        state: KinematicState,
+        geometry: GeometrySpec,
+        appearance: Any,
+        *,
+        object_id: str | None,
+        visual: dict[str, Any] | None,
+        surface_kind: str | None,
+        surface_detail: float,
+        category: str | None,
     ) -> dict[str, Any]:
         if object_id is None:
             raise ValueError("streamed render entities require stable IDs")
@@ -130,8 +145,15 @@ class _EntityResources:
             self._serial += 1
             token = str(self._serial)
             definition = _entity(
-                entity_type, position, state, geometry, appearance, object_id=object_id,
-                visual=visual, surface_kind=surface_kind, surface_detail=surface_detail,
+                entity_type,
+                position,
+                state,
+                geometry,
+                appearance,
+                object_id=object_id,
+                visual=visual,
+                surface_kind=surface_kind,
+                surface_detail=surface_detail,
                 category=category,
             )
             definition["resource"] = token
@@ -147,7 +169,8 @@ class _EntityResources:
 
 
 def _entities(
-    scene: LogicalSceneSnapshot, resources: _EntityResources | None = None,
+    scene: LogicalSceneSnapshot,
+    resources: _EntityResources | None = None,
 ) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     terrain = scene.terrain

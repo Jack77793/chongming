@@ -637,7 +637,11 @@ class VisibilityModule(ModuleShell):
         candidate_ids = {id(e) for e in world_index.candidates(origin, target)}
         entities = (
             terrain,
-            *(e for e in world_objects if id(e) in candidate_ids or getattr(e, "category", None) == "aircraft"),
+            *(
+                e
+                for e in world_objects
+                if id(e) in candidate_ids or getattr(e, "category", None) == "aircraft"
+            ),
             *vegetation_index.candidates(origin, target),
         )
         for entity in entities:
@@ -692,7 +696,9 @@ class VisibilityModule(ModuleShell):
                     ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
                     (0.0, 0.0, 0.0),
                 )
-                if mesh_segment_may_intersect(origin, target, terrain_pose, entity.heightfield_geometry):
+                if mesh_segment_may_intersect(
+                    origin, target, terrain_pose, entity.heightfield_geometry
+                ):
                     depths, _ = surface_hits(
                         origin,
                         np.asarray([segment], dtype=np.float64),
@@ -712,9 +718,8 @@ class VisibilityModule(ModuleShell):
             return min(candidates, key=lambda item: item[0]) if candidates else None
         if pose is None or geometry is None:
             return None
-        if (
-            isinstance(geometry, TriangleMeshGeometry)
-            and not mesh_segment_may_intersect(origin, target, pose, geometry)
+        if isinstance(geometry, TriangleMeshGeometry) and not mesh_segment_may_intersect(
+            origin, target, pose, geometry
         ):
             return None
         if contains_point(origin, pose, geometry):
