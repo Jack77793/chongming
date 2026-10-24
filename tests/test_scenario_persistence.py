@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from chongming.contracts import scene
+from chongming.contracts import model, scene
 from chongming.modules.scene import (
     CameraProjectionModule,
     SceneLogicModule,
@@ -44,8 +44,11 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 validate_supported_features(spec)
                 self.assertEqual(
                     {
-                        (camera.camera_role.value, camera.actual_intrinsics.image_width_px,
-                         camera.actual_intrinsics.image_height_px)
+                        (
+                            camera.camera_role.value,
+                            camera.actual_intrinsics.image_width_px,
+                            camera.actual_intrinsics.image_height_px,
+                        )
                         for camera in spec.scene_definition.cameras
                     },
                     {("main", 1920, 1080), ("auxiliary", 640, 480)},
@@ -60,18 +63,24 @@ class ScenarioPersistenceTests(unittest.TestCase):
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
         start = logic.sample(scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 0, 0))
-        end = logic.sample(scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 11_000_000_000, 1))
+        end = logic.sample(
+            scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 11_000_000_000, 1)
+        )
         main_start = {
             str(item.truth_object_id): item
-            for item in start.target_visibility if item.camera_role.value == "main"
+            for item in start.target_visibility
+            if item.camera_role.value == "main"
         }
         main_end = {
             str(item.truth_object_id): item
-            for item in end.target_visibility if item.camera_role.value == "main"
+            for item in end.target_visibility
+            if item.camera_role.value == "main"
         }
         self.assertFalse(main_start["rising-sphere"].capture_eligible)
-        self.assertIn(start.terrain.terrain_id,
-                      {item.blocker_object_id for item in main_start["rising-sphere"].occlusions})
+        self.assertIn(
+            start.terrain.terrain_id,
+            {item.blocker_object_id for item in main_start["rising-sphere"].occlusions},
+        )
         self.assertTrue(main_end["rising-sphere"].capture_eligible)
         self.assertTrue(main_start["high-box"].capture_eligible)
         self.assertTrue(main_end["high-box"].capture_eligible)
@@ -114,12 +123,18 @@ class ScenarioPersistenceTests(unittest.TestCase):
 
         snapshots = []
         for spec in (inline, external):
-            logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
+            logic = SceneLogicModule(
+                TrajectoryModule(), CameraProjectionModule(), VisibilityModule()
+            )
             logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
-            snapshots.append([
-                logic.sample(scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, t, i))
-                for i, t in enumerate((0, 11_000_000_000))
-            ])
+            snapshots.append(
+                [
+                    logic.sample(
+                        scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, t, i)
+                    )
+                    for i, t in enumerate((0, 11_000_000_000))
+                ]
+            )
         for first, second in zip(*snapshots, strict=True):
             self.assertEqual(first.target_visibility, second.target_visibility)
             self.assertEqual(_entities(first), _entities(second))
@@ -151,8 +166,10 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 load_scenario(moved)
             document["terrain"]["asset"]["uri"] = asset.as_uri()
             absolute = compile_authoring(document, asset_root=root)
-            self.assertEqual(relative.scene_definition.terrain.heightfield_geometry,
-                             absolute.scene_definition.terrain.heightfield_geometry)
+            self.assertEqual(
+                relative.scene_definition.terrain.heightfield_geometry,
+                absolute.scene_definition.terrain.heightfield_geometry,
+            )
 
     def test_external_heightfield_rejects_ambiguous_or_nonlocal_references(self) -> None:
         root = Path(__file__).resolve().parents[1] / "scenarios"
@@ -164,8 +181,13 @@ class ScenarioPersistenceTests(unittest.TestCase):
             {"asset": {"uri": "assets/ridge.json", "sha256": "bad"}},
             {"asset": {**original["terrain"]["asset"], "ignored": True}},
         ]
-        for uri in ("https://example.com/grid.json", "file://host/grid.json", "",
-                    "assets/ridge.json?version=1", "assets/ridge.json#grid"):
+        for uri in (
+            "https://example.com/grid.json",
+            "file://host/grid.json",
+            "",
+            "assets/ridge.json?version=1",
+            "assets/ridge.json#grid",
+        ):
             invalid.append({"asset": {**original["terrain"]["asset"], "uri": uri}})
         for update in invalid:
             document = deepcopy(original)
@@ -178,7 +200,10 @@ class ScenarioPersistenceTests(unittest.TestCase):
 
     def test_external_heightfield_validates_verified_grid_before_runtime(self) -> None:
         invalid = (
-            b"not json", b"\xff", b"[]", b"{}",
+            b"not json",
+            b"\xff",
+            b"[]",
+            b"{}",
             b'{"heights_m": [[0, 1], [2, 3]], "ignored": 1}',
             b'{"heights_m": [[0, 1], [2]]}',
             b'{"heights_m": [[0, 1], [-1, 3]]}',
@@ -215,20 +240,28 @@ class ScenarioPersistenceTests(unittest.TestCase):
         self.assertEqual(compiled.scene_definition.terrain.maximum_relief_m, 16)
 
     def test_crossing_scene_uses_constant_velocity_with_custom_ids(self) -> None:
-        spec = load_scenario(Path(__file__).resolve().parents[1] / "scenarios/constant_velocity.json")
+        spec = load_scenario(
+            Path(__file__).resolve().parents[1] / "scenarios/constant_velocity.json"
+        )
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
         start = logic.sample(scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 0, 0))
-        middle = logic.sample(scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 6_000_000_000, 1))
-        self.assertEqual({str(item.truth_object_id) for item in start.flying_objects},
-                         {"eastbound", "westbound"})
-        self.assertEqual({item.state.position_enu_m for item in middle.flying_objects},
-                         {(0.0, 62.0, 20.0)})
+        middle = logic.sample(
+            scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 6_000_000_000, 1)
+        )
+        self.assertEqual(
+            {str(item.truth_object_id) for item in start.flying_objects}, {"eastbound", "westbound"}
+        )
+        self.assertEqual(
+            {item.state.position_enu_m for item in middle.flying_objects}, {(0.0, 62.0, 20.0)}
+        )
         for camera in middle.cameras:
             if camera.camera_role.value == "main":
                 projections = [
-                    item.projection.centroid_px for item in middle.target_visibility
-                    if item.station_id == camera.station_id and item.camera_role == camera.camera_role
+                    item.projection.centroid_px
+                    for item in middle.target_visibility
+                    if item.station_id == camera.station_id
+                    and item.camera_role == camera.camera_role
                 ]
                 self.assertEqual(projections[0], projections[1])
 
@@ -242,7 +275,11 @@ class ScenarioPersistenceTests(unittest.TestCase):
             compiled = compile_authoring(document)
         self.assertEqual(
             {
-                (camera.camera_role.value, camera.actual_intrinsics.image_width_px, camera.actual_intrinsics.image_height_px)
+                (
+                    camera.camera_role.value,
+                    camera.actual_intrinsics.image_width_px,
+                    camera.actual_intrinsics.image_height_px,
+                )
                 for camera in compiled.scene_definition.cameras
             },
             {("main", 1920, 1080), ("auxiliary", 640, 480)},
@@ -255,6 +292,64 @@ class ScenarioPersistenceTests(unittest.TestCase):
         self.assertEqual(compiled.scene_definition.flying_objects, ())
         self.assertEqual(compiled.timeline.end_time_ns, 999_999_999)
 
+    def test_authoring_common_camera_position_offset_preserves_relative_installation(self) -> None:
+        nominal = compile_authoring(demo_authoring(stations=1, duration_s=1))
+        document = demo_authoring(stations=1, duration_s=1)
+        offset = (0.005, -0.003, 0.002)
+        document["camera_position_offset_enu_m"] = list(offset)
+        perturbed = compile_authoring(document)
+
+        def sample(spec: scene.ScenarioSpec) -> scene.LogicalSceneSnapshot:
+            logic = SceneLogicModule(
+                TrajectoryModule(), CameraProjectionModule(), VisibilityModule()
+            )
+            logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
+            return logic.sample(
+                scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 0, 0)
+            )
+
+        nominal_cameras = {
+            camera.camera_role: camera for camera in sample(nominal).cameras
+        }
+        perturbed_cameras = {
+            camera.camera_role: camera for camera in sample(perturbed).cameras
+        }
+        for role, nominal_camera in nominal_cameras.items():
+            actual = perturbed_cameras[role]
+            for actual_value, expected_value in zip(
+                (
+                    actual.optical_state.position_enu_m[index]
+                    - nominal_camera.optical_state.position_enu_m[index]
+                    for index in range(3)
+                ),
+                offset,
+                strict=True,
+            ):
+                self.assertAlmostEqual(actual_value, expected_value, places=12)
+            self.assertEqual(
+                actual.optical_state.rotation_enu_from_body,
+                nominal_camera.optical_state.rotation_enu_from_body,
+            )
+        nominal_delta = tuple(
+            nominal_cameras[model.CameraRole.AUXILIARY].optical_state.position_enu_m[index]
+            - nominal_cameras[model.CameraRole.MAIN].optical_state.position_enu_m[index]
+            for index in range(3)
+        )
+        perturbed_delta = tuple(
+            perturbed_cameras[model.CameraRole.AUXILIARY].optical_state.position_enu_m[index]
+            - perturbed_cameras[model.CameraRole.MAIN].optical_state.position_enu_m[index]
+            for index in range(3)
+        )
+        for actual_value, expected_value in zip(perturbed_delta, nominal_delta, strict=True):
+            self.assertAlmostEqual(actual_value, expected_value, places=12)
+
+    def test_authoring_null_camera_position_offset_means_nominal_pose(self) -> None:
+        document = demo_authoring(stations=1, duration_s=1)
+        document["camera_position_offset_enu_m"] = None
+        nominal = compile_authoring(demo_authoring(stations=1, duration_s=1))
+        parsed = compile_authoring(document)
+        self.assertEqual(parsed.perturbations.camera_pose, nominal.perturbations.camera_pose)
+
     def test_json_round_trip_replays_same_logical_and_online_stream(self) -> None:
         base = demo_spec(station_count=1, fps=2)
         original = replace(base, timeline=replace(base.timeline, end_time_ns=1_000_000_000))
@@ -265,7 +360,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
         first = list(demo_source(original).generate(original))
         second = list(demo_source(loaded).generate(loaded))
 
-        def normalize(steps):
+        def normalize(steps: list[scene.ScenarioStep]) -> list[tuple[object, ...]]:
             return [
                 (
                     step.video.sample_time,
@@ -334,7 +429,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 verify_scenario_assets(spec, root)
 
 
-def load_scenario_from_document(document: dict[str, object]):
+def load_scenario_from_document(document: dict[str, object]) -> scene.ScenarioSpec:
     from chongming.scenarios.serialization import scenario_from_dict
 
     return scenario_from_dict(document)

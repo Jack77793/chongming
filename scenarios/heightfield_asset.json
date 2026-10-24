@@ -4,7 +4,7 @@
   "random_seed": 42,
   "duration_s": 12,
   "fps": 30,
-  "stations": [{"id": "station-01", "position_enu_m": [-10, -22, 4]}],
+  "stations": [{ "id": "station-01", "position_enu_m": [-10, -22, 4] }],
   "terrain": {
     "type": "heightfield",
     "origin_enu_m": [-40, 32],
@@ -16,19 +16,23 @@
   },
   "targets": [
     {
-      "id": "rising-sphere", "display_name": "越过山脊的上升球体",
-      "geometry": {"type": "sphere", "radius_m": 1.25},
+      "id": "rising-sphere",
+      "display_name": "越过山脊的上升球体",
+      "geometry": { "type": "sphere", "radius_m": 1.25 },
       "motion": {
         "type": "constant_velocity",
-        "position_enu_m": [18, 65, 10], "velocity_enu_mps": [0, 0, 1]
+        "position_enu_m": [18, 65, 10],
+        "velocity_enu_mps": [0, 0, 1]
       }
     },
     {
-      "id": "high-box", "display_name": "山脊上方的静止盒体",
-      "geometry": {"type": "box", "half_extents_m": [1.5, 0.8, 0.6]},
+      "id": "high-box",
+      "display_name": "山脊上方的静止盒体",
+      "geometry": { "type": "box", "half_extents_m": [1.5, 0.8, 0.6] },
       "motion": {
         "type": "constant_velocity",
-        "position_enu_m": [18, 65, 28], "velocity_enu_mps": [0, 0, 0]
+        "position_enu_m": [18, 65, 28],
+        "velocity_enu_mps": [0, 0, 0]
       }
     }
   ]

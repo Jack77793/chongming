@@ -31,8 +31,13 @@ def review_snapshot() -> s.LogicalSceneSnapshot:
     document = demo_authoring()
     document["world_objects"] = []
     document["vegetation"] = [
-        {"id": name, "position_enu_m": position, "height_m": height,
-         "crown_radius_m": radius, "sway_amplitude_m": 0.25}
+        {
+            "id": name,
+            "position_enu_m": position,
+            "height_m": height,
+            "crown_radius_m": radius,
+            "sway_amplitude_m": 0.25,
+        }
         for name, position, height, radius in (
             ("review-oak", [0, 0, 0], 9, 2.7),
             ("review-oak-b", [-6, 5, 0], 7.8, 2.4),
@@ -44,7 +49,9 @@ def review_snapshot() -> s.LogicalSceneSnapshot:
     logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
     scene = logic.sample(s.SimulationTime("vegetation-review", 1_000_000_000, 30))
     return replace(
-        scene, world_objects=(), flying_objects=(),
+        scene,
+        world_objects=(),
+        flying_objects=(),
         illumination=s.IlluminationSpec((-0.5, -0.6, 0.8), 100_000, (0.42, 0.63, 0.86)),
         terrain=replace(scene.terrain, appearance=s.SurfaceAppearance((0.17, 0.20, 0.09), 0.9)),
     )
@@ -70,14 +77,17 @@ def main() -> None:
             dx, dy, dz = (aim[k] - origin[k] for k in range(3))
             camera = replace(
                 scene.cameras[0],
-                optical_state=state(origin, optical_rotation(
-                    math.atan2(dx, dy), math.atan2(dz, math.hypot(dx, dy))
-                )),
+                optical_state=state(
+                    origin, optical_rotation(math.atan2(dx, dy), math.atan2(dz, math.hypot(dx, dy)))
+                ),
                 actual_intrinsics=replace(
                     scene.cameras[0].actual_intrinsics,
-                    image_width_px=1024, image_height_px=768,
-                    focal_x_px=1050.0, focal_y_px=1050.0,
-                    principal_x_px=511.5, principal_y_px=383.5,
+                    image_width_px=1024,
+                    image_height_px=768,
+                    focal_x_px=1050.0,
+                    focal_y_px=1050.0,
+                    principal_x_px=511.5,
+                    principal_y_px=383.5,
                 ),
             )
             raw, first_ms = renderer.render(scene, camera)

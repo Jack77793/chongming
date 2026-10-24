@@ -35,16 +35,25 @@ def main() -> None:
     logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
     logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
     scene = logic.sample(s.SimulationTime("photography-review", 1_000_000_000, 30))
-    camera = replace(scene.cameras[0], actual_intrinsics=replace(
-        scene.cameras[0].actual_intrinsics,
-        image_width_px=1024, image_height_px=576,
-        focal_x_px=1024, focal_y_px=1024, principal_x_px=511.5, principal_y_px=287.5,
-    ))
+    camera = replace(
+        scene.cameras[0],
+        actual_intrinsics=replace(
+            scene.cameras[0].actual_intrinsics,
+            image_width_px=1024,
+            image_height_px=576,
+            focal_x_px=1024,
+            focal_y_px=1024,
+            principal_x_px=511.5,
+            principal_y_px=287.5,
+        ),
+    )
     baseline = replace(
         scene,
         illumination=replace(
-            scene.illumination, atmospheric_visibility_m=None,
-            sun_angular_diameter_deg=0.0, glare_strength=0.0,
+            scene.illumination,
+            atmospheric_visibility_m=None,
+            sun_angular_diameter_deg=0.0,
+            glare_strength=0.0,
         ),
         clouds=(),
         render_effects=s.RenderEffectsSpec(
@@ -55,28 +64,37 @@ def main() -> None:
     no_optics = replace(
         scene,
         illumination=replace(scene.illumination, glare_strength=0.0),
-        render_effects=replace(
-            scene.render_effects, fxaa_enabled=False, god_rays_strength=0.0
-        ),
+        render_effects=replace(scene.render_effects, fxaa_enabled=False, god_rays_strength=0.0),
     )
     # Put an opaque dark panel exactly between camera and solar disk; all effects
     # must respect the rendered depth, with no analytic sun pasted over geometry.
     direction = scene.illumination.sun_direction_enu_unit
-    panel_position = tuple(camera.optical_state.position_enu_m[k] + direction[k] * 80 for k in range(3))
+    panel_position = tuple(
+        camera.optical_state.position_enu_m[k] + direction[k] * 80 for k in range(3)
+    )
     panel = s.WorldObjectSpec(
-        s.WorldObjectId("sun-blocker"), "sun blocker", s.WorldObjectKind.OBSTACLE,
-        "review", state(panel_position), s.BoxGeometry((3, 3, 3)),
-        s.SurfaceAppearance((0.03, 0.03, 0.03), 0.8), True,
+        s.WorldObjectId("sun-blocker"),
+        "sun blocker",
+        s.WorldObjectKind.OBSTACLE,
+        "review",
+        state(panel_position),
+        s.BoxGeometry((3, 3, 3)),
+        s.SurfaceAppearance((0.03, 0.03, 0.03), 0.8),
+        True,
     )
     occluded = replace(scene, world_objects=scene.world_objects + (panel,))
     montage = Image.new("RGB", (2048, 1208), "white")
     report = {}
     renderer = GodotRenderer()
     try:
-        for index, (name, view) in enumerate((
-            ("baseline", baseline), ("atmosphere", no_optics),
-            ("photography", scene), ("sun-occluded", occluded),
-        )):
+        for index, (name, view) in enumerate(
+            (
+                ("baseline", baseline),
+                ("atmosphere", no_optics),
+                ("photography", scene),
+                ("sun-occluded", occluded),
+            )
+        ):
             raw, first_ms = renderer.render(view, camera)
             image = Image.frombytes("RGB", (1024, 576), raw)
             image.save(args.output / f"{name}.png")
@@ -84,9 +102,11 @@ def main() -> None:
             montage.paste(image, (x, y + 28))
             ImageDraw.Draw(montage).text((x + 10, y + 8), name, fill="black")
             times = [renderer.render(view, camera)[1] for _ in range(args.samples)]
-            report[name] = {"first_request_ms": round(first_ms, 2),
-                            "warm_p50_ms": round(statistics.median(times), 2),
-                            "warm_max_ms": round(max(times), 2)}
+            report[name] = {
+                "first_request_ms": round(first_ms, 2),
+                "warm_p50_ms": round(statistics.median(times), 2),
+                "warm_max_ms": round(max(times), 2),
+            }
         montage.save(args.output / "comparison.png")
         (args.output / "timing.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2))

@@ -43,6 +43,7 @@ from chongming.contracts.scene import (
     TreePart,
     TreeVisualSpec,
 )
+from chongming.joint_calibration import JointCalibrationRunner
 from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
@@ -54,9 +55,18 @@ logger = logging.getLogger(__name__)
 _LANDSCAPE_ASSETS = {
     "hannover": (
         Path(__file__).resolve().parents[2] / "output/osm/hannover-500m/landscape-dem.json",
-        "85a4f6bd9a4b0df848f96dcf2e003cddbf510c06f1c85cc9a6fcbea0fd4b9d78",
+        "c17d27172db7e63a5ba62c4d2ee371220a390546e17e5192620e5d3487a650b4",
     ),
 }
+
+
+def _landscape_asset_path(landscape_id: str, authoring_path: Path | None) -> Path:
+    """Resolve a pinned asset beside the active authoring file when available."""
+    configured_path, _digest = _LANDSCAPE_ASSETS[landscape_id]
+    candidates = [configured_path]
+    if authoring_path is not None:
+        candidates.insert(0, authoring_path.parent / configured_path.name)
+    return next((path for path in candidates if path.is_file()), configured_path)
 
 
 class DiscreteRenderClock:
@@ -87,9 +97,7 @@ class DiscreteRenderClock:
                 self.begin()
             assert self._next_tick_ns is not None
             delay_ns = self._next_tick_ns - now
-            if delay_ns > 0 and condition.wait_for(
-                interrupted, timeout=delay_ns / 1_000_000_000
-            ):
+            if delay_ns > 0 and condition.wait_for(interrupted, timeout=delay_ns / 1_000_000_000):
                 return
             now = time.perf_counter_ns()
             if self._next_tick_ns <= now:
@@ -180,7 +188,11 @@ class PreviewRuntime:
     """Bounded latest-frame buffer and one simulation worker, shared by all viewers."""
 
     def __init__(
-        self, spec: ScenarioSpec, *, render_fps: float = 10.0, video_enabled: bool = True,
+        self,
+        spec: ScenarioSpec,
+        *,
+        render_fps: float = 10.0,
+        video_enabled: bool = True,
         authoring_document: dict[str, Any] | None = None,
         authoring_path: Path | None = None,
     ) -> None:
@@ -214,6 +226,8 @@ class PreviewRuntime:
         self._published: dict[str, Any] | None = None
         self._published_step: ScenarioStep | None = None
         self._latest_step: ScenarioStep | None = None
+        self._calibration_runner = JointCalibrationRunner(spec)
+        self._calibration_latest: dict[str, dict[str, Any]] = {}
         self._encoded: dict[str, dict[str, Any]] = {}
         self._encode_lock = threading.Lock()
         self._station_ids = tuple(
@@ -222,6 +236,7 @@ class PreviewRuntime:
         self._error: str | None = None
         self._generation_samples_ms: deque[float] = deque(maxlen=120)
         self._rendered_samples_ms: deque[float] = deque(maxlen=120)
+        self._calibration_samples_ms: deque[float] = deque(maxlen=120)
         self._last_logical_timing: dict[str, Any] | None = None
         self._gpu_submissions = 0
         self._logical_step_count = 0
@@ -241,9 +256,7 @@ class PreviewRuntime:
             (camera.exposure.frame_period_ns for camera in spec.scene_definition.cameras),
             default=self.render_clock.period_ns,
         )
-        self.render_every = max(
-            1, math.ceil(self.render_clock.period_ns / (minimum_period + 1))
-        )
+        self.render_every = max(1, math.ceil(self.render_clock.period_ns / (minimum_period + 1)))
 
     def start(self) -> None:
         default_renderer()
@@ -285,12 +298,15 @@ class PreviewRuntime:
             return {
                 "active": self._editing,
                 "locked": self._editing,
-                "document": copy.deepcopy(self._draft if self._editing else self._authoring_document),
+                "document": copy.deepcopy(
+                    self._draft if self._editing else self._authoring_document
+                ),
                 "path": str(self._authoring_path) if self._authoring_path else None,
                 "freeview": self._freeview_enabled,
                 "landscapes": [
-                    name for name, (path, _digest) in _LANDSCAPE_ASSETS.items()
-                    if path.is_file()
+                    name
+                    for name in _LANDSCAPE_ASSETS
+                    if _landscape_asset_path(name, self._authoring_path).is_file()
                 ],
             }
 
@@ -329,6 +345,8 @@ class PreviewRuntime:
             self._authoring_document = copy.deepcopy(document)
             self._draft = copy.deepcopy(document)
             self._update_spec(compiled)
+            self._calibration_runner = JointCalibrationRunner(compiled)
+            self._calibration_latest = {}
             self._editing = True
             self._edit_token = secrets.token_urlsafe(24)
             self._video_before_edit = self.video_enabled
@@ -362,11 +380,15 @@ class PreviewRuntime:
             raise ValueError("edit session token is missing or invalid")
         return self._draft
 
-    def edit_update(self, kind: str, object_id: str, patch: dict[str, Any], *, token: str | None = None) -> dict[str, Any]:
+    def edit_update(
+        self, kind: str, object_id: str, patch: dict[str, Any], *, token: str | None = None
+    ) -> dict[str, Any]:
         with self._edit_lock:
             return self._edit_update(kind, object_id, patch, token)
 
-    def _edit_update(self, kind: str, object_id: str, patch: dict[str, Any], token: str | None) -> dict[str, Any]:
+    def _edit_update(
+        self, kind: str, object_id: str, patch: dict[str, Any], token: str | None
+    ) -> dict[str, Any]:
         document = copy.deepcopy(self._require_edit(token))
         if not isinstance(patch, dict) or not patch:
             raise ValueError("edit patch must be a nonempty object")
@@ -397,6 +419,8 @@ class PreviewRuntime:
         with self._condition:
             self._draft = document
             self._update_spec(compiled)
+            self._calibration_runner = JointCalibrationRunner(compiled)
+            self._calibration_latest = {}
             self._reset_version += 1
             self._pending_steps = 1
             self._condition.notify_all()
@@ -404,20 +428,35 @@ class PreviewRuntime:
     def edit_create(self, kind: str, object_id: str, *, token: str | None = None) -> dict[str, Any]:
         with self._edit_lock:
             document = copy.deepcopy(self._require_edit(token))
-            if not object_id or len(object_id) > 64 or not all(
-                char.isascii() and (char.isalnum() or char in "_-") for char in object_id
+            if (
+                not object_id
+                or len(object_id) > 64
+                or not all(
+                    char.isascii() and (char.isalnum() or char in "_-") for char in object_id
+                )
             ):
                 raise ValueError("ID must be 1-64 ASCII letters, digits, underscores or hyphens")
             if kind == "station":
                 entries = document.setdefault("stations", [])
                 if len(entries) >= 4:
                     raise ValueError("at most four stations are supported")
-                new = {"id": object_id, "position_enu_m": [0, 0, 8], "main_yaw_deg": 0, "main_elevation_deg": 0}
+                new = {
+                    "id": object_id,
+                    "position_enu_m": [0, 0, 8],
+                    "main_yaw_deg": 0,
+                    "main_elevation_deg": 0,
+                }
             elif kind == "target":
                 entries = document.setdefault("targets", [])
-                new = {"id": object_id, "geometry": {"type": "sphere", "radius_m": 1},
-                       "motion": {"type": "constant_velocity", "position_enu_m": [0, 0, 40],
-                                  "velocity_enu_mps": [0, 0, 0]}}
+                new = {
+                    "id": object_id,
+                    "geometry": {"type": "sphere", "radius_m": 1},
+                    "motion": {
+                        "type": "constant_velocity",
+                        "position_enu_m": [0, 0, 40],
+                        "velocity_enu_mps": [0, 0, 0],
+                    },
+                }
             else:
                 raise ValueError("editable kind must be station or target")
             if any(item.get("id") == object_id for item in entries):
@@ -447,12 +486,16 @@ class PreviewRuntime:
             document = copy.deepcopy(self._require_edit(token))
             if landscape_id not in _LANDSCAPE_ASSETS or self._authoring_path is None:
                 raise ValueError("landscape is not provisioned")
-            path, digest = _LANDSCAPE_ASSETS[landscape_id]
+            _configured_path, digest = _LANDSCAPE_ASSETS[landscape_id]
+            path = _landscape_asset_path(landscape_id, self._authoring_path)
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise ValueError("local landscape asset is missing or has a different digest")
-            document["osm"] = {"asset": {
-                "uri": os.path.relpath(path, self._authoring_path.parent), "sha256": digest,
-            }}
+            document["osm"] = {
+                "asset": {
+                    "uri": os.path.relpath(path, self._authoring_path.parent),
+                    "sha256": digest,
+                }
+            }
             self._publish_draft(document)
             return self.editor_status()
 
@@ -471,6 +514,8 @@ class PreviewRuntime:
                 if compiled is not None:
                     self._update_spec(compiled)
                     self._authoring_document = copy.deepcopy(document)
+                    self._calibration_runner = JointCalibrationRunner(compiled)
+                    self._calibration_latest = {}
                 self._push_editor(False)
                 self._draft = None
                 self._edit_digest = None
@@ -503,6 +548,8 @@ class PreviewRuntime:
                 self._push_editor(False)
                 self._update_spec(compiled)
                 self._authoring_document = copy.deepcopy(document)
+                self._calibration_runner = JointCalibrationRunner(compiled)
+                self._calibration_latest = {}
                 self._draft = None
                 self._edit_digest = None
                 self._edit_token = None
@@ -530,8 +577,11 @@ class PreviewRuntime:
         with self._condition:
             editing = self._editing
         visible = default_renderer().editor_update(
-            step.truth.logical_scene, camera, enabled=enabled,
-            realtime=editing, reopen=reopen or (editing and enabled),
+            step.truth.logical_scene,
+            camera,
+            enabled=enabled,
+            realtime=editing,
+            reopen=reopen or (editing and enabled),
         )
         with self._condition:
             self._freeview_enabled = visible or (editing and enabled)
@@ -557,6 +607,7 @@ class PreviewRuntime:
                 "last_logical_timing": self._last_logical_timing,
                 "generation_stats_ms": self._timing_stats(self._generation_samples_ms),
                 "rendered_generation_stats_ms": self._timing_stats(self._rendered_samples_ms),
+                "calibration_stats_ms": self._timing_stats(self._calibration_samples_ms),
             }
             step, payload, cache = self._published_step, self._published, self._encoded
         if payload is not None and payload["sequence"] == after_sequence:
@@ -669,6 +720,14 @@ class PreviewRuntime:
                         self._skipped_step_count += 1
                     stats = self._timing_stats(self._generation_samples_ms)
                     render_stats = self._timing_stats(self._rendered_samples_ms)
+                calibration_started = time.perf_counter_ns()
+                calibration_results = self._calibration_runner.process_step(step)
+                calibration_ms = (time.perf_counter_ns() - calibration_started) / 1_000_000
+                with self._condition:
+                    self._calibration_samples_ms.append(calibration_ms)
+                    for result in calibration_results:
+                        self._calibration_latest[result["station_id"]] = result
+                    calibration_latest = copy.deepcopy(self._calibration_latest)
                 for frame in step.video.frames:
                     key = (str(frame.station_id), frame.camera_role.value)
                     latest_frames[key] = frame
@@ -682,8 +741,9 @@ class PreviewRuntime:
                     video=replace(step.video, frames=tuple(latest_frames.values())),
                     truth=replace(
                         step.truth,
-                        camera_frames=(step.truth.camera_frames if editing
-                                       else tuple(latest_truths.values())),
+                        camera_frames=(
+                            step.truth.camera_frames if editing else tuple(latest_truths.values())
+                        ),
                     ),
                 )
                 payload = _preview_metadata(display_step, sequence + 1, loop_no)
@@ -695,6 +755,9 @@ class PreviewRuntime:
                     render_ms=round((generated - began) * 1000, 2),
                     generation_stats_ms=stats,
                     rendered_generation_stats_ms=render_stats,
+                    calibration=calibration_latest,
+                    calibration_ms=round(calibration_ms, 3),
+                    calibration_stats_ms=self._timing_stats(self._calibration_samples_ms),
                 )
                 with self._condition:
                     if reset_version != self._reset_version:
@@ -770,7 +833,11 @@ def preview_server(runtime: PreviewRuntime, port: int) -> ThreadingHTTPServer:
                     "application/json; charset=utf-8",
                 )
             elif path in {"/api/editor", "/api/freeview"}:
-                self.reply(200, json.dumps(runtime.editor_status(), ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                self.reply(
+                    200,
+                    json.dumps(runtime.editor_status(), ensure_ascii=False).encode(),
+                    "application/json; charset=utf-8",
+                )
             else:
                 self.reply(404, b"Not found", "text/plain")
 
@@ -886,6 +953,14 @@ def main() -> None:
         default=None,
         help="从 scenario-authoring-v2 文件加载可编辑场景；提供后忽略 --stations/--fps",
     )
+    parser.add_argument(
+        "--camera-position-offset",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("E", "N", "U"),
+        help="共同主辅相机位置扰动（米）；只在内存中注入，不改写场景文件",
+    )
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--no-video", action="store_true", help="只看逻辑与事件，完全停止像素生产")
     args = parser.parse_args()
@@ -896,13 +971,24 @@ def main() -> None:
         authoring_document = None
         if authoring_path is not None:
             authoring_document = json.loads(authoring_path.read_text())
-        spec = (
-            load_scenario(authoring_path, asset_root=authoring_path.parent)
-            if authoring_path is not None
-            else demo_spec(station_count=args.stations, fps=args.fps)
+            if args.camera_position_offset is not None:
+                authoring_document["camera_position_offset_enu_m"] = list(
+                    args.camera_position_offset
+                )
+                spec = compile_authoring(authoring_document, asset_root=authoring_path.parent)
+            else:
+                spec = load_scenario(authoring_path, asset_root=authoring_path.parent)
+        else:
+            if args.camera_position_offset is not None:
+                parser.error("--camera-position-offset requires --scenario")
+            spec = demo_spec(station_count=args.stations, fps=args.fps)
+        runtime = PreviewRuntime(
+            spec,
+            render_fps=args.render_fps,
+            video_enabled=not args.no_video,
+            authoring_document=authoring_document,
+            authoring_path=authoring_path,
         )
-        runtime = PreviewRuntime(spec, render_fps=args.render_fps, video_enabled=not args.no_video,
-                                 authoring_document=authoring_document, authoring_path=authoring_path)
         server = preview_server(runtime, args.port)
     except (ValueError, OSError) as error:
         parser.error(str(error))

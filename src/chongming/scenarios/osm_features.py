@@ -507,9 +507,7 @@ def _area_factor(seed: int, element_id: str) -> float:
     return 0.75 + 0.5 * _unit(digest, 0)
 
 
-def _density_target(
-    mask: BaseGeometry, density: float, factor: float, per_area_budget: int
-) -> int:
+def _density_target(mask: BaseGeometry, density: float, factor: float, per_area_budget: int) -> int:
     return min(per_area_budget, round(density * mask.area / 10_000.0 * factor))
 
 
@@ -550,9 +548,7 @@ def _plant_candidates(
                 f"{prefix}/cluster/{ix // cluster}/{iy // cluster}".encode()
             ).digest()
             priority = (1.0 - clustering) * _unit(digest, 8) + clustering * _unit(coarse, 0)
-            candidates.append(
-                _PlantCandidate(priority, digest[12:16], x, y, ix, iy, pass_index)
-            )
+            candidates.append(_PlantCandidate(priority, digest[12:16], x, y, ix, iy, pass_index))
     candidates.sort(key=lambda item: (item.priority, item.tiebreak))
     return candidates
 
@@ -567,8 +563,7 @@ def _hard_surface_exclusions(
     from shapely.ops import unary_union
 
     exclusions: list[BaseGeometry] = [
-        Polygon(building.footprint_enu_m).buffer(building_margin)
-        for building in imported.buildings
+        Polygon(building.footprint_enu_m).buffer(building_margin) for building in imported.buildings
     ]
     exclusions.extend(
         LineString(road.centerline_enu_m).buffer(road.width_m / 2 + road_margin)
@@ -738,9 +733,7 @@ def tree_objects(
     generated_shrubs = 0
     generated_grass = 0
 
-    def add_tree(
-        area: s.OSMArea, candidate: _PlantCandidate, remaining: int
-    ) -> bool:
+    def add_tree(area: s.OSMArea, candidate: _PlantCandidate, remaining: int) -> bool:
         nonlocal generated_trees
         if remaining <= 0 or generated_trees >= config.maximum_trees_total:
             return False
@@ -761,9 +754,7 @@ def tree_objects(
             1.0 + config.tree_crown_radius_jitter * (2.0 * _unit(digest, 4) - 1.0)
         )
         tree_index.add(candidate.x, candidate.y)
-        canopy_color = (
-            (0.09, 0.25, 0.05) if area.category == "forest" else (0.11, 0.29, 0.07)
-        )
+        canopy_color = (0.09, 0.25, 0.05) if area.category == "forest" else (0.11, 0.29, 0.07)
         objects.extend(
             _tree_specs(
                 f"osm/tree/{area.element_id}/{candidate.pass_index}/{candidate.ix}/{candidate.iy}",
@@ -785,9 +776,7 @@ def tree_objects(
             return False
         if tree_index.conflicts(candidate.x, candidate.y, 0.9):
             return False
-        if shrub_excluded is not None and shrub_excluded.covers(
-            Point(candidate.x, candidate.y)
-        ):
+        if shrub_excluded is not None and shrub_excluded.covers(Point(candidate.x, candidate.y)):
             return False
         pose = _upright_pose(imported, candidate.x, candidate.y, 0.8)
         if pose is None:
@@ -810,7 +799,9 @@ def tree_objects(
                     f"osm/shrub/{area.element_id}/{candidate.pass_index}/{candidate.ix}/{candidate.iy}"
                 ),
                 f"OSM {area.category} shrub {area.element_id}",
-                replace(pose, position_enu_m=(candidate.x, candidate.y, pose.position_enu_m[2] + 0.02)),
+                replace(
+                    pose, position_enu_m=(candidate.x, candidate.y, pose.position_enu_m[2] + 0.02)
+                ),
                 s.CylinderGeometry(radius, height),
                 s.SurfaceAppearance(color, 0.85),
                 s.VegetationMotionModel.STATIC,
@@ -875,9 +866,7 @@ def tree_objects(
                 ),
                 s.VegetationMotionModel.STATIC,
                 False,
-                s.GrassVisualSpec(
-                    width, depth, blade_height, config.grass_density_per_m2
-                ),
+                s.GrassVisualSpec(width, depth, blade_height, config.grass_density_per_m2),
             )
         )
         generated_grass += 1
@@ -906,9 +895,7 @@ def tree_objects(
                 density = config.forest_tree_density_per_ha
                 clustering = config.forest_clustering
                 existing = _trees_inside(mask, canonical_trees)
-            target = _density_target(
-                mask, density, factor, config.maximum_trees_per_area
-            )
+            target = _density_target(mask, density, factor, config.maximum_trees_per_area)
             remaining = max(0, target - existing)
             if not remaining:
                 continue
@@ -971,9 +958,7 @@ def tree_objects(
             )
             if not target:
                 continue
-            remaining = min(
-                target, config.maximum_grass_patches_total - generated_grass
-            )
+            remaining = min(target, config.maximum_grass_patches_total - generated_grass)
             # Terrain creases, narrow polygons and hard surfaces reject many
             # 12 m patches. Additional deterministic grid passes fill the target
             # without forcing a larger per-pass candidate list.
@@ -1012,8 +997,14 @@ def _grass_pose(imported: s.OSMImport, x: float, y: float, width: float) -> s.Ki
     nx, nz = math.sqrt(1 + dx * dx), math.sqrt(1 + dx * dx + dy * dy)
     axis_x = (1 / nx, 0.0, dx / nx)
     normal = (-dx / nz, -dy / nz, 1 / nz)
-    axis_y = (normal[1] * axis_x[2], normal[2] * axis_x[0] - normal[0] * axis_x[2], -normal[1] * axis_x[0])
-    rotation: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] = (
+    axis_y = (
+        normal[1] * axis_x[2],
+        normal[2] * axis_x[0] - normal[0] * axis_x[2],
+        -normal[1] * axis_x[0],
+    )
+    rotation: tuple[
+        tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]
+    ] = (
         (axis_x[0], axis_y[0], normal[0]),
         (axis_x[1], axis_y[1], normal[1]),
         (axis_x[2], axis_y[2], normal[2]),
@@ -1025,9 +1016,7 @@ def _grass_pose(imported: s.OSMImport, x: float, y: float, width: float) -> s.Ki
             pz = z + axis_x[2] * a + axis_y[2] * b
             if abs(pz - elevation_at(imported, px, py)) > 0.05:
                 return None
-    return s.KinematicState(
-        (x, y, z + 0.05), (0.0, 0.0, 0.0), rotation, (0.0, 0.0, 0.0)
-    )
+    return s.KinematicState((x, y, z + 0.05), (0.0, 0.0, 0.0), rotation, (0.0, 0.0, 0.0))
 
 
 def validate_features(imported: s.OSMImport) -> None:

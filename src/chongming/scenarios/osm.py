@@ -192,6 +192,7 @@ def validate_vegetation_config(config: s.OSMVegetationConfig) -> None:
     if any(not 0 <= value <= 20000 for value in integers[1:]) or not 0 <= integers[0] <= 2**31 - 1:
         raise ValueError("OSM vegetation budgets must lie in 0..20000")
 
+
 def project_enu(longitude: float, latitude: float, anchor: GeodeticAnchor) -> Point:
     """WGS84 geodetic -> ECEF -> local east/north metres.
 
