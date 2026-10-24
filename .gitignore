@@ -13,6 +13,8 @@ env/
 
 # Build and tooling output
 .codex-cache/
+.godot/
+*.uid
 build/
 dist/
 *.egg-info/

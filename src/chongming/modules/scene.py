@@ -92,6 +92,7 @@ from chongming.contracts.scene import (
     TerrainSpec,
     TimelineSpec,
     TrajectorySpec,
+    TriangleMeshGeometry,
     TruthRay,
     VegetationMotionModel,
     VirtualCalibrationInterval,
@@ -114,7 +115,11 @@ from chongming.ports.scene import (
     VirtualObservationGenerator,
     VisibilityResolver,
 )
-from chongming.rendering.geometry import contains_point, surface_hits
+from chongming.rendering.geometry import (
+    contains_point,
+    mesh_segment_may_intersect,
+    surface_hits,
+)
 from chongming.rendering.godot import (
     close_default_renderer,
     default_renderer,
@@ -123,6 +128,7 @@ from chongming.rendering.godot import (
     render_rgb8,
     srgb_to_linear,
 )
+from chongming.rendering.occlusion_index import OcclusionIndex
 from chongming.scenarios.behaviors import sample_behavior
 
 _EPS = 1e-9
@@ -606,8 +612,8 @@ class VisibilityModule(ModuleShell):
             capture_eligible=query.projection.center_in_field_of_view and not occlusions,
         )
 
-    @staticmethod
     def _occlusions(
+        self,
         projection: ProjectionTruth,
         origin: Vec3M,
         target: Vec3M,
@@ -618,7 +624,22 @@ class VisibilityModule(ModuleShell):
         if not projection.in_front_of_camera:
             return ()
         blockers: list[tuple[float, SegmentOcclusionTruth]] = []
-        entities = [terrain, *world_objects, *vegetation]
+        # Immutable world objects are shared across snapshots. Aircraft are few
+        # and change on every tick/query; test them directly so they cannot cause
+        # the static city BVH to rebuild. Preserve original input order for ties.
+        static_world = tuple(e for e in world_objects if getattr(e, "category", None) != "aircraft")
+        world_index = getattr(self, "_world_index", None)
+        if world_index is None or not world_index.matches(static_world):
+            self._world_index = world_index = OcclusionIndex(static_world)
+        vegetation_index = getattr(self, "_vegetation_index", None)
+        if vegetation_index is None or not vegetation_index.matches(vegetation):
+            self._vegetation_index = vegetation_index = OcclusionIndex(vegetation)
+        candidate_ids = {id(e) for e in world_index.candidates(origin, target)}
+        entities = (
+            terrain,
+            *(e for e in world_objects if id(e) in candidate_ids or getattr(e, "category", None) == "aircraft"),
+            *vegetation_index.candidates(origin, target),
+        )
         for entity in entities:
             if not getattr(entity, "occludes_sight_lines", False):
                 continue
@@ -671,24 +692,30 @@ class VisibilityModule(ModuleShell):
                     ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
                     (0.0, 0.0, 0.0),
                 )
-                depths, _ = surface_hits(
-                    origin,
-                    np.asarray([segment], dtype=np.float64),
-                    terrain_pose,
-                    entity.heightfield_geometry,
-                )
-                fraction = float(depths[0])
-                if 0.0 < fraction < 1.0 - _EPS:
-                    candidates.append(
-                        (
-                            fraction,
-                            SegmentOcclusionTruth(
-                                object_id, _add(origin, _scale(segment, fraction)), fraction
-                            ),
-                        )
+                if mesh_segment_may_intersect(origin, target, terrain_pose, entity.heightfield_geometry):
+                    depths, _ = surface_hits(
+                        origin,
+                        np.asarray([segment], dtype=np.float64),
+                        terrain_pose,
+                        entity.heightfield_geometry,
                     )
+                    fraction = float(depths[0])
+                    if 0.0 < fraction < 1.0 - _EPS:
+                        candidates.append(
+                            (
+                                fraction,
+                                SegmentOcclusionTruth(
+                                    object_id, _add(origin, _scale(segment, fraction)), fraction
+                                ),
+                            )
+                        )
             return min(candidates, key=lambda item: item[0]) if candidates else None
         if pose is None or geometry is None:
+            return None
+        if (
+            isinstance(geometry, TriangleMeshGeometry)
+            and not mesh_segment_may_intersect(origin, target, pose, geometry)
+        ):
             return None
         if contains_point(origin, pose, geometry):
             return 0.0, SegmentOcclusionTruth(object_id, origin, 0.0)

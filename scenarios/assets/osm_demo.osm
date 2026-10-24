@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic coordinates/IDs, authored for this repository; CC0-1.0.
+     NOT an OpenStreetMap extract and NOT evidence of real-world buildings. -->
+<osm version="0.6" generator="chongming-synthetic-fixture">
+  <node id="1" lat="31.23027" lon="121.46994"/>
+  <node id="2" lat="31.23027" lon="121.47006"/>
+  <node id="3" lat="31.23036" lon="121.47006"/>
+  <node id="4" lat="31.23036" lon="121.46994"/>
+  <node id="5" lat="31.23040" lon="121.47016"/>
+  <node id="6" lat="31.23040" lon="121.47037"/>
+  <node id="7" lat="31.23049" lon="121.47037"/>
+  <node id="8" lat="31.23049" lon="121.47026"/>
+  <node id="9" lat="31.23058" lon="121.47026"/>
+  <node id="10" lat="31.23058" lon="121.47016"/>
+  <node id="11" lat="31.23050" lon="121.46970"/>
+  <node id="12" lat="31.23050" lon="121.46982"/>
+  <node id="13" lat="31.23062" lon="121.46982"/>
+  <node id="14" lat="31.23062" lon="121.46970"/>
+  <node id="99" lat="31.23070" lon="121.47010"><tag k="amenity" v="bench"/></node>
+  <way id="101">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>
+    <tag k="building" v="yes"/><tag k="height" v="12 m"/>
+    <tag k="name" v="Synthetic blocker"/><tag k="addr:street" v="Not a real street"/>
+  </way>
+  <way id="102">
+    <nd ref="5"/><nd ref="6"/><nd ref="7"/><nd ref="8"/><nd ref="9"/><nd ref="10"/><nd ref="5"/>
+    <tag k="building" v="yes"/><tag k="building:levels" v="6"/>
+  </way>
+  <way id="103">
+    <nd ref="11"/><nd ref="12"/><nd ref="13"/><nd ref="14"/><nd ref="11"/>
+    <tag k="building" v="yes"/><tag k="height" v="unknown"/>
+  </way>
+  <way id="999"><nd ref="1"/><nd ref="99"/><tag k="highway" v="service"/></way>
+</osm>

@@ -5,6 +5,8 @@ const Vegetation = preload("res://vegetation.gd")
 const AtmosphereShader = preload("res://atmosphere.gdshader")
 const OpticsShader = preload("res://optics.gdshader")
 const TerrainShader = preload("res://terrain.gdshader")
+const BuildingShader = preload("res://building.gdshader")
+const GroundcoverShader = preload("res://groundcover.gdshader")
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
 var _buffer := PackedByteArray()
@@ -24,10 +26,24 @@ var _ground: MeshInstance3D
 var _ground_material: ShaderMaterial
 var _instances: Array[Node3D] = []
 var _signatures: Array[String] = []
+var _resources: Dictionary = {}
 var _busy := false
+var _editor_active := false
+var _editor_realtime := false
+var _editor_closed := false
+var _free_viewport: SubViewport
+var _free_camera: Camera3D
+var _editor_gizmos: Node3D
+var _editor_display: TextureRect
+var _editor_fps: Label
+var _fps_elapsed := 0.0
+var _looking := false
+var _free_yaw := 0.0
+var _free_pitch := 0.0
 
 
 func _ready() -> void:
+	get_tree().auto_accept_quit = false
 	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
 	get_viewport().disable_3d = true
 	seed(42)
@@ -48,8 +64,38 @@ func _setup_world() -> void:
 	_world = Node3D.new()
 	_viewport.add_child(_world)
 	_camera = Camera3D.new()
+	_camera.cull_mask = 1
 	_camera.current = true
 	_world.add_child(_camera)
+	_free_viewport = SubViewport.new()
+	# own_world_3d creates an internal world; world_3d itself may remain null.
+	_free_viewport.world_3d = _viewport.find_world_3d()
+	_free_viewport.size = Vector2i(1024, 640)
+	_free_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	add_child(_free_viewport)
+	_free_camera = Camera3D.new()
+	_free_camera.cull_mask = 3
+	_free_camera.fov = 70.0
+	_free_camera.far = 5000.0
+	_free_viewport.add_child(_free_camera)
+	_editor_gizmos = Node3D.new()
+	_world.add_child(_editor_gizmos)
+	_editor_display = TextureRect.new()
+	_editor_display.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_editor_display.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_editor_display.stretch_mode = TextureRect.STRETCH_SCALE
+	_editor_display.texture = _free_viewport.get_texture()
+	_editor_display.visible = false
+	add_child(_editor_display)
+	_editor_fps = Label.new()
+	_editor_fps.position = Vector2(12, 12)
+	_editor_fps.add_theme_color_override("font_color", Color.WHITE)
+	_editor_fps.add_theme_color_override("font_shadow_color", Color.BLACK)
+	_editor_fps.add_theme_constant_override("shadow_offset_x", 1)
+	_editor_fps.add_theme_constant_override("shadow_offset_y", 1)
+	_editor_fps.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_editor_fps.visible = false
+	add_child(_editor_fps)
 	_environment = Environment.new()
 	_environment.background_mode = Environment.BG_COLOR
 	_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
@@ -91,6 +137,12 @@ func _setup_world() -> void:
 
 
 func _process(_delta: float) -> void:
+	if _editor_active and not _busy:
+		_move_free_camera(_delta)
+		_fps_elapsed += _delta
+		if _fps_elapsed >= 0.5:
+			_editor_fps.text = "%d FPS · EDIT" % Engine.get_frames_per_second() if _editor_realtime else "FREEVIEW · simulation clock"
+			_fps_elapsed = 0.0
 	if _peer == null:
 		if _server.is_connection_available():
 			_peer = _server.take_connection()
@@ -223,7 +275,43 @@ func _render(request: Dictionary) -> PackedByteArray:
 		float(request.terrainColor[1]) * float(request.terrainReflectance),
 		float(request.terrainColor[2]) * float(request.terrainReflectance)))
 	_ground_material.set_shader_parameter("detail_strength", float(request.get("terrainDetail", 0.0)))
+	_sync_resources(request.get("resources", []))
 	_sync_entities(request["entities"])
+	if str(request.get("mode", "")) == "editor":
+		var editor_enabled := bool(request.get("editor_enabled", false))
+		var editor_realtime := bool(request.get("editor_realtime", false))
+		var was_editor_active := _editor_active
+		if bool(request.get("editor_reopen", false)) or editor_realtime:
+			_editor_closed = false
+		editor_enabled = editor_enabled and not _editor_closed
+		if editor_enabled:
+			_sync_editor_markers(request.get("editor_markers", []))
+			if not _editor_active:
+				_position_editor_overview(request.get("entities", []))
+				_free_yaw = _free_camera.rotation.y
+				_free_pitch = _free_camera.rotation.x
+			_editor_active = true
+			_editor_realtime = editor_realtime
+			_editor_gizmos.visible = true
+			_free_camera.make_current()
+			_free_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if editor_realtime else SubViewport.UPDATE_ONCE
+			if not was_editor_active:
+				_display_editor(true, editor_realtime)
+			else:
+				RenderingServer.render_loop_enabled = editor_realtime
+			_sky_material.set_shader_parameter("camera_horizontal", Vector2(_free_camera.position.x, _free_camera.position.z))
+			_sky_material.set_shader_parameter("camera_altitude", _free_camera.position.y)
+			await get_tree().process_frame
+			# Present the root window as well as rendering the freeview texture.
+			RenderingServer.force_draw(true)
+		else:
+			_editor_active = false
+			_editor_realtime = false
+			_editor_gizmos.visible = false
+			_free_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+			_display_editor(false, false)
+		return PackedByteArray([1 if _editor_active else 0])
+	_camera.make_current()
 	# No GPU frames between requests, even while the experiment is paused.
 	# Flush SceneTree transform/material notifications before drawing; otherwise
 	# the first image can contain the previous snapshot or an empty viewport.
@@ -262,16 +350,157 @@ func _render(request: Dictionary) -> PackedByteArray:
 	return image.get_data()
 
 
+func _display_editor(enabled: bool, realtime: bool) -> void:
+	_editor_display.visible = enabled
+	_editor_fps.visible = enabled
+	RenderingServer.render_loop_enabled = enabled and realtime
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, not enabled)
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, not enabled)
+	if enabled:
+		DisplayServer.window_set_size(Vector2i(1024, 640))
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	else:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
+	_looking = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST and _editor_active and not _editor_realtime:
+		# Closing the viewer must leave the renderer and experiment alive.
+		_editor_closed = true
+		_editor_active = false
+		_editor_gizmos.visible = false
+		_free_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		_display_editor(false, false)
+
+
+func _redraw_freeview() -> void:
+	if _editor_active and not _editor_realtime and not _busy:
+		_sky_material.set_shader_parameter("camera_horizontal", Vector2(_free_camera.position.x, _free_camera.position.z))
+		_sky_material.set_shader_parameter("camera_altitude", _free_camera.position.y)
+		_free_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+		RenderingServer.force_draw(true)
+
+
+func _input(event: InputEvent) -> void:
+	if not _editor_active:
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+		_looking = event.pressed
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _looking else Input.MOUSE_MODE_VISIBLE
+	elif event is InputEventMouseMotion and _looking:
+		_free_yaw -= event.relative.x * 0.0025
+		_free_pitch = clampf(_free_pitch - event.relative.y * 0.0025, -1.48, 1.48)
+		_free_camera.rotation = Vector3(_free_pitch, _free_yaw, 0.0)
+		_redraw_freeview()
+
+
+func _move_free_camera(delta: float) -> void:
+	if not _looking:
+		return
+	var direction := Vector3.ZERO
+	if Input.is_key_pressed(KEY_W): direction.z -= 1.0
+	if Input.is_key_pressed(KEY_S): direction.z += 1.0
+	if Input.is_key_pressed(KEY_A): direction.x -= 1.0
+	if Input.is_key_pressed(KEY_D): direction.x += 1.0
+	if Input.is_key_pressed(KEY_E): direction.y += 1.0
+	if Input.is_key_pressed(KEY_Q): direction.y -= 1.0
+	if direction != Vector3.ZERO:
+		_free_camera.position += _free_camera.global_basis * direction.normalized() * delta * (160.0 if Input.is_key_pressed(KEY_SHIFT) else 35.0)
+		_redraw_freeview()
+
+
+func _position_editor_overview(entities: Array) -> void:
+	var minimum := Vector3(INF, INF, INF)
+	var maximum := Vector3(-INF, -INF, -INF)
+	var count := 0
+	for entity_value in entities:
+		var entity: Dictionary = entity_value
+		var position := _enu(entity.get("position", [0.0, 0.0, 0.0]))
+		minimum = minimum.min(position)
+		maximum = maximum.max(position)
+		count += 1
+	var focus := _enu([0.0, 0.0, 0.0])
+	var radius := 80.0
+	if count > 0:
+		focus = (minimum + maximum) * 0.5
+		focus.y = _ground.position.y + 4.0
+		radius = maxf(80.0, Vector2(maximum.x - minimum.x, maximum.z - minimum.z).length() * 0.8)
+	var distance := radius * 1.5
+	_free_camera.position = focus + Vector3(distance * 0.55, distance * 0.8, distance * 0.55)
+	_free_camera.look_at(focus, Vector3.UP)
+
+
+func _sync_editor_markers(markers: Array) -> void:
+	for child in _editor_gizmos.get_children():
+		child.free()
+	for marker_value in markers:
+		var marker: Dictionary = marker_value
+		var anchor := Node3D.new()
+		anchor.position = _enu(marker.position)
+		_editor_gizmos.add_child(anchor)
+		var is_camera := str(marker.kind) == "camera"
+		if not is_camera or str(marker.id).ends_with("/main"):
+			var label := Label3D.new()
+			label.text = ("CAM " if is_camera else "TARGET ") + str(marker.id)
+			label.position = Vector3(0.0, 3.0, 0.0)
+			label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			label.fixed_size = true
+			label.font_size = 24
+			label.pixel_size = 0.0012
+			label.outline_size = 4
+			label.no_depth_test = true
+			label.layers = 2
+			label.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			label.modulate = Color(0.15, 0.85, 0.95) if is_camera else Color(1.0, 0.7, 0.32)
+			anchor.add_child(label)
+		if not is_camera:
+			continue
+		var basis := _basis(marker.rotation) * Basis(Vector3.RIGHT, Vector3.DOWN, Vector3.FORWARD)
+		var focal: Array = marker.focal
+		var length := float(marker.length)
+		var corners: Array[Vector3] = []
+		for pixel in [Vector2(0, 0), Vector2(float(marker.width), 0), Vector2(float(marker.width), float(marker.height)), Vector2(0, float(marker.height))]:
+			corners.append(basis * Vector3(
+				(pixel.x - float(focal[2])) / float(focal[0]) * length,
+				-(pixel.y - float(focal[3])) / float(focal[1]) * length, -length))
+		var mesh := ImmediateMesh.new()
+		mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+		for index in range(4):
+			mesh.surface_add_vertex(Vector3.ZERO)
+			mesh.surface_add_vertex(corners[index])
+			mesh.surface_add_vertex(corners[index])
+			mesh.surface_add_vertex(corners[(index + 1) % 4])
+		mesh.surface_end()
+		var lines := MeshInstance3D.new()
+		lines.mesh = mesh
+		lines.layers = 2
+		lines.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.albedo_color = Color(0.15, 0.85, 0.95)
+		lines.material_override = material
+		anchor.add_child(lines)
+
+
 func _sync_entities(entities: Array) -> void:
 	while _instances.size() > entities.size():
 		_instances.pop_back().free()
 		_signatures.pop_back()
 	for index in range(entities.size()):
-		var entity: Dictionary = entities[index]
+		var light_entity: Dictionary = entities[index]
+		var entity: Dictionary = light_entity
+		var resource_token := str(light_entity.get("resource", ""))
+		if not resource_token.is_empty():
+			if not _resources.has(resource_token):
+				push_error("render entity references unknown resource %s" % resource_token)
+				continue
+			entity = _resources[resource_token]
 		if index == _instances.size():
 			_instances.append(Node3D.new())
 			_signatures.append("")
-		var signature := JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0)])
+		var signature := resource_token if not resource_token.is_empty() else JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null)])
 		if signature != _signatures[index]:
 			var old_instance := _instances[index]
 			old_instance.free()
@@ -284,6 +513,10 @@ func _sync_entities(entities: Array) -> void:
 				mesh_instance.mesh = _mesh(entity)
 				if str(entity.get("surface", "")) == "terrain":
 					mesh_instance.material_override = _terrain_material(entity.color, float(entity.reflectance), float(entity.get("surface_detail", 0.0)))
+				elif str(entity.get("category", "")) == "osm-building":
+					mesh_instance.material_override = _building_material(entity.color, float(entity.reflectance), str(entity.get("object_id", "")))
+				elif str(entity.get("category", "")) in ["osm-grass", "osm-forest"]:
+					mesh_instance.material_override = _groundcover_material(entity.color, float(entity.reflectance), str(entity.get("category", "")) == "osm-forest")
 				else:
 					mesh_instance.material_override = _material(entity.color, float(entity.reflectance))
 				new_instance = mesh_instance
@@ -291,7 +524,31 @@ func _sync_entities(entities: Array) -> void:
 			_instances[index] = new_instance
 			_signatures[index] = signature
 		var instance := _instances[index]
-		instance.transform = Transform3D(_basis(entity.rotation), _enu(entity.position))
+		instance.transform = Transform3D(_basis(light_entity.rotation), _enu(light_entity.position))
+	# Definitions are immutable and the Python registry deliberately re-uploads a
+	# definition if an object returns after being absent. Keep the worker bounded.
+	var used: Dictionary = {}
+	for light_entity in entities:
+		var token := str(light_entity.get("resource", ""))
+		if not token.is_empty():
+			used[token] = true
+	var stale: Array[String] = []
+	for token in _resources.keys():
+		if not used.has(token):
+			stale.append(str(token))
+	for token in stale:
+		_resources.erase(token)
+
+
+func _sync_resources(definitions: Array) -> void:
+	for definition_value in definitions:
+		if not definition_value is Dictionary:
+			continue
+		var definition: Dictionary = definition_value
+		var token := str(definition.get("resource", ""))
+		if token.is_empty():
+			continue
+		_resources[token] = definition.duplicate(true)
 
 
 func _mesh(entity: Dictionary) -> Mesh:
@@ -329,6 +586,27 @@ func _terrain_material(rgb: Array, reflectance: float, detail: float) -> ShaderM
 	material.set_shader_parameter("base_color", Vector3(
 		float(rgb[0]) * reflectance, float(rgb[1]) * reflectance, float(rgb[2]) * reflectance))
 	material.set_shader_parameter("detail_strength", detail)
+	return material
+
+
+func _building_material(rgb: Array, reflectance: float, object_id: String) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = BuildingShader
+	material.set_shader_parameter("base_color", Vector3(
+		float(rgb[0]) * reflectance, float(rgb[1]) * reflectance, float(rgb[2]) * reflectance))
+	var digest := object_id.hash()
+	material.set_shader_parameter("seed", float(abs(digest % 997)))
+	return material
+
+
+func _groundcover_material(rgb: Array, reflectance: float, forest: bool) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = GroundcoverShader
+	var tint := 0.76 if forest else 1.0
+	material.set_shader_parameter("base_color", Vector3(
+		float(rgb[0]) * reflectance * tint, float(rgb[1]) * reflectance * tint,
+		float(rgb[2]) * reflectance * tint))
+	material.set_shader_parameter("variation", 0.10 if forest else 0.16)
 	return material
 
 

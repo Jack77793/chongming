@@ -253,6 +253,101 @@ class WorldObjectSpec:
     occludes_sight_lines: bool
 
 
+@dataclass(frozen=True)
+class OSMImportConfig:
+    """Explicit offline projection, selection and height policy (metres)."""
+
+    anchor: GeodeticAnchor
+    bounds_wgs84: tuple[float, float, float, float]  # west, south, east, north
+    default_height_m: float
+    level_height_m: float
+    maximum_height_m: float
+    base_elevation_m: float
+    forest_spacing_m: float = 60.0
+    maximum_forest_trees: int = 256
+
+
+@dataclass(frozen=True)
+class OSMBuilding:
+    osm_way_id: int
+    footprint_enu_m: tuple[tuple[float, float], ...]  # open, CCW, canonical start
+    height_m: float
+    height_source: str
+    tags: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class OSMRoad:
+    osm_way_id: int
+    centerline_enu_m: tuple[tuple[float, float], ...]
+    width_m: float
+    road_class: str
+    tags: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class OSMPointFeature:
+    osm_node_id: int
+    position_enu_m: tuple[float, float]
+    category: str
+    height_m: float
+    radius_m: float
+    tags: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class OSMArea:
+    element_id: str
+    rings_enu_m: tuple[tuple[tuple[float, float], ...], ...]
+    category: str
+    tags: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class OSMElevation:
+    origin_enu_m: tuple[float, float]
+    spacing_m: float
+    heights_m: tuple[tuple[float, ...], ...]
+    source: str
+    source_sha256: str
+    data_date: str
+    vertical_datum: str
+    reference_height_m: float
+    license: str
+    attribution: str
+
+
+@dataclass(frozen=True)
+class OSMDiagnostic:
+    element_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class OSMImport:
+    format: str
+    importer_version: str
+    source_url: str
+    data_date: str
+    source_sha256: str
+    attribution: str
+    license: str
+    config: OSMImportConfig
+    buildings: tuple[OSMBuilding, ...]
+    diagnostics: tuple[OSMDiagnostic, ...]
+    roads: tuple[OSMRoad, ...] = ()
+    points: tuple[OSMPointFeature, ...] = ()
+    areas: tuple[OSMArea, ...] = ()
+    elevation: OSMElevation | None = None
+
+
+@dataclass(frozen=True)
+class OSMLandscape:
+    asset_uri: str
+    asset_sha256: str
+    imported: OSMImport
+
+
 class VegetationMotionModel(StrEnum):
     STATIC = "static"
     PERIODIC = "periodic"
@@ -444,6 +539,7 @@ class SceneDefinition:
     illumination: IlluminationSpec
     vegetation: tuple[VegetationSpec, ...] = ()
     render_effects: RenderEffectsSpec = field(default_factory=RenderEffectsSpec)
+    osm_landscape: OSMLandscape | None = None
 
 
 @dataclass(frozen=True)

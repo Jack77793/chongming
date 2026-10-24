@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from chongming.contracts import scene
+from chongming.contracts import model, scene
 from chongming.modules.scene import (
     CameraProjectionModule,
     SceneLogicModule,
@@ -291,6 +291,64 @@ class ScenarioPersistenceTests(unittest.TestCase):
         compiled = compile_authoring(document)
         self.assertEqual(compiled.scene_definition.flying_objects, ())
         self.assertEqual(compiled.timeline.end_time_ns, 999_999_999)
+
+    def test_authoring_common_camera_position_offset_preserves_relative_installation(self) -> None:
+        nominal = compile_authoring(demo_authoring(stations=1, duration_s=1))
+        document = demo_authoring(stations=1, duration_s=1)
+        offset = (0.005, -0.003, 0.002)
+        document["camera_position_offset_enu_m"] = list(offset)
+        perturbed = compile_authoring(document)
+
+        def sample(spec: scene.ScenarioSpec) -> scene.LogicalSceneSnapshot:
+            logic = SceneLogicModule(
+                TrajectoryModule(), CameraProjectionModule(), VisibilityModule()
+            )
+            logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
+            return logic.sample(
+                scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 0, 0)
+            )
+
+        nominal_cameras = {
+            camera.camera_role: camera for camera in sample(nominal).cameras
+        }
+        perturbed_cameras = {
+            camera.camera_role: camera for camera in sample(perturbed).cameras
+        }
+        for role, nominal_camera in nominal_cameras.items():
+            actual = perturbed_cameras[role]
+            for actual_value, expected_value in zip(
+                (
+                    actual.optical_state.position_enu_m[index]
+                    - nominal_camera.optical_state.position_enu_m[index]
+                    for index in range(3)
+                ),
+                offset,
+                strict=True,
+            ):
+                self.assertAlmostEqual(actual_value, expected_value, places=12)
+            self.assertEqual(
+                actual.optical_state.rotation_enu_from_body,
+                nominal_camera.optical_state.rotation_enu_from_body,
+            )
+        nominal_delta = tuple(
+            nominal_cameras[model.CameraRole.AUXILIARY].optical_state.position_enu_m[index]
+            - nominal_cameras[model.CameraRole.MAIN].optical_state.position_enu_m[index]
+            for index in range(3)
+        )
+        perturbed_delta = tuple(
+            perturbed_cameras[model.CameraRole.AUXILIARY].optical_state.position_enu_m[index]
+            - perturbed_cameras[model.CameraRole.MAIN].optical_state.position_enu_m[index]
+            for index in range(3)
+        )
+        for actual_value, expected_value in zip(perturbed_delta, nominal_delta, strict=True):
+            self.assertAlmostEqual(actual_value, expected_value, places=12)
+
+    def test_authoring_null_camera_position_offset_means_nominal_pose(self) -> None:
+        document = demo_authoring(stations=1, duration_s=1)
+        document["camera_position_offset_enu_m"] = None
+        nominal = compile_authoring(demo_authoring(stations=1, duration_s=1))
+        parsed = compile_authoring(document)
+        self.assertEqual(parsed.perturbations.camera_pose, nominal.perturbations.camera_pose)
 
     def test_json_round_trip_replays_same_logical_and_online_stream(self) -> None:
         base = demo_spec(station_count=1, fps=2)

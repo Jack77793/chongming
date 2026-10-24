@@ -1,0 +1,28 @@
+{
+  "format": "scenario-authoring-v2",
+  "scenario_id": "osm-landscape-synthetic-review",
+  "duration_s": 1,
+  "fps": 30,
+  "stations": [
+    {
+      "id": "aerial",
+      "position_enu_m": [
+        0,
+        -220,
+        260
+      ],
+      "main_yaw_deg": 0,
+      "main_elevation_deg": -50
+    }
+  ],
+  "targets": [],
+  "world_objects": [],
+  "vegetation": [],
+  "wind": null,
+  "osm": {
+    "asset": {
+      "uri": "assets/osm_landscape_demo.json",
+      "sha256": "390ba8b28c9e9d89e3e55a3518f06017152dc9b042c4a6424e019e55788a177d"
+    }
+  }
+}
