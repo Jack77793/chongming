@@ -5,8 +5,18 @@
   "duration_s": 30,
   "fps": 30,
   "stations": [
-    {"id": "west", "position_enu_m": [-20, -40, 4], "main_yaw_deg": 11.31, "main_elevation_deg": 10},
-    {"id": "east", "position_enu_m": [20, -40, 4], "main_yaw_deg": -11.31, "main_elevation_deg": 10}
+    {
+      "id": "west",
+      "position_enu_m": [-20, -40, 4],
+      "main_yaw_deg": 11.31,
+      "main_elevation_deg": 10
+    },
+    {
+      "id": "east",
+      "position_enu_m": [20, -40, 4],
+      "main_yaw_deg": -11.31,
+      "main_elevation_deg": 10
+    }
   ],
   "world_objects": [],
   "search": {
@@ -17,10 +27,11 @@
   "targets": [
     {
       "id": "moving-sphere",
-      "geometry": {"type": "sphere", "radius_m": 1},
+      "geometry": { "type": "sphere", "radius_m": 1 },
       "motion": {
         "type": "constant_velocity",
-        "position_enu_m": [-15, 62, 20], "velocity_enu_mps": [1, 0, 0]
+        "position_enu_m": [-15, 62, 20],
+        "velocity_enu_mps": [1, 0, 0]
       }
     }
   ]
