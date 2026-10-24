@@ -20,9 +20,9 @@
 
 这个项目在生成式人工智能的帮助下开发，详见下表。开发者对生成式人工智能产生的代码和其影响负责。
 
-| AI Tool | Provider | Build-time use | Runtime use | Browser-based AI |
-|---|---|---|---|---|
-| **ChatGPT (Astra/Sol)** | OpenAI | Yes — used via the Codex/Pi coding agent to implement features, write documentation, and fix bugs. | No | No |
+| AI Tool                 | Provider | Build-time use                                                                                     | Runtime use | Browser-based AI |
+| ----------------------- | -------- | -------------------------------------------------------------------------------------------------- | ----------- | ---------------- |
+| **ChatGPT (Astra/Sol)** | OpenAI   | Yes — used via the Codex/Pi coding agent to implement features, write documentation, and fix bugs. | No          | No               |
 
 **Runtime use 承诺**：没有任何生成式人工智能，以及任何形式的神经网络，会在项目运行时被使用。
 
@@ -65,6 +65,7 @@
 详见 LoRA 技术说明。
 
 ### 元数据获取
+
 空间坐标元数据在端侧设备安装时，使用RTK GPS手动测量得到。同时边缘设备安装一台1/4英寸25mm辅助摄像机，以人工地物作为参照，使用光学手段测量偏移，以2arcmin以内的精度计算主摄像机指向。
 
 ### 空间投影

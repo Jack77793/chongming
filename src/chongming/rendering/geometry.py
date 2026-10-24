@@ -46,9 +46,7 @@ def optical_rays(
     )
     yd = (rows.ravel() - intrinsics.principal_y_px) / intrinsics.focal_y_px
     xd = (
-        columns.ravel()
-        - intrinsics.principal_x_px
-        - intrinsics.skew_px * yd
+        columns.ravel() - intrinsics.principal_x_px - intrinsics.skew_px * yd
     ) / intrinsics.focal_x_px
     x, y = xd.copy(), yd.copy()
     if distortion.model is SceneDistortionModel.BROWN_CONRADY:
@@ -199,5 +197,8 @@ def contains_point(origin: Vec3M, pose: KinematicState, geometry: GeometrySpec) 
     if isinstance(geometry, BoxGeometry):
         return bool(np.all(np.abs(point) < geometry.half_extents_body_m))
     if isinstance(geometry, CylinderGeometry):
-        return bool(point[0] ** 2 + point[1] ** 2 < geometry.radius_m**2 and 0.0 < point[2] < geometry.height_m)
+        return bool(
+            point[0] ** 2 + point[1] ** 2 < geometry.radius_m**2
+            and 0.0 < point[2] < geometry.height_m
+        )
     return False

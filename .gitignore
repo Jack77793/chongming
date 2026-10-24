@@ -19,6 +19,11 @@ dist/
 .coverage
 htmlcov/
 
+# Nix build links and Godot editor cache
+/result
+/result-*
+.godot/
+
 # Runtime output
 logs/
 *.log

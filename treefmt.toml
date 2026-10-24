@@ -1,0 +1,40 @@
+tree-root-file = "flake.nix"
+
+# Do not traverse generated environments, caches, or experiment outputs.
+excludes = [
+  ".git/**",
+  ".venv/**",
+  "venv/**",
+  "env/**",
+  "**/__pycache__/**",
+  "**/.godot/**",
+  ".mypy_cache/**",
+  ".pytest_cache/**",
+  ".ruff_cache/**",
+  ".codex-cache/**",
+  "build/**",
+  "dist/**",
+  "logs/**",
+  "tmp/**",
+  "temp/**",
+  "output/**",
+  "results/**",
+  "result",
+  "result-*/**",
+]
+
+[formatter.nix]
+command = "nixfmt"
+includes = ["*.nix"]
+
+[formatter.python]
+command = "ruff"
+options = ["format"]
+includes = ["*.py"]
+
+[formatter.prettier]
+command = "prettier"
+options = ["--write"]
+includes = ["*.json", "*.html", "*.js", "*.mjs", "*.cjs", "*.css", "*.md", "*.markdown"]
+# Formatting these files would invalidate asset digests or rewrite generated locks.
+excludes = ["scenarios/assets/**", "**/package-lock.json", "**/npm-shrinkwrap.json"]

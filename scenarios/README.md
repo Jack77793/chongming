@@ -4,6 +4,10 @@ JSON 描述每次重新生成的世界、相机与目标；它不是运行时 `S
 
 ## 运行
 
+使用 Nix 时，在仓库根目录执行 `nix develop` 后跳过下面的 `uv sync`，其余 `uv run` 命令保持不变；也可直接用 `nix run .#center -- ...`、`.#scene` 或 `.#preview`。具体版本、图形要求和 Linux 软件渲染测试见 [Nix 开发环境](../docs/Nix开发环境.md)。
+
+非 Nix 路线：
+
 ```sh
 uv sync
 uv run chongming-center --scenario scenarios/center_clean.json --check
@@ -18,24 +22,24 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 
 格式为 `scenario-authoring-v2`，坐标是 ENU 东/北/上、米，时间是秒。不支持格式兼容。
 
-| 字段 | 用途 |
-| --- | --- |
-| `scenario_id / random_seed / duration_s / fps` | 标识、固定种子 42（可省略，其余值拒绝）、有限时长、1–60 Hz 实验采样；默认 24 秒、30 Hz |
-| `stations[]` | 1–4 站，各有唯一 `id`、`position_enu_m`；可选 `main_yaw_deg`（0 向北、正向东）、`main_elevation_deg`、`auxiliary_yaw_deg`；辅助始终水平 |
-| `stations[].fps / start_s` | 每站独立主辅采样率与首个曝光起点，默认继承全局 fps、从 0 开始 |
-| `targets[]` | 任意数量，空数组表示无目标；每个目标有唯一 ID、geometry 与 motion |
-| `geometry` | sphere + radius_m，box + half_extents_m，或 aircraft；目标和地物共用 |
-| `motion` | constant_velocity + position_enu_m/velocity_enu_mps；或 orbit + center_enu_m/radius_m/period_s，可选 phase_rad/vertical_amplitude_m，支持多周期 |
-| `world_objects[]` | 覆盖内置地物，`[]` 清空建筑，始终保留每站 A4 标志物；每项含 id、position_enu_m、geometry，可选 display_name、appearance、occludes_sight_lines |
-| `vegetation[]` | 可省略以使用演示林地，或显式设 `[]` 清空；树含 `id`、`position_enu_m`、`height_m`、`crown_radius_m`，可选 `sway_amplitude_m` / `sway_frequency_hz` |
-| `wind` | 可省略使用演示风，设为 `null` 关闭，或配置平均 ENU 风速和可选湍流标准差；风和摆动仅由实验时间/固定种子决定 |
-| `environment` | 可选摄影环境：太阳方向/照度、天空色、大气透视、太阳角直径与光学退化，见下文；省略或 `null` 保留基础照明和纯色天空 |
-| `camera_jitter` | 可选物理旋转抖动：角幅度、等效像素幅度、基频及相机 roles；省略或 `null` 关闭，见下文 |
-| `clouds[]` | 0–2 层程序云；每层配置正海拔、0–1 光学密度和 ENU 漂移速度，运动只依赖实验时间 |
-| `rendering` | 可选程序地表、SSAO、轻量边缘 AA、屏幕空间光束和植被 LOD 距离，见下文 |
-| `terrain` | flat 或 heightfield + origin_enu_m/spacing_m；内嵌 heights_m 或外部 asset 二选一，高度行从南到北、每行从西到东，网格外为平面 |
-| `search` | min_enu_m、max_enu_m、step_enu_m 三个向量，控制中心搜索盒；范围外目标仍可发射线 |
-| `appearance` | 可选 linear_rgb 三个 0–1 数和 diffuse_reflectance；只影响外观 |
+| 字段                                           | 用途                                                                                                                                               |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scenario_id / random_seed / duration_s / fps` | 标识、固定种子 42（可省略，其余值拒绝）、有限时长、1–60 Hz 实验采样；默认 24 秒、30 Hz                                                             |
+| `stations[]`                                   | 1–4 站，各有唯一 `id`、`position_enu_m`；可选 `main_yaw_deg`（0 向北、正向东）、`main_elevation_deg`、`auxiliary_yaw_deg`；辅助始终水平            |
+| `stations[].fps / start_s`                     | 每站独立主辅采样率与首个曝光起点，默认继承全局 fps、从 0 开始                                                                                      |
+| `targets[]`                                    | 任意数量，空数组表示无目标；每个目标有唯一 ID、geometry 与 motion                                                                                  |
+| `geometry`                                     | sphere + radius_m，box + half_extents_m，或 aircraft；目标和地物共用                                                                               |
+| `motion`                                       | constant_velocity + position_enu_m/velocity_enu_mps；或 orbit + center_enu_m/radius_m/period_s，可选 phase_rad/vertical_amplitude_m，支持多周期    |
+| `world_objects[]`                              | 覆盖内置地物，`[]` 清空建筑，始终保留每站 A4 标志物；每项含 id、position_enu_m、geometry，可选 display_name、appearance、occludes_sight_lines      |
+| `vegetation[]`                                 | 可省略以使用演示林地，或显式设 `[]` 清空；树含 `id`、`position_enu_m`、`height_m`、`crown_radius_m`，可选 `sway_amplitude_m` / `sway_frequency_hz` |
+| `wind`                                         | 可省略使用演示风，设为 `null` 关闭，或配置平均 ENU 风速和可选湍流标准差；风和摆动仅由实验时间/固定种子决定                                         |
+| `environment`                                  | 可选摄影环境：太阳方向/照度、天空色、大气透视、太阳角直径与光学退化，见下文；省略或 `null` 保留基础照明和纯色天空                                  |
+| `camera_jitter`                                | 可选物理旋转抖动：角幅度、等效像素幅度、基频及相机 roles；省略或 `null` 关闭，见下文                                                               |
+| `clouds[]`                                     | 0–2 层程序云；每层配置正海拔、0–1 光学密度和 ENU 漂移速度，运动只依赖实验时间                                                                      |
+| `rendering`                                    | 可选程序地表、SSAO、轻量边缘 AA、屏幕空间光束和植被 LOD 距离，见下文                                                                               |
+| `terrain`                                      | flat 或 heightfield + origin_enu_m/spacing_m；内嵌 heights_m 或外部 asset 二选一，高度行从南到北、每行从西到东，网格外为平面                       |
+| `search`                                       | min_enu_m、max_enu_m、step_enu_m 三个向量，控制中心搜索盒；范围外目标仍可发射线                                                                    |
+| `appearance`                                   | 可选 linear_rgb 三个 0–1 数和 diffuse_reflectance；只影响外观                                                                                      |
 
 未写 `world_objects` 时保留内置建筑、球形地物和每站标志物；相机朝向未指定时采用演示朝向。主相机对角线 FOV 60°，辅助相机水平 FOV 2.6°、俯仰角 0，朝向 10 m 外自己的横向 A4 棋盘；标志物 ID 为 `<station-id>-a4`，角点与站配置绑定。仅在主视场内且中心视线未被地形、地物或其他飞行器挡住时发包。校准为理想有效状态，覆盖全部配置时长。
 
@@ -102,10 +106,21 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 ```json
 {
   "vegetation": [
-    {"id": "hedge", "type": "shrub", "position_enu_m": [4, 30, 0],
-     "height_m": 2.2, "radius_m": 2.8},
-    {"id": "meadow", "type": "grass", "position_enu_m": [0, 25, 0],
-     "size_m": [16, 9], "blade_height_m": 0.55, "density_per_m2": 13}
+    {
+      "id": "hedge",
+      "type": "shrub",
+      "position_enu_m": [4, 30, 0],
+      "height_m": 2.2,
+      "radius_m": 2.8
+    },
+    {
+      "id": "meadow",
+      "type": "grass",
+      "position_enu_m": [0, 25, 0],
+      "size_m": [16, 9],
+      "blade_height_m": 0.55,
+      "density_per_m2": 13
+    }
   ]
 }
 ```

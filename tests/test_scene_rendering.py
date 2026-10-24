@@ -11,7 +11,9 @@ import shutil
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -105,8 +107,11 @@ class SceneConfigurationTests(unittest.TestCase):
             "roles": ["main"],
         }
         document["clouds"] = [
-            {"layer_altitude_m": 1800, "optical_density": 0.5,
-             "drift_velocity_enu_mps": [1.5, 0.25, 0]},
+            {
+                "layer_altitude_m": 1800,
+                "optical_density": 0.5,
+                "drift_velocity_enu_mps": [1.5, 0.25, 0],
+            },
         ]
         document["rendering"] = {
             "terrain_detail_strength": 0.75,
@@ -118,7 +123,9 @@ class SceneConfigurationTests(unittest.TestCase):
         }
         spec = compile_authoring(document)
         illumination = spec.scene_definition.illumination
-        self.assertAlmostEqual(sum(value * value for value in illumination.sun_direction_enu_unit), 1.0)
+        self.assertAlmostEqual(
+            sum(value * value for value in illumination.sun_direction_enu_unit), 1.0
+        )
         self.assertEqual(illumination.atmospheric_visibility_m, 8000)
         self.assertEqual(len(spec.perturbations.camera_jitter), len(spec.station_configs))
         self.assertEqual(spec.perturbations.clouds[0].drift_velocity_enu_mps, (1.5, 0.25, 0.0))
@@ -129,10 +136,17 @@ class SceneConfigurationTests(unittest.TestCase):
         replay = logic.sample(s.SimulationTime("demo-clock", 123_000_000, 999))
         later = logic.sample(s.SimulationTime("demo-clock", 173_000_000, 5))
         main = next(camera for camera in first.cameras if camera.camera_role is m.CameraRole.MAIN)
-        replay_main = next(camera for camera in replay.cameras if camera.camera_role is m.CameraRole.MAIN)
-        later_main = next(camera for camera in later.cameras if camera.camera_role is m.CameraRole.MAIN)
+        replay_main = next(
+            camera for camera in replay.cameras if camera.camera_role is m.CameraRole.MAIN
+        )
+        later_main = next(
+            camera for camera in later.cameras if camera.camera_role is m.CameraRole.MAIN
+        )
         self.assertEqual(main.optical_state, replay_main.optical_state)
-        self.assertNotEqual(main.optical_state.rotation_enu_from_body, later_main.optical_state.rotation_enu_from_body)
+        self.assertNotEqual(
+            main.optical_state.rotation_enu_from_body,
+            later_main.optical_state.rotation_enu_from_body,
+        )
         np.testing.assert_allclose(
             np.asarray(main.optical_state.rotation_enu_from_body).T
             @ np.asarray(main.optical_state.rotation_enu_from_body),
@@ -151,8 +165,9 @@ class SceneConfigurationTests(unittest.TestCase):
             main.optical_state.angular_velocity_body_radps,
             atol=1e-8,
         )
-        nominal = snapshot(replace(spec, perturbations=replace(spec.perturbations, camera_jitter=())),
-                           123_000_000)
+        nominal = snapshot(
+            replace(spec, perturbations=replace(spec.perturbations, camera_jitter=())), 123_000_000
+        )
         self.assertEqual(first.cameras[1].optical_state, nominal.cameras[1].optical_state)
         request = _request(first, main, [])
         self.assertEqual(request["atmosphericVisibility"], 8000)
@@ -174,8 +189,7 @@ class SceneConfigurationTests(unittest.TestCase):
             {"clouds": [{"layer_altitude_m": 1000, "optical_density": 2}]},
             {"clouds": [{"layer_altitude_m": 1000, "optical_density": 0.5}] * 3},
             {"rendering": {"fxaa_enabled": 1}},
-            {"rendering": {"vegetation_lod_near_m": 500,
-                            "vegetation_lod_far_m": 100}},
+            {"rendering": {"vegetation_lod_near_m": 500, "vegetation_lod_far_m": 100}},
         )
         for update in invalid:
             document = demo_authoring()
@@ -203,8 +217,12 @@ class SceneConfigurationTests(unittest.TestCase):
         self.assertEqual(len(spec.scene_definition.vegetation), 2)
         self.assertIsInstance(spec.scene_definition.vegetation[0].geometry, s.CylinderGeometry)
         self.assertIsInstance(spec.scene_definition.vegetation[1].geometry, s.CylinderGeometry)
-        self.assertEqual(spec.scene_definition.vegetation[0].visual.part, s.TreePart.TRUNK)
-        self.assertEqual(spec.scene_definition.vegetation[1].visual.part, s.TreePart.CANOPY)
+        trunk_visual = spec.scene_definition.vegetation[0].visual
+        canopy_visual = spec.scene_definition.vegetation[1].visual
+        assert isinstance(trunk_visual, s.TreeVisualSpec)
+        assert isinstance(canopy_visual, s.TreeVisualSpec)
+        self.assertEqual(trunk_visual.part, s.TreePart.TRUNK)
+        self.assertEqual(canopy_visual.part, s.TreePart.CANOPY)
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
         logic.initialize(spec.scene_definition, spec.perturbations, spec.random_seed)
         first = logic.sample(s.SimulationTime("demo-clock", 1_000_000_000, 30))
@@ -217,10 +235,9 @@ class SceneConfigurationTests(unittest.TestCase):
             later.vegetation[1].base_pose.rotation_enu_from_body,
         )
         canopy = first.vegetation[1]
+        assert isinstance(canopy.visual, s.TreeVisualSpec)
         x, y, z = canopy.base_pose.position_enu_m
-        hit = VisibilityModule._segment_hit(
-            canopy, (x, y - 5, z + 1), (x, y + 5, z + 1)
-        )
+        hit = VisibilityModule._segment_hit(canopy, (x, y - 5, z + 1), (x, y + 5, z + 1))
         self.assertIsNotNone(hit)
         assert hit is not None
         self.assertEqual(hit[1].blocker_object_id, canopy.vegetation_id)
@@ -228,23 +245,35 @@ class SceneConfigurationTests(unittest.TestCase):
         from chongming.rendering.godot import _entities
 
         tree_payload = [
-            entity for entity in _entities(first)
-            if entity["object_id"] == "oak-01/canopy"
+            entity for entity in _entities(first) if entity["object_id"] == "oak-01/canopy"
         ]
-        self.assertEqual(tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m))
+        self.assertEqual(
+            tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m)
+        )
         self.assertEqual(tree_payload[0]["visual"]["kind"], "tree_canopy")
-        self.assertEqual(tree_payload[0]["visual"]["height"], first.vegetation[1].visual.height_m)
-        self.assertEqual(tree_payload[0]["visual"]["radius"], first.vegetation[1].visual.radius_m)
+        self.assertEqual(tree_payload[0]["visual"]["height"], canopy.visual.height_m)
+        self.assertEqual(tree_payload[0]["visual"]["radius"], canopy.visual.radius_m)
         self.assertIsNone(tree_payload[0]["vertices"])
         self.assertIsNone(tree_payload[0]["triangles"])
 
     def test_shrub_and_grass_compile_to_semantic_visuals_and_simple_proxies(self) -> None:
         document = demo_authoring()
         document["vegetation"] = [
-            {"id": "shrub-01", "type": "shrub", "position_enu_m": [2, 20, 0],
-             "height_m": 2.0, "radius_m": 2.5},
-            {"id": "grass-01", "type": "grass", "position_enu_m": [-3, 16, 0],
-             "size_m": [12, 8], "blade_height_m": 0.5, "density_per_m2": 14},
+            {
+                "id": "shrub-01",
+                "type": "shrub",
+                "position_enu_m": [2, 20, 0],
+                "height_m": 2.0,
+                "radius_m": 2.5,
+            },
+            {
+                "id": "grass-01",
+                "type": "grass",
+                "position_enu_m": [-3, 16, 0],
+                "size_m": [12, 8],
+                "blade_height_m": 0.5,
+                "density_per_m2": 14,
+            },
         ]
         spec = compile_authoring(document)
         shrub, grass = spec.scene_definition.vegetation
@@ -255,8 +284,11 @@ class SceneConfigurationTests(unittest.TestCase):
         scene = snapshot(spec)
         from chongming.rendering.godot import _entities
 
-        payloads = {item["object_id"]: item["visual"] for item in _entities(scene)
-                    if item["visual"] is not None}
+        payloads = {
+            item["object_id"]: item["visual"]
+            for item in _entities(scene)
+            if item["visual"] is not None
+        }
         self.assertEqual(payloads["shrub-01/shrub"]["kind"], "shrub")
         self.assertEqual(payloads["grass-01/grass"]["kind"], "grass")
         self.assertEqual(payloads["grass-01/grass"]["lod_near"], 140)
@@ -264,12 +296,17 @@ class SceneConfigurationTests(unittest.TestCase):
     def test_tree_and_wind_authoring_rejects_invalid_dimensions_and_ids(self) -> None:
         for update in (
             {"vegetation": "tree"},
-            {"vegetation": [{"id": "tree", "position_enu_m": [0, 0, 0],
-                             "height_m": -1, "crown_radius_m": 1}]},
-            {"vegetation": [{"id": "tree", "position_enu_m": [0, 0, 0],
-                             "height_m": 4, "crown_radius_m": 1},
-                            {"id": "tree", "position_enu_m": [1, 0, 0],
-                             "height_m": 4, "crown_radius_m": 1}]},
+            {
+                "vegetation": [
+                    {"id": "tree", "position_enu_m": [0, 0, 0], "height_m": -1, "crown_radius_m": 1}
+                ]
+            },
+            {
+                "vegetation": [
+                    {"id": "tree", "position_enu_m": [0, 0, 0], "height_m": 4, "crown_radius_m": 1},
+                    {"id": "tree", "position_enu_m": [1, 0, 0], "height_m": 4, "crown_radius_m": 1},
+                ]
+            },
             {"wind": {"turbulent_velocity_std_enu_mps": [-1, 0, 0]}},
         ):
             document = demo_authoring()
@@ -363,17 +400,28 @@ class SurfaceRenderingTests(unittest.TestCase):
             scene.cameras[0],
             optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, math.atan(0.25))),
             actual_intrinsics=replace(
-                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
-                focal_x_px=300.0, focal_y_px=300.0, principal_x_px=150.0, principal_y_px=65.0,
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=256,
+                image_height_px=192,
+                focal_x_px=300.0,
+                focal_y_px=300.0,
+                principal_x_px=150.0,
+                principal_y_px=65.0,
             ),
         )
-        illumination = s.IlluminationSpec(tuple(direction), 85000, (0.42, 0.63, 0.86),
-                                        None, 2.0, 0.0)
+        illumination = s.IlluminationSpec(
+            tuple(direction), 85000, (0.42, 0.63, 0.86), None, 2.0, 0.0
+        )
         scene = replace(scene, cameras=(camera,), flying_objects=(), illumination=illumination)
         blocker = s.WorldObjectSpec(
-            s.WorldObjectId("solar-blocker"), "solar-blocker", s.WorldObjectKind.OBSTACLE,
-            "test", state(tuple(direction * 40 + (0, 0, 3))), s.BoxGeometry((2, 2, 2)),
-            s.SurfaceAppearance((0.01, 0.01, 0.01), 1.0), True,
+            s.WorldObjectId("solar-blocker"),
+            "solar-blocker",
+            s.WorldObjectKind.OBSTACLE,
+            "test",
+            state(tuple(direction * 40 + (0, 0, 3))),
+            s.BoxGeometry((2, 2, 2)),
+            s.SurfaceAppearance((0.01, 0.01, 0.01), 1.0),
+            True,
         )
         renderer = GodotRenderer()
         self.addCleanup(renderer.close)
@@ -388,13 +436,13 @@ class SurfaceRenderingTests(unittest.TestCase):
         enhanced = pixels(replace(scene, illumination=replace(illumination, glare_strength=0.5)))
         occluded = replace(scene, world_objects=(blocker,))
         hidden = pixels(occluded)
-        hidden_optics = pixels(replace(occluded, illumination=replace(illumination, glare_strength=0.5)))
-        beams = pixels(replace(
-            scene, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)
-        ))
-        hidden_beams = pixels(replace(
-            occluded, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)
-        ))
+        hidden_optics = pixels(
+            replace(occluded, illumination=replace(illumination, glare_strength=0.5))
+        )
+        beams = pixels(replace(scene, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)))
+        hidden_beams = pixels(
+            replace(occluded, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8))
+        )
         self.assertGreater(np.count_nonzero(np.min(solar, axis=2) > 245), 20)
         self.assertEqual(np.count_nonzero(np.min(hidden, axis=2) > 245), 0)
         # An off-centre principal point must still align solar image metering.
@@ -417,21 +465,37 @@ class SurfaceRenderingTests(unittest.TestCase):
     def test_aerial_perspective_attenuates_distant_objects_more_than_near_objects(self) -> None:
         scene = snapshot(test_scene(s.SphereGeometry(0.6), (-1.0, 10.0, 3.0)))
         camera = replace(
-            scene.cameras[0], optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, 0.0)),
+            scene.cameras[0],
+            optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, 0.0)),
             actual_intrinsics=replace(
-                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
-                focal_x_px=300.0, focal_y_px=300.0, principal_x_px=127.5, principal_y_px=95.5,
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=256,
+                image_height_px=192,
+                focal_x_px=300.0,
+                focal_y_px=300.0,
+                principal_x_px=127.5,
+                principal_y_px=95.5,
             ),
         )
-        distant = replace(scene.flying_objects[0], truth_object_id=s.TruthObjectId("distant"),
-                          geometry=s.SphereGeometry(6.0), state=state((10.0, 100.0, 3.0)))
-        scene = replace(scene, cameras=(camera,), flying_objects=scene.flying_objects + (distant,),
-                        illumination=s.IlluminationSpec((0.0, -0.8, 0.6), 85000, (0.42, 0.63, 0.86)))
+        distant = replace(
+            scene.flying_objects[0],
+            truth_object_id=s.TruthObjectId("distant"),
+            geometry=s.SphereGeometry(6.0),
+            state=state((10.0, 100.0, 3.0)),
+        )
+        scene = replace(
+            scene,
+            cameras=(camera,),
+            flying_objects=scene.flying_objects + (distant,),
+            illumination=s.IlluminationSpec((0.0, -0.8, 0.6), 85000, (0.42, 0.63, 0.86)),
+        )
         renderer = GodotRenderer()
         self.addCleanup(renderer.close)
         raw, _ = renderer.render(scene, camera)
         baseline = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
-        hazed = replace(scene, illumination=replace(scene.illumination, atmospheric_visibility_m=500))
+        hazed = replace(
+            scene, illumination=replace(scene.illumination, atmospheric_visibility_m=500)
+        )
         raw, _ = renderer.render(hazed, camera)
         enhanced = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
         near_lift = enhanced[92:99, 94:101].mean() - baseline[92:99, 94:101].mean()
@@ -447,8 +511,13 @@ class SurfaceRenderingTests(unittest.TestCase):
             scene.cameras[0],
             optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, math.radians(32))),
             actual_intrinsics=replace(
-                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
-                focal_x_px=230.0, focal_y_px=230.0, principal_x_px=127.5, principal_y_px=95.5,
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=256,
+                image_height_px=192,
+                focal_x_px=230.0,
+                focal_y_px=230.0,
+                principal_x_px=127.5,
+                principal_y_px=95.5,
             ),
         )
         cloud = s.CloudPerturbation(1600.0, 0.82, (12.0, 4.0, 0.0))
@@ -456,8 +525,9 @@ class SurfaceRenderingTests(unittest.TestCase):
             scene,
             cameras=(camera,),
             flying_objects=(),
-            illumination=s.IlluminationSpec((0.3, 0.8, 0.5), 80000, (0.42, 0.63, 0.86),
-                                            None, 0.53, 0.0),
+            illumination=s.IlluminationSpec(
+                (0.3, 0.8, 0.5), 80000, (0.42, 0.63, 0.86), None, 0.53, 0.0
+            ),
             clouds=(cloud,),
             sample_time=s.SimulationTime("cloud-test", 2_000_000_000, 1),
         )
@@ -470,9 +540,9 @@ class SurfaceRenderingTests(unittest.TestCase):
 
         first = render(scene)
         replay = render(scene)
-        later = render(replace(
-            scene, sample_time=s.SimulationTime("cloud-test", 12_000_000_000, 999)
-        ))
+        later = render(
+            replace(scene, sample_time=s.SimulationTime("cloud-test", 12_000_000_000, 999))
+        )
         clear = render(replace(scene, clouds=()))
         self.assertLess(float(np.abs(first.astype(int) - replay.astype(int)).mean()), 0.5)
         self.assertGreater(float(np.abs(first.astype(int) - later.astype(int)).mean()), 1.0)
@@ -496,13 +566,17 @@ class SurfaceRenderingTests(unittest.TestCase):
                 np.array(camera.optical_state.rotation_enu_from_body) @ np.array((x, y, 10.0))
                 + camera.optical_state.position_enu_m
             )
-            target = replace(scene.flying_objects[0], state=state(point),
-                             appearance=s.SurfaceAppearance((0.4, 0.01, 0.01), 1.0))
+            target = replace(
+                scene.flying_objects[0],
+                state=state(point),
+                appearance=s.SurfaceAppearance((0.4, 0.01, 0.01), 1.0),
+            )
             current = replace(scene, cameras=(camera,), flying_objects=(target,))
             pixels, _ = render_gpu(current, camera)
             ys, xs = np.nonzero(pixels[:, :, 0].astype(int) > pixels[:, :, 1].astype(int) + 40)
             self.assertGreater(len(xs), 10)
             expected = CameraProjectionModule().project(camera, point).centroid_px
+            assert expected is not None
             np.testing.assert_allclose((xs.mean(), ys.mean()), expected, atol=0.8)
 
     def test_renderer_survives_parent_terminal_signals_and_closes_cleanly(self) -> None:
@@ -642,8 +716,8 @@ class SurfaceRenderingTests(unittest.TestCase):
         )
         rays = optical_rays(camera.actual_intrinsics, camera.actual_distortion)
         for u, v in ((0, 0), (63, 47), (32, 24)):
-            ray = tuple(float(x) for x in rays[v * 64 + u])
-            projection = CameraProjectionModule().project(camera, ray)
+            x, y, z = (float(value) for value in rays[v * 64 + u])
+            projection = CameraProjectionModule().project(camera, (x, y, z))
             assert projection.centroid_px is not None
             np.testing.assert_allclose(projection.centroid_px, (u, v), atol=1e-6)
 
@@ -700,7 +774,9 @@ class SurfaceRenderingTests(unittest.TestCase):
                 dtype=np.uint8,
             ).reshape(expected.shape),
         )
-        self.assertGreater(truth.frame_truth[0].targets[0].projected_width_px, 10)
+        projected_width = truth.frame_truth[0].targets[0].projected_width_px
+        assert projected_width is not None
+        self.assertGreater(projected_width, 10)
         artifacts = replace(imaging.sensor_artifacts, sensor_noise_std_intensity=0.02)
         noisy = replace(request, imaging_spec=replace(imaging, sensor_artifacts=artifacts))
         self.assertEqual(CameraImagingModule().render(noisy), CameraImagingModule().render(noisy))
@@ -898,7 +974,9 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(runtime.snapshot(stations[0])["snapshot"]["sequence"], 2)
             self.assertEqual(encode.call_count, 6)
 
-    def wait_snapshot(self, runtime: PreviewRuntime, predicate) -> dict:
+    def wait_snapshot(
+        self, runtime: PreviewRuntime, predicate: Callable[[dict[str, Any]], bool]
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + 5
         with runtime._condition:
             ready = runtime._condition.wait_for(
