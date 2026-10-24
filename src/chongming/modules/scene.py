@@ -192,15 +192,14 @@ def _deterministic_wind(seed: int, object_id: str, time_ns: int, mean: Vec3M, st
         values = []
         for component in range(3):
             first = (int.from_bytes(digest[component * 8 : component * 8 + 4], "big") + 0.5) / 2**32
-            second = (int.from_bytes(digest[component * 8 + 4 : component * 8 + 8], "big") + 0.5) / 2**32
+            second = (
+                int.from_bytes(digest[component * 8 + 4 : component * 8 + 8], "big") + 0.5
+            ) / 2**32
             values.append(math.sqrt(-2.0 * math.log(first)) * math.cos(2.0 * math.pi * second))
         return tuple(values)  # type: ignore[return-value]
 
     a, b = sample(index), sample(index + 1)
-    return tuple(
-        mean[i] + std[i] * (a[i] * (1.0 - blend) + b[i] * blend)
-        for i in range(3)
-    )  # type: ignore[return-value]
+    return tuple(mean[i] + std[i] * (a[i] * (1.0 - blend) + b[i] * blend) for i in range(3))  # type: ignore[return-value]
 
 
 def _scale(a: Vec3M, value: float) -> Vec3M:
@@ -242,9 +241,9 @@ def _rotation_from_small_angle(offset: Vec3M) -> Matrix3x3:
     x, y, z = _scale(offset, 1.0 / angle)
     c, s, v = math.cos(angle), math.sin(angle), 1.0 - math.cos(angle)
     return (
-        (c + x*x*v, x*y*v - z*s, x*z*v + y*s),
-        (y*x*v + z*s, c + y*y*v, y*z*v - x*s),
-        (z*x*v - y*s, z*y*v + x*s, c + z*z*v),
+        (c + x * x * v, x * y * v - z * s, x * z * v + y * s),
+        (y * x * v + z * s, c + y * y * v, y * z * v - x * s),
+        (z * x * v - y * s, z * y * v + x * s, c + z * z * v),
     )
 
 
@@ -802,8 +801,10 @@ class SceneLogicModule(ModuleShell):
                 cross_rate = _cross(rotation_vector, rate)
                 a = (1.0 - math.cos(theta)) / theta**2 if theta > 1e-5 else 0.5
                 b = (theta - math.sin(theta)) / theta**3 if theta > 1e-5 else 1.0 / 6.0
-                body_rate = _add(_sub(rate, _scale(cross_rate, a)),
-                                 _scale(_cross(rotation_vector, cross_rate), b))
+                body_rate = _add(
+                    _sub(rate, _scale(cross_rate, a)),
+                    _scale(_cross(rotation_vector, cross_rate), b),
+                )
                 state = replace(
                     state,
                     rotation_enu_from_body=_mat_mul(state.rotation_enu_from_body, jitter_rotation),
@@ -847,9 +848,7 @@ class SceneLogicModule(ModuleShell):
                     appearance=object_spec.appearance,
                 )
             )
-        vegetation_perturbations = {
-            str(item.object_id): item for item in perturbations.vegetation
-        }
+        vegetation_perturbations = {str(item.object_id): item for item in perturbations.vegetation}
         sampled_vegetation = []
         wind = perturbations.wind
         for item in scene.vegetation:
@@ -886,8 +885,8 @@ class SceneLogicModule(ModuleShell):
             # Mean wind sets the bend direction; two deterministic harmonics
             # create a restrained gust-like motion without wall-clock/RNG use.
             scale = min(1.5, wind_speed / 4.0)
-            displacement = amplitude * scale * (
-                math.sin(angle) + 0.18 * math.sin(2.37 * angle + phase * 0.61)
+            displacement = (
+                amplitude * scale * (math.sin(angle) + 0.18 * math.sin(2.37 * angle + phase * 0.61))
             )
             lean = amplitude * min(wind_speed / 12.0, 0.3)
             bend_angle = max(-0.22, min(0.22, (displacement + lean) / 8.0))
@@ -898,15 +897,21 @@ class SceneLogicModule(ModuleShell):
             one_minus_cosine = 1.0 - cosine
             ax, ay, az = axis
             rotation: Matrix3x3 = (
-                (cosine + ax * ax * one_minus_cosine,
-                 ax * ay * one_minus_cosine - az * sine,
-                 ax * az * one_minus_cosine + ay * sine),
-                (ay * ax * one_minus_cosine + az * sine,
-                 cosine + ay * ay * one_minus_cosine,
-                 ay * az * one_minus_cosine - ax * sine),
-                (az * ax * one_minus_cosine - ay * sine,
-                 az * ay * one_minus_cosine + ax * sine,
-                 cosine + az * az * one_minus_cosine),
+                (
+                    cosine + ax * ax * one_minus_cosine,
+                    ax * ay * one_minus_cosine - az * sine,
+                    ax * az * one_minus_cosine + ay * sine,
+                ),
+                (
+                    ay * ax * one_minus_cosine + az * sine,
+                    cosine + ay * ay * one_minus_cosine,
+                    ay * az * one_minus_cosine - ax * sine,
+                ),
+                (
+                    az * ax * one_minus_cosine - ay * sine,
+                    az * ay * one_minus_cosine + ax * sine,
+                    cosine + az * az * one_minus_cosine,
+                ),
             )
             old_pose = item.base_pose
             sampled_vegetation.append(

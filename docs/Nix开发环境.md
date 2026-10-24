@@ -12,13 +12,13 @@ Flake 同时提供可编辑开发环境和固定源码的运行包。Python 依�
 
 这表示 Nix 输出已定义，不代表三种平台都已完成实际运行和人工视觉验收。三个系统均完成求值检查；`aarch64-linux` 完成构建、可编辑导入、打包命令运行，以及 Xvfb/Mesa 下的 85 项自动化测试。2026-10-24 另在 `aarch64-darwin` 原生 macOS 图形会话完成开发环境、打包命令和 85 项自动化测试，详见下方验证记录；`x86_64-linux` 仍需原生机器验证。
 
-| 组件 | 版本来源 |
-| --- | --- |
-| Python 3.12 | `flake.lock` 固定的 Nixpkgs；满足项目 `>=3.12,<3.15` 和工具的 Python 3.12 目标 |
-| NumPy、Pillow、Ruff、mypy 及间接 Python 依赖 | 原有 `uv.lock` 的精确版本与文件哈希 |
-| Godot | Nixpkgs 中的 **4.7.2-stable**，另有求值断言防止静默升级 |
-| uv、Git、treefmt、nixfmt、Prettier、Linux 的 Xvfb 与 Mesa | `flake.lock` 固定的 Nixpkgs |
-| Hatchling 等构建后端，以及 editable 构建需要的 editables | `flake.lock` 固定的 `pyproject-build-systems` |
+| 组件                                                      | 版本来源                                                                       |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Python 3.12                                               | `flake.lock` 固定的 Nixpkgs；满足项目 `>=3.12,<3.15` 和工具的 Python 3.12 目标 |
+| NumPy、Pillow、Ruff、mypy 及间接 Python 依赖              | 原有 `uv.lock` 的精确版本与文件哈希                                            |
+| Godot                                                     | Nixpkgs 中的 **4.7.2-stable**，另有求值断言防止静默升级                        |
+| uv、Git、treefmt、nixfmt、Prettier、Linux 的 Xvfb 与 Mesa | `flake.lock` 固定的 Nixpkgs                                                    |
+| Hatchling 等构建后端，以及 editable 构建需要的 editables  | `flake.lock` 固定的 `pyproject-build-systems`                                  |
 
 构建后端不在现有 `uv.lock` 的运行/开发依赖中，因此通过固定的构建系统输入提供。Flake 优先使用锁定 wheel，Nix 负责 Linux 动态库修补，无需系统级 pip 安装或手工设置 NumPy/Pillow 的库路径。
 
@@ -165,10 +165,10 @@ Flake checks 包含：
 
 仓库的 `treefmt.toml` 配置三种格式化器：
 
-| 文件 | 格式化器 |
-| --- | --- |
-| `*.nix` | 原有 nixfmt |
-| `*.py` | `uv.lock` 固定的 Ruff，仅执行 `ruff format`，不执行 lint 自动修复 |
+| 文件                                                                        | 格式化器                                                               |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `*.nix`                                                                     | 原有 nixfmt                                                            |
+| `*.py`                                                                      | `uv.lock` 固定的 Ruff，仅执行 `ruff format`，不执行 lint 自动修复      |
 | `*.json`、`*.html`、`*.js`、`*.mjs`、`*.cjs`、`*.css`、`*.md`、`*.markdown` | Prettier 3.9.10，使用默认格式规则，也格式化 HTML 中可识别的内嵌 JS/CSS |
 
 生成环境、缓存、构建产物和实验输出已排除；Godot 文件不在当前格式化范围内。treefmt、Prettier 均来自现有 Nixpkgs 锁定快照，接入时没有更新任何锁文件或已有工具版本。
@@ -205,15 +205,15 @@ nix develop -c python -m unittest discover -s tests -v
 
 实测环境为 Apple Silicon、macOS 26.7.1、Nix 2.34.9；Nix 提供 Python 3.12.15 和 Godot `4.7.2.stable.nixpkgs.ed1daf0bf`。使用现有锁文件，没有升级依赖。
 
-| 验证项 | 结果 |
-| --- | --- |
-| `nix flake check --all-systems --no-build` | 三平台输出全部求值通过 |
-| `nix build .#chongming .#dev-tools --no-link --print-out-paths` | 本机运行包与开发工具构建成功 |
-| `nix develop`、shell 内 `uv run` | 成功；项目导入指向工作区 `src/chongming/`，使用 Nix Python 和锁定工具 |
-| `nix fmt -- --check flake.nix`（接入 treefmt 前的入口） | 通过 |
-| `nix flake check --keep-going` | `environment`、`architecture`、`scenarios`、`lint`、`nix-format` 通过；`format`、`types` 因上述基线问题失败 |
-| `nix develop -c python -m unittest discover -s tests -v` | 85 项测试全部通过，无跳过，耗时约 31 秒；包含原生 Godot 图形与植被测试 |
-| `nix run .#center`、`.#scene`、`.#preview` | 三个入口及实际运行通过，细节如下 |
+| 验证项                                                          | 结果                                                                                                        |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `nix flake check --all-systems --no-build`                      | 三平台输出全部求值通过                                                                                      |
+| `nix build .#chongming .#dev-tools --no-link --print-out-paths` | 本机运行包与开发工具构建成功                                                                                |
+| `nix develop`、shell 内 `uv run`                                | 成功；项目导入指向工作区 `src/chongming/`，使用 Nix Python 和锁定工具                                       |
+| `nix fmt -- --check flake.nix`（接入 treefmt 前的入口）         | 通过                                                                                                        |
+| `nix flake check --keep-going`                                  | `environment`、`architecture`、`scenarios`、`lint`、`nix-format` 通过；`format`、`types` 因上述基线问题失败 |
+| `nix develop -c python -m unittest discover -s tests -v`        | 85 项测试全部通过，无跳过，耗时约 31 秒；包含原生 Godot 图形与植被测试                                      |
+| `nix run .#center`、`.#scene`、`.#preview`                      | 三个入口及实际运行通过，细节如下                                                                            |
 
 打包运行使用 `center_clean.json` 的临时副本，将时长缩短到 0.08 秒，保留两站、30 FPS 和原有目标。有限场景运行产生 3 个逻辑组、12 个相机帧和 6 条射线；启用视频时导出 12 张可解码、像素非均匀的 RGB PNG，主辅分辨率分别为 1920×1080 和 640×480。停用视频时逻辑帧和射线计数一致，没有 PNG 或绘图请求。中心工具运行到有限终点，保存输入/真值证据，全部模块正常关闭。
 

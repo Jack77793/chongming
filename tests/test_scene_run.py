@@ -86,8 +86,9 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 self.assertEqual(summary["counts"]["logical_frames"], 24)
                 manifest = json.loads((output / "manifest.json").read_text())
                 terrain = manifest["scenario"]["scenario"]["scene_definition"]["terrain"]
-                self.assertEqual(terrain["heightfield_asset_digest"] is not None,
-                                 name.endswith("_asset"))
+                self.assertEqual(
+                    terrain["heightfield_asset_digest"] is not None, name.endswith("_asset")
+                )
                 sessions = [
                     binding[key]
                     for binding in manifest["station_sessions"]
@@ -98,9 +99,15 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                     terrain = sample["logical_scene"]["terrain"]
                     terrain["heightfield_asset_uri"] = None
                     terrain["heightfield_asset_digest"] = None
-                outputs.append(normalize({
-                    "online": records(output / "online.jsonl"), "truth": truth,
-                }, sessions))
+                outputs.append(
+                    normalize(
+                        {
+                            "online": records(output / "online.jsonl"),
+                            "truth": truth,
+                        },
+                        sessions,
+                    )
+                )
             self.assertEqual(outputs[0], outputs[1])
             # A modified asset fails before output creation or source startup.
             document["terrain"]["asset"]["sha256"] = "0" * 64
