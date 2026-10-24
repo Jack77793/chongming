@@ -230,7 +230,14 @@ func _render(request: Dictionary) -> PackedByteArray:
 	var visibility_variant: Variant = request.get("atmosphericVisibility", null)
 	var sun_diameter := float(request.get("sunDiameter", 0.0))
 	var cloud_layers: Array = request.get("clouds", [])
-	_environment.background_mode = Environment.BG_SKY if visibility_variant != null or sun_diameter > 0.0 or not cloud_layers.is_empty() else Environment.BG_COLOR
+	# Draw the procedural sky whenever the sun is above the horizon, or when the
+	# request carries explicit environment features (visibility/fog, a solar
+	# disc or clouds). A below-horizon default sun with none of those keeps the
+	# flat sky colour: the atmosphere gradient is not meaningful there, and
+	# legacy night / structured views stay unchanged.
+	var sun_above_horizon := _enu(request["sun"]).y > 0.0
+	var explicit_environment := visibility_variant != null or sun_diameter > 0.0 or not cloud_layers.is_empty()
+	_environment.background_mode = Environment.BG_SKY if sun_above_horizon or explicit_environment else Environment.BG_COLOR
 	_sky_material.set_shader_parameter("sky_tint", Vector3(float(request.sky[0]), float(request.sky[1]), float(request.sky[2])))
 	_sky_material.set_shader_parameter("sun_direction", _enu(request["sun"]).normalized())
 	_sky_material.set_shader_parameter("sun_radius", deg_to_rad(sun_diameter * 0.5))
@@ -425,9 +432,14 @@ func _position_editor_overview(entities: Array) -> void:
 	var radius := 80.0
 	if count > 0:
 		focus = (minimum + maximum) * 0.5
-		focus.y = _ground.position.y + 4.0
-		radius = maxf(80.0, Vector2(maximum.x - minimum.x, maximum.z - minimum.z).length() * 0.8)
-	var distance := radius * 1.5
+		# Use roughly half the horizontal extent so a 1 km OSM sample is not a
+		# tiny cluster in the middle of the viewport; keep a usable minimum for
+		# the small synthetic scenes. Include height so an aerial station and
+		# its frustum stay in the overview instead of sitting above the frame.
+		radius = maxf(80.0, maxf(
+			Vector2(maximum.x - minimum.x, maximum.z - minimum.z).length() * 0.55,
+			(maximum.y - minimum.y) * 0.6))
+	var distance := radius * 1.4
 	_free_camera.position = focus + Vector3(distance * 0.55, distance * 0.8, distance * 0.55)
 	_free_camera.look_at(focus, Vector3.UP)
 
@@ -567,7 +579,12 @@ func _mesh(entity: Dictionary) -> Mesh:
 	for triangle in entity.triangles:
 		for vertex in triangle:
 			surface.add_vertex(_vector(entity.vertices[int(vertex)]))
-	surface.generate_normals()
+	# SurfaceTool.generate_normals() follows the opposite winding convention, so
+	# the Python-built meshes end up with inverted face normals (terrain points
+	# down, building walls inward). The flip argument negates the generated
+	# normals without touching vertex order, keeping triangle winding,
+	# front-face culling and shadow geometry unchanged.
+	surface.generate_normals(true)
 	return surface.commit()
 
 
