@@ -34,7 +34,15 @@ from urllib.parse import parse_qs, urlsplit
 from PIL import Image
 
 from chongming.contracts.model import CameraFrame
-from chongming.contracts.scene import CameraFrameTruth, ScenarioSpec, ScenarioStep
+from chongming.contracts.scene import (
+    CameraFrameTruth,
+    GrassVisualSpec,
+    ScenarioSpec,
+    ScenarioStep,
+    ShrubVisualSpec,
+    TreePart,
+    TreeVisualSpec,
+)
 from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
@@ -140,9 +148,22 @@ def _preview_metadata(step: ScenarioStep, sequence: int, loop_no: int) -> dict[s
             "rays": [asdict(item) for item in step.packets.rays],
         },
         "monitor": {
-            "terrain": asdict(scene.terrain),
-            "world_objects": [asdict(item) for item in scene.world_objects],
-            "vegetation": [asdict(item) for item in scene.vegetation],
+            "scene_counts": {
+                "world_objects": len(scene.world_objects),
+                "vegetation": len(scene.vegetation),
+                "trees": sum(
+                    1
+                    for item in scene.vegetation
+                    if isinstance(item.visual, TreeVisualSpec)
+                    and item.visual.part is TreePart.TRUNK
+                ),
+                "shrubs": sum(
+                    1 for item in scene.vegetation if isinstance(item.visual, ShrubVisualSpec)
+                ),
+                "grass_patches": sum(
+                    1 for item in scene.vegetation if isinstance(item.visual, GrassVisualSpec)
+                ),
+            },
             "cameras": [asdict(item) for item in scene.cameras],
             "flying_objects": [asdict(item) for item in scene.flying_objects],
             "visibility": [asdict(item) for item in scene.target_visibility],
@@ -191,6 +212,7 @@ class PreviewRuntime:
         self._pending_steps = 0
         self._reset_version = 0
         self._published: dict[str, Any] | None = None
+        self._published_step: ScenarioStep | None = None
         self._latest_step: ScenarioStep | None = None
         self._encoded: dict[str, dict[str, Any]] = {}
         self._encode_lock = threading.Lock()
@@ -207,6 +229,20 @@ class PreviewRuntime:
         self._skipped_step_count = 0
         self._thread = threading.Thread(
             target=self._produce, name="scene-video-producer", daemon=True
+        )
+
+    def _update_spec(self, spec: ScenarioSpec) -> None:
+        """Refresh everything derived from the compiled scenario under _condition."""
+        self.spec = spec
+        self._station_ids = tuple(
+            dict.fromkeys(str(camera.station_id) for camera in spec.scene_definition.cameras)
+        )
+        minimum_period = min(
+            (camera.exposure.frame_period_ns for camera in spec.scene_definition.cameras),
+            default=self.render_clock.period_ns,
+        )
+        self.render_every = max(
+            1, math.ceil(self.render_clock.period_ns / (minimum_period + 1))
         )
 
     def start(self) -> None:
@@ -292,7 +328,7 @@ class PreviewRuntime:
             self._edit_digest = hashlib.sha256(raw).hexdigest()
             self._authoring_document = copy.deepcopy(document)
             self._draft = copy.deepcopy(document)
-            self.spec = compiled
+            self._update_spec(compiled)
             self._editing = True
             self._edit_token = secrets.token_urlsafe(24)
             self._video_before_edit = self.video_enabled
@@ -360,7 +396,7 @@ class PreviewRuntime:
         )
         with self._condition:
             self._draft = document
-            self.spec = compiled
+            self._update_spec(compiled)
             self._reset_version += 1
             self._pending_steps = 1
             self._condition.notify_all()
@@ -433,7 +469,7 @@ class PreviewRuntime:
                 compiled = compile_authoring(document, asset_root=self._authoring_path.parent)
             with self._condition:
                 if compiled is not None:
-                    self.spec = compiled
+                    self._update_spec(compiled)
                     self._authoring_document = copy.deepcopy(document)
                 self._push_editor(False)
                 self._draft = None
@@ -465,13 +501,8 @@ class PreviewRuntime:
             save_authoring(document, self._authoring_path)
             with self._condition:
                 self._push_editor(False)
-                self.spec = compiled
+                self._update_spec(compiled)
                 self._authoring_document = copy.deepcopy(document)
-                self._station_ids = tuple(str(c.station_id) for c in compiled.station_configs)
-                self.render_every = max(
-                    1, math.ceil(self.render_clock.period_ns /
-                                 (min((c.exposure.frame_period_ns for c in compiled.scene_definition.cameras), default=self.render_clock.period_ns) + 1))
-                )
                 self._draft = None
                 self._edit_digest = None
                 self._edit_token = None
@@ -527,7 +558,7 @@ class PreviewRuntime:
                 "generation_stats_ms": self._timing_stats(self._generation_samples_ms),
                 "rendered_generation_stats_ms": self._timing_stats(self._rendered_samples_ms),
             }
-            step, payload, cache = self._latest_step, self._published, self._encoded
+            step, payload, cache = self._published_step, self._published, self._encoded
         if payload is not None and payload["sequence"] == after_sequence:
             result["snapshot"] = None
             return result
@@ -674,6 +705,7 @@ class PreviewRuntime:
                     if self._pending_steps:
                         self._pending_steps -= 1
                     self._published = payload
+                    self._published_step = display_step
                     self._latest_step = display_step
                     self._encoded = {}
                     self._producing = False
