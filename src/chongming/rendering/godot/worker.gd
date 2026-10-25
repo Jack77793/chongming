@@ -28,6 +28,12 @@ var _instances: Array[Node3D] = []
 var _signatures: Array[String] = []
 var _resources: Dictionary = {}
 var _busy := false
+var _lod_focal_y := 800.0
+var _has_mesh_terrain := false
+var _wind_active := false
+var _wind_mean := Vector2.ZERO
+var _wind_turbulence := 0.0
+var _wind_time := 0.0
 var _editor_active := false
 var _editor_realtime := false
 var _editor_closed := false
@@ -219,6 +225,13 @@ func _render(request: Dictionary) -> PackedByteArray:
 		_enu(request["origin"])
 	)
 	var focal: Array = request["focal"]
+	_lod_focal_y = float(focal[1])
+	_wind_time = float(request.get("windTime", 0.0))
+	var wind_value: Variant = request.get("wind", null)
+	_wind_active = wind_value is Array and wind_value.size() >= 6
+	if _wind_active:
+		_wind_mean = Vector2(float(wind_value[0]), float(wind_value[1]))
+		_wind_turbulence = Vector2(float(wind_value[3]), float(wind_value[4])).length()
 	var near := 0.02
 	var offset := Vector2(
 		(width * 0.5 - float(focal[2]) - 0.5) * near / float(focal[0]),
@@ -276,14 +289,21 @@ func _render(request: Dictionary) -> PackedByteArray:
 	_sun.light_energy = float(request["illuminance"]) / 100000.0 * (1.0 - cloud_cover * 0.32)
 	var sun_direction := _enu(request["sun"]).normalized()
 	_sun.basis = Basis.looking_at(-sun_direction, Vector3.FORWARD if absf(sun_direction.y) > 0.99 else Vector3.UP)
-	_ground.position = Vector3(_camera.position.x, float(request["terrainElevation"]), _camera.position.z)
+	_sync_resources(request.get("resources", []))
+	_sync_entities(request["entities"])
+	# Resolve terrain presence before positioning the fallback. This avoids
+	# using the previous snapshot's DEM flag when a scene changes between flat
+	# and heightfield terrain.
+	_ground.position = Vector3(
+		_camera.position.x,
+		float(request["terrainElevation"]),
+		_camera.position.z
+	)
 	_ground_material.set_shader_parameter("base_color", Vector3(
 		float(request.terrainColor[0]) * float(request.terrainReflectance),
 		float(request.terrainColor[1]) * float(request.terrainReflectance),
 		float(request.terrainColor[2]) * float(request.terrainReflectance)))
 	_ground_material.set_shader_parameter("detail_strength", float(request.get("terrainDetail", 0.0)))
-	_sync_resources(request.get("resources", []))
-	_sync_entities(request["entities"])
 	if str(request.get("mode", "")) == "editor":
 		var editor_enabled := bool(request.get("editor_enabled", false))
 		var editor_realtime := bool(request.get("editor_realtime", false))
@@ -500,26 +520,91 @@ func _sync_entities(entities: Array) -> void:
 	while _instances.size() > entities.size():
 		_instances.pop_back().free()
 		_signatures.pop_back()
+	var resolved: Array = []
+	for light_entity in entities:
+		resolved.append(_resolve_entity(light_entity))
+	# A card tree is rendered as one whole-tree model on its ground trunk entity.
+	# Pair it with the canopy entity so semantic crown dimensions and the sampled
+	# wind rotation stay available without changing the Python contract.
+	var canopies: Dictionary = {}
+	for index in range(entities.size()):
+		var entity: Dictionary = resolved[index]
+		if entity.is_empty():
+			continue
+		var visual_value: Variant = entity.get("visual", null)
+		if visual_value is Dictionary and str(visual_value.get("kind", "")) == "tree_canopy":
+			var base_id := str(entity.get("object_id", "")).trim_suffix("/canopy")
+			var light: Dictionary = entities[index]
+			canopies[base_id] = {
+				"visual": visual_value,
+				"position": light.get("position", entity.get("position", [0.0, 0.0, 0.0])),
+				"rotation": light.get("rotation", entity.get("rotation", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])),
+			}
+	var has_mesh_terrain := false
+	for entity_value in resolved:
+		var resolved_entity: Dictionary = entity_value
+		if (
+			str(resolved_entity.get("surface", "")) == "terrain"
+			and resolved_entity.get("vertices", null) != null
+		):
+			has_mesh_terrain = true
+			break
+	_has_mesh_terrain = has_mesh_terrain
+	if _ground != null:
+		# A heightfield is the sole terrain and shadow receiver. Keeping the
+		# fallback plane enabled creates a second visible/shadow-catching ground
+		# one metre below the DEM, especially obvious in freeview.
+		_ground.visible = not has_mesh_terrain
 	for index in range(entities.size()):
 		var light_entity: Dictionary = entities[index]
-		var entity: Dictionary = light_entity
-		var resource_token := str(light_entity.get("resource", ""))
-		if not resource_token.is_empty():
-			if not _resources.has(resource_token):
-				push_error("render entity references unknown resource %s" % resource_token)
-				continue
-			entity = _resources[resource_token]
+		var entity: Dictionary = resolved[index]
+		if entity.is_empty():
+			push_error("render entity could not be resolved")
+			continue
+		var visual_value: Variant = entity.get("visual", null)
+		var create_visual: Dictionary = visual_value if visual_value is Dictionary else {}
+		var paired: Dictionary = {}
+		var tree_visual: Dictionary = {}
+		if create_visual.get("kind", "") == "tree_trunk":
+			var base_id := str(entity.get("object_id", "")).trim_suffix("/trunk")
+			if canopies.has(base_id):
+				paired = canopies[base_id]
+				var canopy_visual: Dictionary = paired["visual"]
+				var trunk_position: Array = light_entity.get("position", entity.get("position", [0.0, 0.0, 0.0]))
+				var canopy_position: Array = paired["position"]
+				var crown_offset := maxf(0.0, float(canopy_position[2]) - float(trunk_position[2]))
+				var total_height := float(canopy_visual.get("height", 1.0)) + crown_offset
+				if total_height <= 0.1:
+					total_height = maxf(1.0, float(create_visual.get("height", 1.0)) / 0.58)
+				tree_visual = create_visual.duplicate(true)
+				tree_visual["kind"] = "tree"
+				tree_visual["height"] = total_height
+				tree_visual["radius"] = float(canopy_visual.get("radius", 1.0))
+				tree_visual["seed"] = int(create_visual.get("seed", 0))
 		if index == _instances.size():
 			_instances.append(Node3D.new())
 			_signatures.append("")
-		var signature := resource_token if not resource_token.is_empty() else JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null)])
+		var signature := ""
+		if not str(light_entity.get("resource", "")).is_empty():
+			signature = str(light_entity.get("resource", ""))
+			if not tree_visual.is_empty():
+				signature += "|tree|" + JSON.stringify(tree_visual)
+		else:
+			signature = JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null)])
+			if not tree_visual.is_empty():
+				signature += "|tree|" + JSON.stringify(tree_visual)
 		if signature != _signatures[index]:
 			var old_instance := _instances[index]
 			old_instance.free()
-			var visual_value: Variant = entity.get("visual", null)
 			var new_instance: Node3D
-			if visual_value is Dictionary and str(visual_value.get("kind", "")) in ["tree_trunk", "tree_canopy", "shrub", "grass"]:
-				new_instance = Vegetation.create(visual_value, entity.color, float(entity.reflectance))
+			if create_visual.get("kind", "") in ["tree", "tree_trunk", "tree_canopy", "shrub", "grass"]:
+				var light_position: Array = light_entity.get("position", [0.0, 0.0, 0.0])
+				new_instance = Vegetation.create(
+					tree_visual if not tree_visual.is_empty() else create_visual,
+					entity.color,
+					float(entity.reflectance),
+					Vector2(float(light_position[0]), float(light_position[1]))
+				)
 			else:
 				var mesh_instance := MeshInstance3D.new()
 				mesh_instance.mesh = _mesh(entity)
@@ -537,6 +622,7 @@ func _sync_entities(entities: Array) -> void:
 			_signatures[index] = signature
 		var instance := _instances[index]
 		instance.transform = Transform3D(_basis(light_entity.rotation), _enu(light_entity.position))
+		_apply_visual_lod(instance, paired)
 	# Definitions are immutable and the Python registry deliberately re-uploads a
 	# definition if an object returns after being absent. Keep the worker bounded.
 	var used: Dictionary = {}
@@ -550,6 +636,130 @@ func _sync_entities(entities: Array) -> void:
 			stale.append(str(token))
 	for token in stale:
 		_resources.erase(token)
+
+
+func _resolve_entity(light_entity: Dictionary) -> Dictionary:
+	var token := str(light_entity.get("resource", ""))
+	if token.is_empty():
+		return light_entity
+	if not _resources.has(token):
+		push_error("render entity references unknown resource %s" % token)
+		return {}
+	return _resources[token]
+
+
+func _apply_visual_lod(instance: Node3D, paired: Dictionary) -> void:
+	var kind := str(instance.get_meta("visual_kind", ""))
+	if kind.is_empty():
+		return
+	var height := float(instance.get_meta("visual_height", 1.0))
+	var pixels := 1000.0
+	if _camera != null:
+		var distance := _camera.global_position.distance_to(
+			instance.global_position + Vector3(0.0, height * 0.5, 0.0)
+		)
+		# Projected height in pixels: a compact proxy for visual footprint that
+		# also works for telephoto and wide-angle cameras without hard-coded
+		# world ranges.
+		pixels = _lod_focal_y * height / maxf(distance, 1.0)
+	if kind == "tree":
+		var model := instance.get_node_or_null("Model") as Node3D
+		var far_model := instance.get_node_or_null("FarModel") as Node3D
+		var near_visible := pixels >= 45.0 or far_model == null
+		if model != null:
+			model.visible = near_visible
+		if far_model != null:
+			far_model.visible = not near_visible
+		_set_tree_shadows(model, near_visible and pixels >= 75.0)
+		if near_visible and pixels >= 60.0 and not paired.is_empty():
+			_apply_tree_wind(instance, paired["rotation"])
+		else:
+			_reset_tree_wind(instance)
+	elif kind == "shrub":
+		var foliage := instance.get_node_or_null("Model/Foliage") as GeometryInstance3D
+		if foliage != null:
+			foliage.cast_shadow = (
+				GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+				if pixels >= 24.0
+				else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			)
+		_apply_understory_wind(instance, pixels, "shrub")
+	elif kind == "grass":
+		_apply_understory_wind(instance, pixels, "grass")
+
+
+func _set_tree_shadows(model: Node3D, enabled: bool) -> void:
+	if model == null:
+		return
+	var setting := (
+		GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		if enabled
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	)
+	for child_name in ["Trunk", "Crown"]:
+		var child := model.get_node_or_null(child_name) as GeometryInstance3D
+		if child != null:
+			child.cast_shadow = setting
+
+
+func _reset_tree_wind(instance: Node3D) -> void:
+	var crown := instance.get_node_or_null("Model/Crown") as Node3D
+	if crown != null:
+		crown.position = Vector3.ZERO
+		crown.scale = Vector3.ONE
+
+
+func _apply_understory_wind(instance: Node3D, pixels: float, kind: String) -> void:
+	var target_name := "Model" if kind == "shrub" else "Clumps"
+	var target := instance.get_node_or_null(target_name) as Node3D
+	if target == null:
+		return
+	var base_scale := Vector3.ONE
+	if target.has_meta("base_scale"):
+		base_scale = target.get_meta("base_scale")
+	var speed := _wind_mean.length()
+	var minimum_pixels := 5.0 if kind == "grass" else 18.0
+	if not _wind_active or speed <= 0.05 or pixels < minimum_pixels:
+		target.position = Vector3.ZERO
+		target.scale = base_scale
+		return
+	var seed := int(instance.get_meta("visual_seed", 0))
+	var phase := float(posmod(seed, 100003)) / 100003.0 * TAU
+	var time := _wind_time
+	var wave := (
+		sin(time * 1.7 + phase)
+		+ 0.33 * sin(time * 3.3 + phase * 1.7)
+		+ 0.15 * sin(time * 6.1 + phase * 0.7)
+	)
+	var turbulence := 1.0 + minf(1.5, _wind_turbulence / maxf(speed, 0.1))
+	var amplitude := (0.045 if kind == "shrub" else 0.018) * minf(speed, 10.0) * turbulence
+	var direction := _wind_mean.normalized()
+	target.position = Vector3(
+		direction.x * amplitude * wave, direction.y * amplitude * wave, 0.0
+	)
+	var squash := 0.025 * minf(1.0, absf(wave)) * minf(speed / 4.0, 1.0)
+	target.scale = base_scale * Vector3(1.0 + squash, 1.0 - squash * 0.5, 1.0 + squash)
+
+
+func _apply_tree_wind(instance: Node3D, rotation: Array) -> void:
+	var crown := instance.get_node_or_null("Model/Crown") as Node3D
+	if crown == null:
+		return
+	var basis := _basis(rotation)
+	var lean := basis.z - Vector3.UP
+	if lean.length() < 1e-5:
+		crown.position = Vector3.ZERO
+		crown.scale = Vector3.ONE
+		return
+	var model := crown.get_parent() as Node3D
+	var native_height := float(crown.get_meta("native_height", 10.0))
+	var offset := lean * native_height * 0.18
+	if model != null:
+		crown.position = model.basis.inverse() * offset
+	else:
+		crown.position = offset
+	var squash := minf(0.06, lean.length() * 0.30)
+	crown.scale = Vector3(1.0 + squash, 1.0 - squash * 0.35, 1.0 + squash)
 
 
 func _sync_resources(definitions: Array) -> void:
@@ -577,14 +787,19 @@ func _mesh(entity: Dictionary) -> Mesh:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for triangle in entity.triangles:
-		for vertex in triangle:
+		var a := _vector(entity.vertices[int(triangle[0])])
+		var b := _vector(entity.vertices[int(triangle[1])])
+		var c := _vector(entity.vertices[int(triangle[2])])
+		var normal := (b - a).cross(c - a)
+		if normal.length_squared() > 1e-20:
+			normal = normal.normalized()
+		# Godot treats clockwise triangles as front-facing in its 3D backend.
+		# The scene contract stores outward ENU faces in the conventional
+		# counter-clockwise order. Reverse only the submitted vertex order while
+		# retaining the outward normal computed from the contract order.
+		for vertex in [triangle[2], triangle[1], triangle[0]]:
+			surface.set_normal(normal)
 			surface.add_vertex(_vector(entity.vertices[int(vertex)]))
-	# SurfaceTool.generate_normals() follows the opposite winding convention, so
-	# the Python-built meshes end up with inverted face normals (terrain points
-	# down, building walls inward). The flip argument negates the generated
-	# normals without touching vertex order, keeping triangle winding,
-	# front-face culling and shadow geometry unchanged.
-	surface.generate_normals(true)
 	return surface.commit()
 
 

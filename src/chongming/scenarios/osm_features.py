@@ -507,6 +507,35 @@ def _area_factor(seed: int, element_id: str) -> float:
     return 0.75 + 0.5 * _unit(digest, 0)
 
 
+def _noise_hash(seed: int, salt: int, ix: int, iy: int) -> float:
+    """Stable 2D integer hash in [0, 1), used only for visual placement policy."""
+    value = (ix * 374761393 + iy * 668265263 + seed * 1442695041 + salt * 1013904223) & 0xFFFFFFFF
+    value = (value ^ (value >> 13)) * 1274126177 & 0xFFFFFFFF
+    value = (value ^ (value >> 16)) & 0xFFFFFFFF
+    return value / 2**32
+
+
+def _value_noise(seed: int, x: float, y: float, scale: float, salt: int) -> float:
+    """Smooth low-frequency field for woodland/meadow density variation."""
+    gx, gy = x / scale, y / scale
+    x0, y0 = math.floor(gx), math.floor(gy)
+    fx, fy = gx - x0, gy - y0
+    u = fx * fx * (3.0 - 2.0 * fx)
+    v = fy * fy * (3.0 - 2.0 * fy)
+    h00 = _noise_hash(seed, salt, x0, y0)
+    h10 = _noise_hash(seed, salt, x0 + 1, y0)
+    h01 = _noise_hash(seed, salt, x0, y0 + 1)
+    h11 = _noise_hash(seed, salt, x0 + 1, y0 + 1)
+    return (h00 * (1 - u) + h10 * u) * (1 - v) + (h01 * (1 - u) + h11 * u) * v
+
+
+def _density_field(seed: int, x: float, y: float, scale: float, salt: int) -> float:
+    """Two octaves keep broad woodland patches from looking like a single blob."""
+    broad = _value_noise(seed, x, y, scale, salt)
+    fine = _value_noise(seed, x, y, scale * 0.38, salt + 7)
+    return 0.5 * broad + 0.5 * fine
+
+
 def _density_target(mask: BaseGeometry, density: float, factor: float, per_area_budget: int) -> int:
     return min(per_area_budget, round(density * mask.area / 10_000.0 * factor))
 
@@ -519,6 +548,8 @@ def _plant_candidates(
     token: str,
     clustering: float,
     pass_index: int = 0,
+    density_scale: float = 80.0,
+    density_salt: int = 0,
 ) -> list[_PlantCandidate]:
     """Jittered-grid candidates sorted into deterministic vegetation clusters.
 
@@ -547,7 +578,12 @@ def _plant_candidates(
             coarse = hashlib.sha256(
                 f"{prefix}/cluster/{ix // cluster}/{iy // cluster}".encode()
             ).digest()
-            priority = (1.0 - clustering) * _unit(digest, 8) + clustering * _unit(coarse, 0)
+            regional = _density_field(seed, x, y, density_scale, density_salt)
+            priority = (
+                (1.0 - clustering) * _unit(digest, 8)
+                + clustering * _unit(coarse, 0)
+                + (1.0 - regional) * 0.55
+            )
             candidates.append(_PlantCandidate(priority, digest[12:16], x, y, ix, iy, pass_index))
     candidates.sort(key=lambda item: (item.priority, item.tiebreak))
     return candidates
@@ -747,12 +783,17 @@ def tree_objects(
         digest = hashlib.sha256(
             f"osm-vegetation/{config.seed}/{area.element_id}/tree/{candidate.pass_index}/{candidate.ix}/{candidate.iy}".encode()
         ).digest()
+        # A deterministic minority of saplings/understory trees keeps the
+        # forest from being a uniform layer of mature crowns.
+        size_factor = 1.0
+        if _unit(digest, 8) < 0.16:
+            size_factor = 0.52 + 0.30 * _unit(digest, 12)
         height = config.tree_height_m * (
             1.0 + config.tree_height_jitter * (2.0 * _unit(digest, 0) - 1.0)
-        )
+        ) * size_factor
         crown = config.tree_crown_radius_m * (
             1.0 + config.tree_crown_radius_jitter * (2.0 * _unit(digest, 4) - 1.0)
-        )
+        ) * (0.82 + 0.18 * size_factor)
         tree_index.add(candidate.x, candidate.y)
         canopy_color = (0.09, 0.25, 0.05) if area.category == "forest" else (0.11, 0.29, 0.07)
         objects.extend(
@@ -905,6 +946,8 @@ def tree_objects(
                 seed=config.seed,
                 token=f"{area.element_id}/tree",
                 clustering=clustering,
+                density_scale=80.0,
+                density_salt=17,
             )
             for candidate in candidates:
                 if add_tree(area, candidate, remaining):
@@ -934,6 +977,8 @@ def tree_objects(
                 seed=config.seed,
                 token=f"{area.element_id}/shrub",
                 clustering=0.6,
+                density_scale=55.0,
+                density_salt=29,
             )
             remaining = target
             for candidate in candidates:
@@ -972,6 +1017,8 @@ def tree_objects(
                     token=f"{area.element_id}/grass",
                     clustering=0.55,
                     pass_index=attempt,
+                    density_scale=40.0,
+                    density_salt=41,
                 )
                 for candidate in candidates:
                     if add_grass(area, candidate, remaining):

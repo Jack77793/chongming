@@ -41,7 +41,7 @@ uv run chongming-osm scenarios/assets/osm_demo.osm \
 - 拒绝关系建筑、其成员建筑、building parts、非零/非法抬升标签、缺点、未闭合、自交和重复点。关系/内洞不尝试修复，避免误填庭院。连续共线点可确定性移除。
 - 精简 XML 保留支持类别及其节点/成员依赖、几何/分类/高度/宽度标签，去掉未知 tag、无关 POI 和节点。拒绝候选与相关关系仍保留诊断所需记录，因此它是本导入器的精简重导入文件，不是通用、引用完整的 OSM 区域备份。清洗报告保留原始文件摘要；应同时留存原始下载文件。
 - 道路支持 motorway/trunk/primary/secondary/tertiary 及 link、residential/unclassified/service/living_street、pedestrian/track/footway/path/cycleway/steps；按中心线缓冲成简单路面，宽度取有效 `width`（0.3–40 m）或类别默认值（1.5–12 m）。不生成交通图、车道、桥梁和隧道；`lanes` 不用于推断宽度。
-- 树点支持 `natural=tree`，高度限 1–60 m，缺失回退 10 m；冠幅取有效 `diameter_crown`，否则冠半径取高度的 1/4。逻辑沿用树干/树冠圆柱代理，视觉沿用既有 Godot 语义树木。
+- 树点支持 `natural=tree`，高度限 1–60 m，缺失回退 10 m；冠幅取有效 `diameter_crown`，否则冠半径取高度的 1/4。逻辑沿用树干/树冠圆柱代理，视觉使用 CC0 卡片树资产（见 `src/chongming/rendering/godot/assets/`）。
 - 森林为 `natural=wood` / `landuse=forest`；绿地支持 grass/meadow/recreation_ground/village_green、natural grassland、park/garden；水体支持 `natural=water` / `waterway=riverbank`。闭合 way 和可完整拼接的 multipolygon 支持内洞，缺成员或破损关系整体拒绝。道路及地表裁到选区，建筑边界策略仍为整栋保留/拒绝。
 - 森林树按 `forest_spacing_m`（至少 10 m，默认 60 m）、`maximum_forest_trees`（默认 256，上限 2000）确定性分布，排除洞、建筑、水体、道路及已标树冠。该层始终保留；`osm.vegetation.forest_tree_density_per_ha` 以“每公顷目标株数（含已有点要素树和森林基础树）”补齐差额，因此不会重复种植基础树。绿地、公园和林地再按各自密度生成乔木、灌木和草 patch；水体是随粗 DEM 贴地的颜色面，不反演水平水位或湖底。建筑基础没有地基开挖/坡地基础拟合。
 
@@ -52,19 +52,21 @@ uv run chongming-osm scenarios/assets/osm_demo.osm \
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `seed` | `42` | 确定性哈希种子；相同资产+配置必定生成相同实例 |
-| `forest_tree_density_per_ha` | `120` | 森林目标乔木密度（含既有树点/基础林），不足部分补植 |
-| `grass_tree_density_per_ha` | `8` | 绿地/公园目标乔木密度（含绿地内既有树点） |
-| `forest_shrub_density_per_ha` / `grass_shrub_density_per_ha` | `35` / `20` | 林下/绿地灌木密度 |
-| `forest_grass_density_per_ha` / `grass_grass_density_per_ha` | `25` / `30` | 草 patch 密度 |
-| `tree_height_m` / `tree_height_jitter` | `13` / `0.30` | 乔木高度均值与相对抖动（0–1） |
-| `tree_crown_radius_m` / `tree_crown_radius_jitter` | `3.0` / `0.30` | 冠幅半径均值与相对抖动 |
-| `shrub_height_m` / `shrub_height_jitter` | `1.6` / `0.35` | 灌木高度均值与相对抖动 |
-| `shrub_radius_m` / `shrub_radius_jitter` | `1.6` / `0.35` | 灌木半径均值与相对抖动 |
+| `forest_tree_density_per_ha` | `200` | 森林目标乔木密度（含既有树点/基础林），不足部分补植 |
+| `grass_tree_density_per_ha` | `12` | 绿地/公园目标乔木密度（含绿地内既有树点） |
+| `forest_shrub_density_per_ha` / `grass_shrub_density_per_ha` | `55` / `30` | 林下/绿地灌木密度 |
+| `forest_grass_density_per_ha` / `grass_grass_density_per_ha` | `35` / `40` | 草 patch 密度 |
+| `tree_height_m` / `tree_height_jitter` | `13` / `0.38` | 乔木高度均值与相对抖动（0–1） |
+| `tree_crown_radius_m` / `tree_crown_radius_jitter` | `3.0` / `0.38` | 冠幅半径均值与相对抖动 |
+| `shrub_height_m` / `shrub_height_jitter` | `1.6` / `0.40` | 灌木高度均值与相对抖动 |
+| `shrub_radius_m` / `shrub_radius_jitter` | `1.6` / `0.40` | 灌木半径均值与相对抖动 |
 | `grass_patch_size_m` / `grass_patch_size_jitter` | `12` / `0.30` | 草 patch 边长均值与相对抖动 |
 | `grass_blade_height_m` / `grass_blade_height_jitter` | `0.35` / `0.30` | 草叶高度均值与相对抖动 |
-| `grass_density_per_m2` | `4.0` | 每平方米叶片实例数，上限 200 |
+| `grass_density_per_m2` | `5.0` | 每平方米草簇密度参考值，上限 200 |
 | `forest_clustering` / `grass_clustering` | `0.35` / `0.80` | 0 为细碎均匀、1 为强团簇；森林较低、公园较高 |
-| `maximum_*_per_area` / `maximum_*_total` | 见契约默认值 | 每面/全局实例预算，防止异常选区拖垮渲染 |
+| `maximum_*_per_area` / `maximum_*_total` | 见契约默认值 | 每面/全局实例预算，防止异常选区拖垮渲染；当前乔木总预算 1400、灌木 1100、草 2200 |
+
+生成候选时还叠加两层低频值噪声：一层按世界坐标控制林地/草地密度（高值区优先填充），另一层在 Godot 渲染侧选择具体卡片品种（乔木 12、灌木/绿篱 6、草/地被 12）。乔木中约 16% 按确定性哈希生成较小尺寸的下木/幼树，避免所有树冠处于同一高度。噪声与哈希都由固定种子驱动，不依赖墙钟。
 
 示例：
 
@@ -104,7 +106,7 @@ uv run chongming-preview --scenario scenarios/osm.json
 
 复查脚本产生署名截图、对比图和报告，记录建筑/顶点/三角形数、加载耗时（含 Python 内存跟踪开销）、Godot 启动、首次请求、暖机帧、逻辑采样与进程 RSS；RSS 为进程整体瞬时值，不是建筑专用或 GPU 内存。首尾离散时刻分别演示共线遮挡与移出遮挡。自动化测试覆盖投影控制点、轮廓/遍历顺序、清洗复导入、回退/拒绝、凹屋顶/缺口、资产校验、预览回调、场景往返及实际 Godot 像素行为；合成 fixture 验证不能替代真实样区几何抽查和规模验收。
 
-2026-10-20 本机 macOS / Godot 4.7.2 Compatibility 的汉诺威样区：原始 XML 2.49 MB、清洗后约 650 KB；257 建筑、497 道路、135 树点、35 绿地、11 森林、11 水体，19×19 DEM 网格（60 m），规范资产约 340 KB，导入约 0.33 s。地景/地形约 4.63 万三角形、284 个植被代理。加入静态场景保守 BVH 后，复查脚本的逻辑采样中位约 0.75 ms；资源增量协议下 Godot 暖机约 13–17 ms（首个请求包含资源创建约 1.1 s）。这是同一台机器、1024×576、3 次暖机样本的墙钟测量，不是纯 GPU 时间，也不能推断城市规模上限。诊断中的回退、关系和抬升要素拒绝不代表 OSM 覆盖完整性。112 项测试（含实际 Godot）、ruff 和源码/新增 OSM 测试的 mypy 均已通过；复查产物按命令生成到被忽略的 `output/` 目录。
+2026-10-20 本机 macOS / Godot 4.7.2 Compatibility 的汉诺威样区：原始 XML 2.49 MB、清洗后约 650 KB；257 建筑、497 道路、135 树点、35 绿地、11 森林、11 水体，19×19 DEM 网格（60 m），规范资产约 340 KB，导入约 0.33 s。地景/地形约 4.63 万三角形、284 个植被代理。加入静态场景保守 BVH 后，复查脚本的逻辑采样中位约 0.75 ms；资源增量协议下 Godot 暖机约 13–17 ms（首个请求包含资源创建约 1.1 s）。这是同一台机器、1024×576、3 次暖机样本的墙钟测量，不是纯 GPU 时间，也不能推断城市规模上限。诊断中的回退、关系和抬升要素拒绝不代表 OSM 覆盖完整性。当时 112 项测试（含实际 Godot）、ruff 和源码/新增 OSM 测试的 mypy 均已通过；复查产物按命令生成到被忽略的 `output/` 目录。
 
 对外展示真实 OSM 资产时，现有预览消费者应使用资产中的署名；离线复查导出已经附带署名。当前 UI 仅切换仓库认可的本地资产；若以后增加任意选区，仍须保留来源、许可和摘要信息。
 
@@ -145,9 +147,9 @@ CHONGMING_GODOT=/path/to/godot uv run python scripts/review_osm.py \
 uv run chongming-preview --scenario output/osm/hannover-500m/review.json
 ```
 
-HGT 以锚点 EGM96 正高 54 m 为参考，场景锚点相对地面为 0；重采样网格相对高程约 −2.94 至 19.08 m。该 60 m 网格只验证简单地形链路，不能用于水位、林下裸地或地基精度判断。复查相机在 `(-620,-620,850)` 米，方位 45°、俯仰 −44°，植被 LOD 为 180/2000 m，用于查看全区低面代理；此静态、无目标视图的逻辑计时包含定标点视线，不能代表多目标运行成本。
+HGT 以锚点 EGM96 正高 54 m 为参考，场景锚点相对地面为 0；重采样网格相对高程约 −2.94 至 19.08 m。该 60 m 网格只验证简单地形链路，不能用于水位、林下裸地或地基精度判断。复查相机在 `(-620,-620,850)` 米，方位 45°、俯仰 −44°，植被按 180/2000 m 的 far 距离剔除；当前没有近/远代理，此静态、无目标视图的逻辑计时包含定标点视线，不能代表多目标运行成本。
 
-本机 1024×576、每视图 3 次暖机采样，首个请求约 1.1 s（包括几何、材质和植被资源创建），后续中位约 13–17 ms；逻辑从此前的数十毫秒量级降到约 0.75 ms，原因是静态世界/植被先用保守包围盒 BVH 排除，再执行原有精确网格相交。Python 每帧发送稳定资源令牌和位姿，Godot 只在资源首次出现或语义改变时创建网格/材质。精确相交规则、树木等效圆柱和地形命中规则均未改变；动态飞机不使静态城市索引失效。网格统计不含 Godot 按 LOD 生成的树木视觉三角形。此结果证明小选区可离线准备和绘制；没有硬性实时指标，也没有引入 Vulkan/GPU 遮挡查询。
+以下为程序化树基线的历史测量：本机 1024×576、每视图 3 次暖机采样，首个请求约 1.1 s（包括几何、材质和植被资源创建），后续中位约 13–17 ms；逻辑从此前的数十毫秒量级降到约 0.75 ms，原因是静态世界/植被先用保守包围盒 BVH 排除，再执行原有精确网格相交。Python 每帧发送稳定资源令牌和位姿，Godot 只在资源首次出现或语义改变时创建网格/材质。精确相交规则、树木等效圆柱和地形命中规则均未改变；动态飞机不使静态城市索引失效。网格统计不含卡片树视觉三角形。卡片树替换后的 Hannover 复查见 [虚拟场景预览](虚拟场景预览.md)；没有硬性实时指标，也没有引入 Vulkan/GPU 遮挡查询。
 
 不需要真实下载数据时，可直接预览 `scenarios/osm_landscape.json`。其 CC0 合成 XML、带洞森林、道路、树点、绿地、水体与 DEM 均随仓库保存；`uv run python scripts/prepare_osm_demo.py` 可重建资产，脚本内容变化会改变 DEM 来源摘要，需将打印的新资产 SHA-256 更新到场景文件。
 

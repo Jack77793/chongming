@@ -1018,6 +1018,7 @@ class SceneLogicModule(ModuleShell):
             illumination=scene.illumination,
             clouds=perturbations.clouds,
             render_effects=scene.render_effects,
+            wind=perturbations.wind,
         )
 
 
