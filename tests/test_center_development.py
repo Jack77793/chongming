@@ -23,7 +23,7 @@ from chongming.development import CenterSession, FusionEngineAdapter, InputInspe
 from chongming.modules import scene as modules
 from chongming.scenarios.authoring import compile_authoring, demo_authoring, save_authoring
 from chongming.scenarios.demo import demo_source
-from chongming.scenarios.run import _json, run_scene
+from chongming.scenarios.run import _json, read_truth_records, run_scene
 from tests.test_scene_run import normalize
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,7 +104,7 @@ class CenterDevelopmentTests(unittest.TestCase):
                 online = (output / "center-input.jsonl").read_text()
                 self.assertNotIn("truth_object_id", online)
                 self.assertNotIn("experiment_perturbations", online)
-                self.assertIn("moving-sphere", (output / "truth.jsonl").read_text())
+                self.assertIn("moving-sphere", json.dumps(read_truth_records(output)))
 
     def test_video_toggle_preserves_exposures_events_truth_and_calls_no_pixels_when_off(
         self,

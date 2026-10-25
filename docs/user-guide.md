@@ -88,13 +88,16 @@ uv run --frozen chongming-scene --scenario scenarios/empty.json --output results
 | ------------------------------ | --------------------------------------------- |
 | `authoring.json`               | 输入的可编辑场景，输入为 authoring 格式时保存 |
 | `scenario.json`                | 有限导出的编译场景，用于诊断                  |
-| `manifest.json`                | 运行范围、配置、会话、渲染策略及来源记录      |
+| `manifest.json`                | 运行范围、配置、会话、渲染策略及来源记录；通过 `scenario_path` 和摘要引用场景 |
 | `online.jsonl`                 | 普通帧元数据、事件及像素跳过记录              |
-| `truth.jsonl`                  | 真实状态及事件到目标的对应，仅供评估          |
+| `truth-static.json`            | 运行期间不变的特权场景对象快照，仅供评估      |
+| `truth.jsonl`                  | 逐步真实状态及事件到目标的对应；静态对象通过摘要引用，仅供评估 |
 | `timing.jsonl`、`summary.json` | 逐步耗时、计数、结束或失败状态                |
 | `video/camera-*/`              | 按流编号保存的 PNG，不以用户 ID 构造路径      |
 
 中心工具另保存 `center-registration.json`、`center-input.jsonl` 和 `center-output.jsonl`。完整 manifest 与真值是审计资料，不是中心算法输入。失败时保留已写证据，不自动清理输出目录。
+
+`truth.jsonl` 使用 `truth-jsonl-v2` 布局。每条记录的 `logical_scene_static_ref` 指向同目录的 `truth-static.json`；评估读取器会校验摘要并将静态 `world_objects` 恢复到内存中的完整场景快照。运行期间若静态对象发生变化，运行会失败而不会静默生成错误真值。
 
 manifest 的 `installation` 区分 `editable` 与 `installed`；`package_digests`／`package_digest` 描述实际加载的包文件。Git 提交、工作区状态和 `uv.lock` 摘要仅在可获取的 editable 源码环境记录，普通 wheel 安装对应字段为 `null`。包摘要不是完整源码溯源，发行包的校验和与源码快照应另行保留。
 
