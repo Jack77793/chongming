@@ -48,6 +48,7 @@ from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
+from chongming.scenarios.source import ScenarioSource
 from chongming.scenarios.serialization import load_scenario
 
 logger = logging.getLogger(__name__)
@@ -183,8 +184,10 @@ class PreviewRuntime:
         authoring_document: dict[str, Any] | None = None,
         authoring_path: Path | None = None,
         landscape_asset: Path | None = None,
+        source_factory: Callable[[ScenarioSpec, int, bool], ScenarioSource] | None = None,
     ) -> None:
         self.spec = spec
+        self._source_factory = source_factory or demo_source
         self._authoring_document = copy.deepcopy(authoring_document) if authoring_document else None
         self._authoring_path = authoring_path.resolve() if authoring_path is not None else None
         self._landscape_asset = landscape_asset.resolve() if landscape_asset is not None else None
@@ -638,7 +641,7 @@ class PreviewRuntime:
         latest_frames: dict[tuple[str, str], CameraFrame] = {}
         latest_truths: dict[tuple[str, str], CameraFrameTruth] = {}
         try:
-            source = demo_source(
+            source = self._source_factory(
                 self.spec, render_every=self.render_every, video_enabled=self.video_enabled
             )
             steps = iter(source.generate(self.spec))
@@ -658,7 +661,7 @@ class PreviewRuntime:
                         return
                     if self._reset_version != reset_version:
                         reset_version = self._reset_version
-                        source = demo_source(
+                        source = self._source_factory(
                             self.spec,
                             render_every=self.render_every,
                             video_enabled=self.video_enabled,
@@ -947,6 +950,18 @@ def main() -> None:
         help="从 scenario-authoring-v2 文件加载可编辑场景；提供后忽略 --stations/--fps",
     )
     parser.add_argument(
+        "--recording",
+        type=Path,
+        default=None,
+        help="从录像包目录回放预录制内容；提供后忽略 --scenario/--stations/--fps",
+    )
+    parser.add_argument(
+        "--playback-fps",
+        type=float,
+        default=None,
+        help="回放模式下的目标帧率（Hz）；仅与 --recording 配合使用，默认无延迟回放",
+    )
+    parser.add_argument(
         "--landscape-asset",
         type=Path,
         help="Path to the pinned Hannover landscape JSON for the scenario editor",
@@ -965,9 +980,38 @@ def main() -> None:
     if not 0 <= args.port <= 65535:
         parser.error("port must be between 0 and 65535")
     try:
-        authoring_path = Path(args.scenario) if args.scenario is not None else None
+        source_factory = None
+        authoring_path = None
         authoring_document = None
-        if authoring_path is not None:
+
+        if args.recording is not None:
+            # Playback mode
+            if args.scenario is not None:
+                parser.error("--recording and --scenario are mutually exclusive")
+            if args.camera_position_offset is not None:
+                parser.error("--camera-position-offset is not supported with --recording")
+            if args.playback_fps is not None and args.playback_fps <= 0:
+                parser.error("--playback-fps must be positive")
+
+            from chongming.scenarios.playback import load_recording_source
+
+            recorded_source = load_recording_source(args.recording, playback_fps=args.playback_fps)
+            spec = recorded_source.get_spec()
+
+            # Create a factory that returns the recorded source
+            def recording_factory(
+                spec: ScenarioSpec, render_every: int, video_enabled: bool
+            ) -> ScenarioSource:
+                # Note: render_every and video_enabled are ignored for recordings
+                # The recording already has its own frame rate and video content
+                return recorded_source
+
+            source_factory = recording_factory
+        elif args.scenario is not None:
+            # Authoring mode
+            if args.playback_fps is not None:
+                parser.error("--playback-fps requires --recording")
+            authoring_path = Path(args.scenario)
             authoring_document = json.loads(authoring_path.read_text())
             if args.camera_position_offset is not None:
                 authoring_document["camera_position_offset_enu_m"] = list(
@@ -977,9 +1021,13 @@ def main() -> None:
             else:
                 spec = load_scenario(authoring_path, asset_root=authoring_path.parent)
         else:
+            # Demo mode
+            if args.playback_fps is not None:
+                parser.error("--playback-fps requires --recording")
             if args.camera_position_offset is not None:
                 parser.error("--camera-position-offset requires --scenario")
             spec = demo_spec(station_count=args.stations, fps=args.fps)
+
         runtime = PreviewRuntime(
             spec,
             render_fps=args.render_fps,
@@ -987,6 +1035,7 @@ def main() -> None:
             authoring_document=authoring_document,
             authoring_path=authoring_path,
             landscape_asset=args.landscape_asset,
+            source_factory=source_factory,
         )
         server = preview_server(runtime, args.port)
     except (ValueError, OSError) as error:
