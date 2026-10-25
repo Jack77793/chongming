@@ -57,44 +57,62 @@ func _test_freeview_world() -> void:
 
 
 func _test_generator() -> void:
-	var visual := {"kind": "tree_canopy", "height": 7.0, "radius": 2.0, "seed": 12345,
+	var tree_visual := {"kind": "tree", "height": 9.0, "radius": 3.0, "seed": 12345,
 		"lod_near": 120.0, "lod_far": 640.0}
-	var first := Vegetation.create(visual, [0.12, 0.35, 0.08], 0.8)
-	var replay := Vegetation.create(visual, [0.12, 0.35, 0.08], 0.8)
-	var different := Vegetation.create(visual.merged({"seed": 54321}, true), [0.12, 0.35, 0.08], 0.8)
-	var first_leaves := first.get_node("Leaves") as MultiMeshInstance3D
-	var replay_leaves := replay.get_node("Leaves") as MultiMeshInstance3D
-	var different_leaves := different.get_node("Leaves") as MultiMeshInstance3D
-	_check(first_leaves.multimesh.instance_count > 1000, "canopy should use dense leaf instances")
-	_check(first_leaves.multimesh.mesh == replay_leaves.multimesh.mesh, "trees should share one leaf prototype")
-	_check(first_leaves.multimesh.custom_aabb.has_volume(), "foliage should have precomputed bounds")
-	_check(first_leaves.visibility_range_end == 120.0, "detailed foliage should end at near LOD")
-	var far := first.get_node("FarProxy") as MeshInstance3D
-	_check(far.visibility_range_begin == 120.0 and far.visibility_range_end == 640.0,
-		"far tree proxy should cover the configured LOD interval")
-	for index in [0, 73, first_leaves.multimesh.instance_count - 1]:
-		var first_transform := first_leaves.multimesh.get_instance_transform(index)
-		_check(first_transform == replay_leaves.multimesh.get_instance_transform(index), "same seed must reproduce leaf transforms")
-		_check(_finite_transform(first_transform), "leaf transforms must remain finite")
-		_check(first_leaves.multimesh.get_instance_color(index) == replay_leaves.multimesh.get_instance_color(index), "same seed must reproduce leaf colors")
-		_check(first_leaves.multimesh.custom_aabb.encloses(first_transform * first_leaves.multimesh.mesh.get_aabb()), "bounds must include transformed leaf geometry")
-	_check(first_leaves.multimesh.get_instance_transform(73) != different_leaves.multimesh.get_instance_transform(73), "different seeds should vary leaf placement")
+	var first := Vegetation.create(tree_visual, [0.12, 0.35, 0.08], 0.8)
+	var replay := Vegetation.create(tree_visual, [0.12, 0.35, 0.08], 0.8)
+	var different := Vegetation.create(
+		tree_visual.merged({"seed": 12346}, true), [0.12, 0.35, 0.08], 0.8
+	)
+	var first_trunk := first.get_node("Model/Trunk") as MeshInstance3D
+	var first_crown := first.get_node("Model/Crown") as MeshInstance3D
+	var replay_trunk := replay.get_node("Model/Trunk") as MeshInstance3D
+	var replay_crown := replay.get_node("Model/Crown") as MeshInstance3D
+	var different_crown := different.get_node("Model/Crown") as MeshInstance3D
+	_check(first_trunk.mesh.get_surface_count() > 0, "tree trunk should contain at least one surface")
+	_check(first_crown.mesh.get_surface_count() > 0, "tree crown should contain at least one surface")
+	_check(first_trunk.mesh == replay_trunk.mesh, "the same tree seed must share the same trunk mesh")
+	_check(first_crown.mesh == replay_crown.mesh, "the same tree seed must share the same crown mesh")
+	_check(first_trunk.visibility_range_end == 640.0, "tree trunk should use the far LOD distance")
+	_check(first_crown.visibility_range_end == 640.0, "tree crown should use the far LOD distance")
+	_check(first_crown.get_meta("native_height", 0.0) > 0.0, "crown needs its native height for wind")
+	var crown_material := first_crown.mesh.surface_get_material(0)
+	_check(crown_material is BaseMaterial3D, "crown surfaces must have a material")
+	if crown_material is BaseMaterial3D:
+		_check(crown_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR,
+			"crown cards should use alpha scissor, not alpha blending")
+		_check(crown_material.cull_mode == BaseMaterial3D.CULL_DISABLED,
+			"crown cards should remain visible from both sides")
+	_check(str(first.get_meta("variant")) != str(different.get_meta("variant")),
+		"different seeds should select different tree variants")
+	_check(first_crown.mesh != different_crown.mesh, "different tree variants should use different crowns")
+
 	var shrub := Vegetation.create({"kind": "shrub", "height": 2.2, "radius": 2.8,
 		"seed": 91, "lod_near": 120.0, "lod_far": 640.0}, [0.1, 0.3, 0.07], 0.8)
-	var shrub_leaves := shrub.get_node("Leaves") as MultiMeshInstance3D
-	_check(shrub_leaves.multimesh.instance_count == 420, "shrubs should batch deterministic leaves")
-	_check(shrub.has_node("FarProxy"), "shrubs should provide a far LOD proxy")
+	var shrub_foliage := shrub.get_node("Model/Foliage") as MeshInstance3D
+	_check(shrub_foliage.mesh.get_surface_count() > 0, "shrubs should use an authored card mesh")
+	_check(shrub_foliage.visibility_range_end == 640.0, "shrubs should use the far LOD distance")
+	_check(not str(shrub.get_meta("variant", "")).is_empty(), "shrubs need a deterministic variant")
+
 	var grass_visual := {"kind": "grass", "width": 10.0, "depth": 6.0, "height": 0.5,
 		"density": 12.0, "seed": 92, "lod_near": 120.0, "lod_far": 640.0}
 	var grass := Vegetation.create(grass_visual, [0.16, 0.34, 0.08], 0.75)
 	var grass_replay := Vegetation.create(grass_visual, [0.16, 0.34, 0.08], 0.75)
-	var blades := grass.get_node("Blades") as MultiMeshInstance3D
-	var replay_blades := grass_replay.get_node("Blades") as MultiMeshInstance3D
-	_check(blades.multimesh.instance_count == 720, "grass density should set a bounded instance count")
-	_check(blades.multimesh.mesh == replay_blades.multimesh.mesh, "grass patches should share one blade prototype")
-	_check(blades.multimesh.get_instance_transform(37) == replay_blades.multimesh.get_instance_transform(37),
+	var clumps := grass.get_node("Clumps") as MultiMeshInstance3D
+	var replay_clumps := grass_replay.get_node("Clumps") as MultiMeshInstance3D
+	_check(clumps.multimesh.instance_count > 0, "grass should contain deterministic clumps")
+	_check(clumps.multimesh.mesh == replay_clumps.multimesh.mesh, "grass patches should share one clump mesh")
+	_check(clumps.multimesh.get_instance_transform(0) == replay_clumps.multimesh.get_instance_transform(0),
 		"grass placement should replay from its stable seed")
-	_check(blades.visibility_range_end == 120.0, "grass should be culled after the near LOD")
+	_check(clumps.multimesh.custom_aabb.has_volume(), "grass needs bounds covering all clumps")
+	_check(is_zero_approx(clumps.multimesh.get_instance_transform(0).origin.z),
+		"grass clumps must sit on the body-space ground plane")
+	_check(is_zero_approx(clumps.multimesh.custom_aabb.position.z),
+		"grass bounds must start on the body-space ground plane")
+	_check(clumps.visibility_range_end == 120.0, "grass should be culled after the near LOD")
+	_check(clumps.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_OFF,
+		"grass clump shadows should stay off for now")
+
 	first.free()
 	replay.free()
 	different.free()
@@ -106,31 +124,58 @@ func _test_generator() -> void:
 func _test_worker_cache() -> void:
 	var worker := Worker.new()
 	worker._world = Node3D.new()
-	var entity := _tree_entity(12345)
-	worker._sync_entities([entity])
+	var pair := _tree_pair(12345)
+	worker._sync_entities(pair)
+	_check(worker._instances.size() == 2, "a tree trunk/canopy pair keeps both entity slots")
 	var original := worker._instances[0]
-	var moved := entity.duplicate(true)
-	moved.position = [2.0, 3.0, 4.0]
-	worker._sync_entities([moved])
-	_check(worker._instances[0] == original, "pose-only updates must reuse generated resources")
-	_check(worker._instances[0].position == Vector3(2.0, 4.0, -3.0), "pose updates must still reach the cached tree")
-	var changed := moved.duplicate(true)
-	changed.visual = moved.visual.merged({"radius": 2.5}, true)
-	worker._sync_entities([changed])
-	_check(worker._instances[0] != original, "visual parameter changes must rebuild the tree")
+	_check(original.has_node("Model/Crown"), "the trunk entity should carry the whole card tree")
+	_check(worker._instances[1] is Node3D and not worker._instances[1].has_node("Model"),
+		"the canopy entity should be a pose-only anchor")
+	var crown := original.get_node("Model/Crown") as Node3D
+	_check(crown.position == Vector3.ZERO, "an upright tree should have no crown displacement")
+
+	var moved := pair.duplicate(true)
+	moved[0].position = [2.0, 3.0, 4.0]
+	moved[1].position = [2.0, 3.0, 6.94]
+	worker._sync_entities(moved)
+	_check(worker._instances[0] == original, "pose-only updates must reuse generated tree resources")
+	_check(worker._instances[0].position == Vector3(2.0, 4.0, -3.0), "pose updates must still reach the tree")
+	_check(crown.position == Vector3.ZERO, "changing position without wind must not move the crown")
+
+	var windy := moved.duplicate(true)
+	windy[1].rotation = _tilt_rotation(0.2)
+	worker._sync_entities(windy)
+	_check(worker._instances[0] == original, "wind changes must not rebuild tree resources")
+	_check(crown.position.length() > 0.01, "a sampled canopy rotation should deform the crown")
+	_check(crown.scale != Vector3.ONE, "crown wind should include a small scale change")
+	windy[1].rotation = _identity_rotation()
+	worker._sync_entities(windy)
+	_check(crown.position == Vector3.ZERO and crown.scale == Vector3.ONE,
+		"the crown must return to rest when the wind pose is upright")
+
+	var changed := windy.duplicate(true)
+	changed[1].visual = changed[1].visual.merged({"radius": 3.5}, true)
+	worker._sync_entities(changed)
+	_check(worker._instances[0] != original, "crown dimension changes must rebuild the card tree")
 	worker._sync_entities([])
 	_check(worker._instances.is_empty() and worker._signatures.is_empty(), "removed entities must leave no cached nodes")
 	# The production protocol uploads immutable definitions once and then sends
 	# only a resource token plus pose. This path must preserve the same cache rule.
-	var definition := _tree_entity(54321)
-	definition["resource"] = "tree-resource"
-	worker._sync_resources([definition])
-	var light := {"resource": "tree-resource", "position": [1.0, 2.0, 3.0],
-		"rotation": entity.rotation}
-	worker._sync_entities([light])
+	var definition := _tree_pair(54321)
+	definition[0]["resource"] = "tree-trunk-resource"
+	definition[1]["resource"] = "tree-canopy-resource"
+	worker._sync_resources(definition)
+	var light: Array = [
+		{"resource": "tree-trunk-resource", "position": [1.0, 2.0, 3.0],
+		 "rotation": _identity_rotation()},
+		{"resource": "tree-canopy-resource", "position": [1.0, 2.0, 5.94],
+		 "rotation": _identity_rotation()},
+	]
+	worker._sync_entities(light)
 	var resource_instance := worker._instances[0]
-	light["position"] = [4.0, 5.0, 6.0]
-	worker._sync_entities([light])
+	light[0]["position"] = [4.0, 5.0, 6.0]
+	light[1]["position"] = [4.0, 5.0, 8.94]
+	worker._sync_entities(light)
 	_check(worker._instances[0] == resource_instance, "resource-token pose updates must reuse generated resources")
 	_check(worker._instances[0].position == Vector3(4.0, 6.0, -5.0), "resource-token pose must reach cached tree")
 	worker._sync_entities([])
@@ -139,26 +184,44 @@ func _test_worker_cache() -> void:
 	worker.free()
 
 
-func _tree_entity(seed_value: int) -> Dictionary:
-	return {
+func _tree_pair(seed_value: int) -> Array:
+	var trunk := {
 		"type": 2,
 		"parameters": [2.0, 7.0],
 		"vertices": null,
 		"triangles": null,
-		"visual": {"kind": "tree_canopy", "height": 7.0, "radius": 2.0,
+		"visual": {"kind": "tree_trunk", "height": 4.06, "radius": 0.24,
 			"seed": seed_value, "lod_near": 120.0, "lod_far": 640.0},
 		"color": [0.12, 0.35, 0.08],
 		"reflectance": 0.8,
 		"position": [0.0, 0.0, 0.0],
-		"rotation": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+		"rotation": _identity_rotation(),
+		"object_id": "%d/trunk" % seed_value,
 	}
+	var canopy := {
+		"type": 2,
+		"parameters": [2.0, 3.5],
+		"vertices": null,
+		"triangles": null,
+		"visual": {"kind": "tree_canopy", "height": 3.5, "radius": 2.0,
+			"seed": seed_value + 1, "lod_near": 120.0, "lod_far": 640.0},
+		"color": [0.12, 0.35, 0.08],
+		"reflectance": 0.9,
+		"position": [0.0, 0.0, 2.94],
+		"rotation": _identity_rotation(),
+		"object_id": "%d/canopy" % seed_value,
+	}
+	return [trunk, canopy]
 
 
-func _finite_transform(transform_value: Transform3D) -> bool:
-	for value in [transform_value.origin.x, transform_value.origin.y, transform_value.origin.z, transform_value.basis.x.x, transform_value.basis.y.y, transform_value.basis.z.z]:
-		if is_nan(value) or is_inf(value):
-			return false
-	return true
+func _identity_rotation() -> Array:
+	return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+
+func _tilt_rotation(angle: float) -> Array:
+	var cosine := cos(angle)
+	var sine := sin(angle)
+	return [1.0, 0.0, 0.0, 0.0, cosine, -sine, 0.0, sine, cosine]
 
 
 func _check(condition: bool, message: String) -> void:

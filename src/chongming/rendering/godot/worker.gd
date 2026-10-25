@@ -500,26 +500,74 @@ func _sync_entities(entities: Array) -> void:
 	while _instances.size() > entities.size():
 		_instances.pop_back().free()
 		_signatures.pop_back()
+	var resolved: Array = []
+	for light_entity in entities:
+		resolved.append(_resolve_entity(light_entity))
+	# A card tree is rendered as one whole-tree model on its ground trunk entity.
+	# Pair it with the canopy entity so semantic crown dimensions and the sampled
+	# wind rotation stay available without changing the Python contract.
+	var canopies: Dictionary = {}
+	for index in range(entities.size()):
+		var entity: Dictionary = resolved[index]
+		if entity.is_empty():
+			continue
+		var visual_value: Variant = entity.get("visual", null)
+		if visual_value is Dictionary and str(visual_value.get("kind", "")) == "tree_canopy":
+			var base_id := str(entity.get("object_id", "")).trim_suffix("/canopy")
+			var light: Dictionary = entities[index]
+			canopies[base_id] = {
+				"visual": visual_value,
+				"position": light.get("position", entity.get("position", [0.0, 0.0, 0.0])),
+				"rotation": light.get("rotation", entity.get("rotation", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])),
+			}
 	for index in range(entities.size()):
 		var light_entity: Dictionary = entities[index]
-		var entity: Dictionary = light_entity
-		var resource_token := str(light_entity.get("resource", ""))
-		if not resource_token.is_empty():
-			if not _resources.has(resource_token):
-				push_error("render entity references unknown resource %s" % resource_token)
-				continue
-			entity = _resources[resource_token]
+		var entity: Dictionary = resolved[index]
+		if entity.is_empty():
+			push_error("render entity could not be resolved")
+			continue
+		var visual_value: Variant = entity.get("visual", null)
+		var create_visual: Dictionary = visual_value if visual_value is Dictionary else {}
+		var paired: Dictionary = {}
+		var tree_visual: Dictionary = {}
+		if create_visual.get("kind", "") == "tree_trunk":
+			var base_id := str(entity.get("object_id", "")).trim_suffix("/trunk")
+			if canopies.has(base_id):
+				paired = canopies[base_id]
+				var canopy_visual: Dictionary = paired["visual"]
+				var trunk_position: Array = light_entity.get("position", entity.get("position", [0.0, 0.0, 0.0]))
+				var canopy_position: Array = paired["position"]
+				var crown_offset := maxf(0.0, float(canopy_position[2]) - float(trunk_position[2]))
+				var total_height := float(canopy_visual.get("height", 1.0)) + crown_offset
+				if total_height <= 0.1:
+					total_height = maxf(1.0, float(create_visual.get("height", 1.0)) / 0.58)
+				tree_visual = create_visual.duplicate(true)
+				tree_visual["kind"] = "tree"
+				tree_visual["height"] = total_height
+				tree_visual["radius"] = float(canopy_visual.get("radius", 1.0))
+				tree_visual["seed"] = int(create_visual.get("seed", 0))
 		if index == _instances.size():
 			_instances.append(Node3D.new())
 			_signatures.append("")
-		var signature := resource_token if not resource_token.is_empty() else JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null)])
+		var signature := ""
+		if not str(light_entity.get("resource", "")).is_empty():
+			signature = str(light_entity.get("resource", ""))
+			if not tree_visual.is_empty():
+				signature += "|tree|" + JSON.stringify(tree_visual)
+		else:
+			signature = JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null)])
+			if not tree_visual.is_empty():
+				signature += "|tree|" + JSON.stringify(tree_visual)
 		if signature != _signatures[index]:
 			var old_instance := _instances[index]
 			old_instance.free()
-			var visual_value: Variant = entity.get("visual", null)
 			var new_instance: Node3D
-			if visual_value is Dictionary and str(visual_value.get("kind", "")) in ["tree_trunk", "tree_canopy", "shrub", "grass"]:
-				new_instance = Vegetation.create(visual_value, entity.color, float(entity.reflectance))
+			if create_visual.get("kind", "") in ["tree", "tree_trunk", "tree_canopy", "shrub", "grass"]:
+				new_instance = Vegetation.create(
+					tree_visual if not tree_visual.is_empty() else create_visual,
+					entity.color,
+					float(entity.reflectance)
+				)
 			else:
 				var mesh_instance := MeshInstance3D.new()
 				mesh_instance.mesh = _mesh(entity)
@@ -537,6 +585,8 @@ func _sync_entities(entities: Array) -> void:
 			_signatures[index] = signature
 		var instance := _instances[index]
 		instance.transform = Transform3D(_basis(light_entity.rotation), _enu(light_entity.position))
+		if not paired.is_empty():
+			_apply_tree_wind(instance, paired["rotation"])
 	# Definitions are immutable and the Python registry deliberately re-uploads a
 	# definition if an object returns after being absent. Keep the worker bounded.
 	var used: Dictionary = {}
@@ -550,6 +600,37 @@ func _sync_entities(entities: Array) -> void:
 			stale.append(str(token))
 	for token in stale:
 		_resources.erase(token)
+
+
+func _resolve_entity(light_entity: Dictionary) -> Dictionary:
+	var token := str(light_entity.get("resource", ""))
+	if token.is_empty():
+		return light_entity
+	if not _resources.has(token):
+		push_error("render entity references unknown resource %s" % token)
+		return {}
+	return _resources[token]
+
+
+func _apply_tree_wind(instance: Node3D, rotation: Array) -> void:
+	var crown := instance.get_node_or_null("Model/Crown") as Node3D
+	if crown == null:
+		return
+	var basis := _basis(rotation)
+	var lean := basis.z - Vector3.UP
+	if lean.length() < 1e-5:
+		crown.position = Vector3.ZERO
+		crown.scale = Vector3.ONE
+		return
+	var model := crown.get_parent() as Node3D
+	var native_height := float(crown.get_meta("native_height", 10.0))
+	var offset := lean * native_height * 0.18
+	if model != null:
+		crown.position = model.basis.inverse() * offset
+	else:
+		crown.position = offset
+	var squash := minf(0.06, lean.length() * 0.30)
+	crown.scale = Vector3(1.0 + squash, 1.0 - squash * 0.35, 1.0 + squash)
 
 
 func _sync_resources(definitions: Array) -> void:

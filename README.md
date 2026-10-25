@@ -30,6 +30,10 @@ chongming-center --scenario scenarios/center_clean.json --check
 
 第二阶段架构桩使用 Python 与 `uv`；通用逻辑保持在 Python，视觉/几何算法先用 OpenCV 验证，性能热点再通过稳定端口替换为 Rust 或 C 后端。最终原生语言不在架构桩阶段预先冻结。
 
+## 第三方素材
+
+虚拟场景植被使用 [Shapespark Low-Poly Exterior Plants Kit](https://github.com/shapespark/shapespark-assets/tree/main/shapespark-low-poly-plants-kit)，以 **CC0 1.0 Universal** 释出；随仓库分发的文件、来源和修改说明见 [`src/chongming/rendering/godot/assets/README.md`](src/chongming/rendering/godot/assets/README.md)。OSM 数据和 DEM 的署名分别见 [OSM 地景整合说明](docs/OSM地景整合说明.md)。
+
 ## 许可
 
 代码以 [GNU Affero General Public License v3.0](LICENSE) 发布。第三方依赖和素材仍受其各自许可证约束。

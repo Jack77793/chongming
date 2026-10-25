@@ -41,7 +41,7 @@ uv run chongming-osm scenarios/assets/osm_demo.osm \
 - 拒绝关系建筑、其成员建筑、building parts、非零/非法抬升标签、缺点、未闭合、自交和重复点。关系/内洞不尝试修复，避免误填庭院。连续共线点可确定性移除。
 - 精简 XML 保留支持类别及其节点/成员依赖、几何/分类/高度/宽度标签，去掉未知 tag、无关 POI 和节点。拒绝候选与相关关系仍保留诊断所需记录，因此它是本导入器的精简重导入文件，不是通用、引用完整的 OSM 区域备份。清洗报告保留原始文件摘要；应同时留存原始下载文件。
 - 道路支持 motorway/trunk/primary/secondary/tertiary 及 link、residential/unclassified/service/living_street、pedestrian/track/footway/path/cycleway/steps；按中心线缓冲成简单路面，宽度取有效 `width`（0.3–40 m）或类别默认值（1.5–12 m）。不生成交通图、车道、桥梁和隧道；`lanes` 不用于推断宽度。
-- 树点支持 `natural=tree`，高度限 1–60 m，缺失回退 10 m；冠幅取有效 `diameter_crown`，否则冠半径取高度的 1/4。逻辑沿用树干/树冠圆柱代理，视觉沿用既有 Godot 语义树木。
+- 树点支持 `natural=tree`，高度限 1–60 m，缺失回退 10 m；冠幅取有效 `diameter_crown`，否则冠半径取高度的 1/4。逻辑沿用树干/树冠圆柱代理，视觉使用 CC0 卡片树资产（见 `src/chongming/rendering/godot/assets/`）。
 - 森林为 `natural=wood` / `landuse=forest`；绿地支持 grass/meadow/recreation_ground/village_green、natural grassland、park/garden；水体支持 `natural=water` / `waterway=riverbank`。闭合 way 和可完整拼接的 multipolygon 支持内洞，缺成员或破损关系整体拒绝。道路及地表裁到选区，建筑边界策略仍为整栋保留/拒绝。
 - 森林树按 `forest_spacing_m`（至少 10 m，默认 60 m）、`maximum_forest_trees`（默认 256，上限 2000）确定性分布，排除洞、建筑、水体、道路及已标树冠。该层始终保留；`osm.vegetation.forest_tree_density_per_ha` 以“每公顷目标株数（含已有点要素树和森林基础树）”补齐差额，因此不会重复种植基础树。绿地、公园和林地再按各自密度生成乔木、灌木和草 patch；水体是随粗 DEM 贴地的颜色面，不反演水平水位或湖底。建筑基础没有地基开挖/坡地基础拟合。
 
@@ -145,9 +145,9 @@ CHONGMING_GODOT=/path/to/godot uv run python scripts/review_osm.py \
 uv run chongming-preview --scenario output/osm/hannover-500m/review.json
 ```
 
-HGT 以锚点 EGM96 正高 54 m 为参考，场景锚点相对地面为 0；重采样网格相对高程约 −2.94 至 19.08 m。该 60 m 网格只验证简单地形链路，不能用于水位、林下裸地或地基精度判断。复查相机在 `(-620,-620,850)` 米，方位 45°、俯仰 −44°，植被 LOD 为 180/2000 m，用于查看全区低面代理；此静态、无目标视图的逻辑计时包含定标点视线，不能代表多目标运行成本。
+HGT 以锚点 EGM96 正高 54 m 为参考，场景锚点相对地面为 0；重采样网格相对高程约 −2.94 至 19.08 m。该 60 m 网格只验证简单地形链路，不能用于水位、林下裸地或地基精度判断。复查相机在 `(-620,-620,850)` 米，方位 45°、俯仰 −44°，植被按 180/2000 m 的 far 距离剔除；当前没有近/远代理，此静态、无目标视图的逻辑计时包含定标点视线，不能代表多目标运行成本。
 
-本机 1024×576、每视图 3 次暖机采样，首个请求约 1.1 s（包括几何、材质和植被资源创建），后续中位约 13–17 ms；逻辑从此前的数十毫秒量级降到约 0.75 ms，原因是静态世界/植被先用保守包围盒 BVH 排除，再执行原有精确网格相交。Python 每帧发送稳定资源令牌和位姿，Godot 只在资源首次出现或语义改变时创建网格/材质。精确相交规则、树木等效圆柱和地形命中规则均未改变；动态飞机不使静态城市索引失效。网格统计不含 Godot 按 LOD 生成的树木视觉三角形。此结果证明小选区可离线准备和绘制；没有硬性实时指标，也没有引入 Vulkan/GPU 遮挡查询。
+以下为程序化树基线的历史测量：本机 1024×576、每视图 3 次暖机采样，首个请求约 1.1 s（包括几何、材质和植被资源创建），后续中位约 13–17 ms；逻辑从此前的数十毫秒量级降到约 0.75 ms，原因是静态世界/植被先用保守包围盒 BVH 排除，再执行原有精确网格相交。Python 每帧发送稳定资源令牌和位姿，Godot 只在资源首次出现或语义改变时创建网格/材质。精确相交规则、树木等效圆柱和地形命中规则均未改变；动态飞机不使静态城市索引失效。网格统计不含卡片树视觉三角形。卡片树替换后的 Hannover 复查见 [虚拟场景预览](虚拟场景预览.md)；没有硬性实时指标，也没有引入 Vulkan/GPU 遮挡查询。
 
 不需要真实下载数据时，可直接预览 `scenarios/osm_landscape.json`。其 CC0 合成 XML、带洞森林、道路、树点、绿地、水体与 DEM 均随仓库保存；`uv run python scripts/prepare_osm_demo.py` 可重建资产，脚本内容变化会改变 DEM 来源摘要，需将打印的新资产 SHA-256 更新到场景文件。
 
