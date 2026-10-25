@@ -22,6 +22,7 @@ func _run() -> void:
 	_test_worker_cache()
 	_test_screen_size_lod()
 	_test_understory_wind()
+	_test_mesh_normals()
 	await _test_freeview_world()
 	if failures.is_empty():
 		print("vegetation tests passed")
@@ -195,6 +196,21 @@ func _test_understory_wind() -> void:
 	worker._apply_understory_wind(grass, 20.0, "grass")
 	_check(clumps.position == Vector3.ZERO, "grass should return to rest without wind")
 	worker._world.free()
+	worker.free()
+
+
+func _test_mesh_normals() -> void:
+	var worker := Worker.new()
+	var mesh := worker._mesh({
+		"type": 2,
+		"parameters": [],
+		"vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+		"triangles": [[0, 1, 2]],
+	})
+	var normals: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_NORMAL]
+	_check(normals.size() == 3, "generated mesh should carry per-vertex normals")
+	for normal in normals:
+		_check(normal.z > 0.9, "a counter-clockwise ENU ground triangle should face up in body space")
 	worker.free()
 
 
