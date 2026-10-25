@@ -1,0 +1,31 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{nix,json,html,css,js,mjs,cjs,md,markdown}]
+indent_size = 2
+
+[*.{gd,gdshader}]
+indent_style = tab
+indent_size = 4
+tab_width = 4
+
+# Markdown uses trailing spaces for explicit line breaks.
+[*.{md,markdown}]
+trim_trailing_whitespace = false
+
+# Preserve byte-verified assets until content digests replace byte digests.
+[scenarios/assets/**]
+charset = unset
+end_of_line = unset
+indent_style = unset
+indent_size = unset
+tab_width = unset
+insert_final_newline = false
+trim_trailing_whitespace = false
