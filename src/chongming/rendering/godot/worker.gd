@@ -532,6 +532,17 @@ func _sync_entities(entities: Array) -> void:
 				"position": light.get("position", entity.get("position", [0.0, 0.0, 0.0])),
 				"rotation": light.get("rotation", entity.get("rotation", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])),
 			}
+	var has_mesh_terrain := false
+	for entity_value in resolved:
+		var resolved_entity: Dictionary = entity_value
+		if (
+			str(resolved_entity.get("surface", "")) == "terrain"
+			and resolved_entity.get("vertices", null) != null
+		):
+			has_mesh_terrain = true
+			break
+	if _ground != null:
+		_ground.visible = not has_mesh_terrain
 	for index in range(entities.size()):
 		var light_entity: Dictionary = entities[index]
 		var entity: Dictionary = resolved[index]
@@ -764,14 +775,15 @@ func _mesh(entity: Dictionary) -> Mesh:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for triangle in entity.triangles:
+		var a := _vector(entity.vertices[int(triangle[0])])
+		var b := _vector(entity.vertices[int(triangle[1])])
+		var c := _vector(entity.vertices[int(triangle[2])])
+		var normal := (b - a).cross(c - a)
+		if normal.length_squared() > 1e-20:
+			normal = normal.normalized()
 		for vertex in triangle:
+			surface.set_normal(normal)
 			surface.add_vertex(_vector(entity.vertices[int(vertex)]))
-	# SurfaceTool.generate_normals() follows the opposite winding convention, so
-	# the Python-built meshes end up with inverted face normals (terrain points
-	# down, building walls inward). The flip argument negates the generated
-	# normals without touching vertex order, keeping triangle winding,
-	# front-face culling and shadow geometry unchanged.
-	surface.generate_normals(true)
 	return surface.commit()
 
 
