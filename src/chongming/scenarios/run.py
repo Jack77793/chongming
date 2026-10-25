@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, deque
+from copy import deepcopy
 from dataclasses import replace
 from importlib.metadata import distribution, version
 from importlib.resources import files
@@ -40,6 +41,9 @@ from chongming.scenarios.serialization import (
     validate_supported_features,
 )
 
+TRUTH_FORMAT_VERSION = "truth-jsonl-v2"
+TRUTH_STATIC_FILE = "truth-static.json"
+
 
 def _json(value: Any) -> str:
     return json.dumps(_encode(value), ensure_ascii=False, allow_nan=False, sort_keys=True)
@@ -48,6 +52,44 @@ def _json(value: Any) -> str:
 def _digest(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _json_digest(value: Any) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def read_truth_records(directory: Path) -> list[dict[str, Any]]:
+    """Read truth evidence and restore the complete per-step scene snapshot.
+
+    Version 2 stores the invariant world-object geometry in a sidecar.  The
+    returned records intentionally retain the legacy in-memory shape so
+    evaluators do not need to know how evidence was laid out on disk.
+    """
+    truth_path = directory / "truth.jsonl"
+    static_path = directory / TRUTH_STATIC_FILE
+    records = [json.loads(line) for line in truth_path.read_text().splitlines()]
+    if not static_path.exists():
+        return records
+    static = json.loads(static_path.read_text())
+    if static.get("format") != "truth-static-v1":
+        raise ValueError(f"unsupported truth static format: {static.get('format')!r}")
+    if static.get("truth_format") != TRUTH_FORMAT_VERSION:
+        raise ValueError(f"unsupported truth format: {static.get('truth_format')!r}")
+    world_objects = static.get("world_objects")
+    digest = static.get("world_objects_sha256")
+    if digest != _json_digest(world_objects):
+        raise ValueError("truth static world_objects digest mismatch")
+    for record in records:
+        reference = record.pop("logical_scene_static_ref", None)
+        if reference != digest:
+            raise ValueError("truth record does not reference its static scene")
+        logical_scene = record.get("logical_scene")
+        if not isinstance(logical_scene, dict):
+            raise TypeError("truth record logical_scene must be an object")
+        if "world_objects" in logical_scene:
+            raise ValueError("truth v2 record unexpectedly contains world_objects")
+        record["logical_scene"] = {**logical_scene, "world_objects": deepcopy(world_objects)}
+    return records
 
 
 def _package_digests(directory: Traversable, prefix: str = "chongming") -> dict[str, str]:
@@ -120,6 +162,7 @@ class SceneEvidenceWriter:
             self.close()
             raise
         self.streams: Counter[str] = Counter()
+        self._truth_static_digest: str | None = None
 
     def document(self, name: str, value: Any) -> None:
         with (self.directory / name).open("x", encoding="utf-8") as handle:
@@ -127,6 +170,28 @@ class SceneEvidenceWriter:
 
     def record(self, step: ScenarioStep) -> float:
         began = time.perf_counter()
+        truth = _encode(replace(step.truth, timing=None))
+        logical_scene = truth.get("logical_scene")
+        if not isinstance(logical_scene, dict):
+            raise TypeError("encoded truth logical_scene must be an object")
+        world_objects = logical_scene.pop("world_objects", None)
+        if world_objects is None:
+            raise ValueError("encoded truth logical_scene is missing world_objects")
+        static_digest = _json_digest(world_objects)
+        if self._truth_static_digest is None:
+            self._truth_static_digest = static_digest
+            self.document(
+                TRUTH_STATIC_FILE,
+                {
+                    "format": "truth-static-v1",
+                    "truth_format": TRUTH_FORMAT_VERSION,
+                    "world_objects": world_objects,
+                    "world_objects_sha256": static_digest,
+                },
+            )
+        elif static_digest != self._truth_static_digest:
+            raise ValueError("truth logical_scene world_objects changed during a run")
+        truth["logical_scene_static_ref"] = self._truth_static_digest
         frame_records = []
         for frame in step.video.frames:
             # Never use user-provided IDs as path components.
@@ -176,7 +241,7 @@ class SceneEvidenceWriter:
             )
             + "\n"
         )
-        self._handles["truth"].write(_json(replace(step.truth, timing=None)) + "\n")
+        self._handles["truth"].write(_json(truth) + "\n")
         evidence_ms = (time.perf_counter() - began) * 1000
         self._handles["timing"].write(
             _json(
@@ -232,8 +297,9 @@ def run_scene(
             {
                 "scope": "virtual-subsystem",
                 "run_id": str(uuid4()),
-                "scenario": scenario,
+                "scenario_path": "scenario.json",
                 "scenario_content_digest": hashlib.sha256(_json(scenario).encode()).hexdigest(),
+                "truth_format": TRUTH_FORMAT_VERSION,
                 "authoring_format": authoring_document.get("format")
                 if isinstance(authoring_document, dict)
                 else None,

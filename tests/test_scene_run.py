@@ -20,7 +20,7 @@ from chongming.modules.scene import _scheduled_exposures
 from chongming.rendering.godot import render_rgb8
 from chongming.scenarios.authoring import save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec, optical_rotation
-from chongming.scenarios.run import run_scene
+from chongming.scenarios.run import read_truth_records, run_scene
 from chongming.scenarios.serialization import (
     load_compiled_scenario,
     save_compiled_scenario,
@@ -88,7 +88,9 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 self.assertEqual(summary["counts"]["gpu_submissions"], 0)
                 self.assertEqual(summary["counts"]["logical_frames"], 24)
                 manifest = json.loads((output / "manifest.json").read_text())
-                terrain = manifest["scenario"]["scenario"]["scene_definition"]["terrain"]
+                self.assertEqual(manifest["scenario_path"], "scenario.json")
+                scenario = json.loads((output / "scenario.json").read_text())
+                terrain = scenario["scenario"]["scene_definition"]["terrain"]
                 self.assertEqual(
                     terrain["heightfield_asset_content_sha256"] is not None, name.endswith("_asset")
                 )
@@ -97,7 +99,7 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                     for binding in manifest["station_sessions"]
                     for key in ("image_session_id", "virtual_session_id")
                 ]
-                truth = records(output / "truth.jsonl")
+                truth = read_truth_records(output)
                 for sample in truth:
                     terrain = sample["logical_scene"]["terrain"]
                     terrain["heightfield_asset_uri"] = None
@@ -138,8 +140,12 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 self.assertTrue(manifest["package_digest"])
                 self.assertIn("chongming/web/preview.html", manifest["package_digests"])
                 self.assertIn("dependency_lock_digest", manifest)
+                self.assertNotIn("scenario", manifest)
                 online = records(output / "online.jsonl")
-                truth = records(output / "truth.jsonl")
+                truth = read_truth_records(output)
+                raw_truth = records(output / "truth.jsonl")
+                self.assertTrue((output / "truth-static.json").is_file())
+                self.assertNotIn("world_objects", raw_truth[0]["logical_scene"])
                 self.assertEqual(len(online), 3)
                 self.assertNotIn("truth_object_id", json.dumps(online))
                 self.assertTrue(any(record["rays"] for record in truth))
@@ -188,7 +194,7 @@ class SceneRunAcceptanceTests(unittest.TestCase):
             online = records(root / "reduced" / "online.jsonl")
             self.assertEqual(len(online[1]["skipped_frame_ids"]), 4)
             self.assertEqual(online[1]["frames"], [])
-            truths = [records(root / name / "truth.jsonl") for name in ("full", "reduced")]
+            truths = [read_truth_records(root / name) for name in ("full", "reduced")]
             for i, name in enumerate(("full", "reduced")):
                 manifest = json.loads((root / name / "manifest.json").read_text())
                 sessions = [
