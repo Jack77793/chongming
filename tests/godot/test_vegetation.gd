@@ -23,6 +23,7 @@ func _run() -> void:
 	_test_screen_size_lod()
 	_test_understory_wind()
 	_test_mesh_normals()
+	_test_heightfield_ground_selection()
 	await _test_freeview_world()
 	if failures.is_empty():
 		print("vegetation tests passed")
@@ -211,6 +212,37 @@ func _test_mesh_normals() -> void:
 	_check(normals.size() == 3, "generated mesh should carry per-vertex normals")
 	for normal in normals:
 		_check(normal.z > 0.9, "a counter-clockwise ENU ground triangle should face up in body space")
+	worker.free()
+
+
+func _test_heightfield_ground_selection() -> void:
+	var worker := Worker.new()
+	worker._world = Node3D.new()
+	worker._ground = MeshInstance3D.new()
+	worker._ground.visible = true
+	var terrain := {
+		"type": 2,
+		"parameters": [],
+		"vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+		"triangles": [[0, 1, 2]],
+		"surface": "terrain",
+		"color": [0.2, 0.3, 0.1],
+		"reflectance": 0.8,
+		"object_id": "terrain",
+		"visual": null,
+		"surface_detail": 0.0,
+		"category": "terrain",
+		"position": [0.0, 0.0, 0.0],
+		"rotation": _identity_rotation(),
+	}
+	worker._sync_entities([terrain])
+	_check(not worker._ground.visible,
+		"heightfield terrain must disable the fallback ground and its shadows")
+	worker._sync_entities([])
+	_check(worker._ground.visible,
+		"flat terrain must restore the fallback ground")
+	worker._world.free()
+	worker._ground.free()
 	worker.free()
 
 

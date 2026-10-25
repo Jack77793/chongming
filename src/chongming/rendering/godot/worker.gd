@@ -289,9 +289,14 @@ func _render(request: Dictionary) -> PackedByteArray:
 	_sun.light_energy = float(request["illuminance"]) / 100000.0 * (1.0 - cloud_cover * 0.32)
 	var sun_direction := _enu(request["sun"]).normalized()
 	_sun.basis = Basis.looking_at(-sun_direction, Vector3.FORWARD if absf(sun_direction.y) > 0.99 else Vector3.UP)
+	_sync_resources(request.get("resources", []))
+	_sync_entities(request["entities"])
+	# Resolve terrain presence before positioning the fallback. This avoids
+	# using the previous snapshot's DEM flag when a scene changes between flat
+	# and heightfield terrain.
 	_ground.position = Vector3(
 		_camera.position.x,
-		float(request["terrainElevation"]) - (1.0 if _has_mesh_terrain else 0.0),
+		float(request["terrainElevation"]),
 		_camera.position.z
 	)
 	_ground_material.set_shader_parameter("base_color", Vector3(
@@ -299,8 +304,6 @@ func _render(request: Dictionary) -> PackedByteArray:
 		float(request.terrainColor[1]) * float(request.terrainReflectance),
 		float(request.terrainColor[2]) * float(request.terrainReflectance)))
 	_ground_material.set_shader_parameter("detail_strength", float(request.get("terrainDetail", 0.0)))
-	_sync_resources(request.get("resources", []))
-	_sync_entities(request["entities"])
 	if str(request.get("mode", "")) == "editor":
 		var editor_enabled := bool(request.get("editor_enabled", false))
 		var editor_realtime := bool(request.get("editor_realtime", false))
@@ -548,7 +551,10 @@ func _sync_entities(entities: Array) -> void:
 			break
 	_has_mesh_terrain = has_mesh_terrain
 	if _ground != null:
-		_ground.visible = true
+		# A heightfield is the sole terrain and shadow receiver. Keeping the
+		# fallback plane enabled creates a second visible/shadow-catching ground
+		# one metre below the DEM, especially obvious in freeview.
+		_ground.visible = not has_mesh_terrain
 	for index in range(entities.size()):
 		var light_entity: Dictionary = entities[index]
 		var entity: Dictionary = resolved[index]
