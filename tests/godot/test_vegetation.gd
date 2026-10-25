@@ -208,6 +208,11 @@ func _test_mesh_normals() -> void:
 		"vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
 		"triangles": [[0, 1, 2]],
 	})
+	var positions: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	_check(positions[0] == Vector3(0.0, 1.0, 0.0)
+		and positions[1] == Vector3(1.0, 0.0, 0.0)
+		and positions[2] == Vector3(0.0, 0.0, 0.0),
+		"mesh submission must use Godot's clockwise front-face winding")
 	var normals: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_NORMAL]
 	_check(normals.size() == 3, "generated mesh should carry per-vertex normals")
 	for normal in normals:

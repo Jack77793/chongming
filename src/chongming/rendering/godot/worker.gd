@@ -793,7 +793,11 @@ func _mesh(entity: Dictionary) -> Mesh:
 		var normal := (b - a).cross(c - a)
 		if normal.length_squared() > 1e-20:
 			normal = normal.normalized()
-		for vertex in triangle:
+		# Godot treats clockwise triangles as front-facing in its 3D backend.
+		# The scene contract stores outward ENU faces in the conventional
+		# counter-clockwise order. Reverse only the submitted vertex order while
+		# retaining the outward normal computed from the contract order.
+		for vertex in [triangle[2], triangle[1], triangle[0]]:
 			surface.set_normal(normal)
 			surface.add_vertex(_vector(entity.vertices[int(vertex)]))
 	return surface.commit()
