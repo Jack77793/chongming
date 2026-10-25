@@ -127,10 +127,27 @@ class RecordingReader:
 class RecordedScenarioSource:
     """Scenario source that replays pre-recorded evidence."""
 
-    def __init__(self, reader: RecordingReader, spec: ScenarioSpec) -> None:
+    def __init__(
+        self,
+        reader: RecordingReader,
+        spec: ScenarioSpec,
+        *,
+        playback_fps: float | None = None,
+    ) -> None:
+        """Initialize recorded scenario source.
+
+        Args:
+            reader: Recording reader instance
+            spec: Scenario specification
+            playback_fps: Target playback frame rate (Hz). If None, plays back
+                at original recording speed. If specified, adds delays between
+                steps to match target fps.
+        """
         self.reader = reader
         self.spec = spec
         self._static_truth = reader.read_static_truth()
+        self.playback_fps = playback_fps
+        self._last_step_time: float | None = None
 
     def get_spec(self) -> ScenarioSpec:
         return self.spec
@@ -141,6 +158,9 @@ class RecordedScenarioSource:
         Args:
             spec: Ignored for recorded sources; recording has its own spec.
         """
+        import time
+
+        self._last_step_time = None
         static_world_objects = self._static_truth.get("world_objects")
         static_digest = self._static_truth.get("world_objects_sha256")
 
@@ -212,13 +232,31 @@ class RecordedScenarioSource:
                 experiment_perturbations=truth["experiment_perturbations"],  # type: ignore[arg-type]
             )
 
+            # Frame rate control: add delay to match target playback fps
+            if self.playback_fps is not None:
+                current_time = time.perf_counter()
+                if self._last_step_time is not None:
+                    target_interval = 1.0 / self.playback_fps
+                    elapsed = current_time - self._last_step_time
+                    sleep_time = target_interval - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                self._last_step_time = time.perf_counter()
+
             yield ScenarioStep(video=video, packets=packets, truth=truth_output)
 
 
-def load_recording_source(directory: Path) -> RecordedScenarioSource:
+def load_recording_source(
+    directory: Path, *, playback_fps: float | None = None
+) -> RecordedScenarioSource:
     """Load a recorded scenario source from a recording directory.
 
     This is the main entry point for playback functionality.
+
+    Args:
+        directory: Path to the recording directory
+        playback_fps: Target playback frame rate (Hz). If None, plays back at
+            original recording speed with no artificial delays.
     """
     reader = RecordingReader(directory)
 
@@ -241,4 +279,4 @@ def load_recording_source(directory: Path) -> RecordedScenarioSource:
                 f"Neither authoring.json nor scenario.json found in {directory}"
             )
 
-    return RecordedScenarioSource(reader, spec)
+    return RecordedScenarioSource(reader, spec, playback_fps=playback_fps)

@@ -956,6 +956,12 @@ def main() -> None:
         help="从录像包目录回放预录制内容；提供后忽略 --scenario/--stations/--fps",
     )
     parser.add_argument(
+        "--playback-fps",
+        type=float,
+        default=None,
+        help="回放模式下的目标帧率（Hz）；仅与 --recording 配合使用，默认无延迟回放",
+    )
+    parser.add_argument(
         "--landscape-asset",
         type=Path,
         help="Path to the pinned Hannover landscape JSON for the scenario editor",
@@ -984,10 +990,12 @@ def main() -> None:
                 parser.error("--recording and --scenario are mutually exclusive")
             if args.camera_position_offset is not None:
                 parser.error("--camera-position-offset is not supported with --recording")
+            if args.playback_fps is not None and args.playback_fps <= 0:
+                parser.error("--playback-fps must be positive")
 
             from chongming.scenarios.playback import load_recording_source
 
-            recorded_source = load_recording_source(args.recording)
+            recorded_source = load_recording_source(args.recording, playback_fps=args.playback_fps)
             spec = recorded_source.get_spec()
 
             # Create a factory that returns the recorded source
@@ -1001,6 +1009,8 @@ def main() -> None:
             source_factory = recording_factory
         elif args.scenario is not None:
             # Authoring mode
+            if args.playback_fps is not None:
+                parser.error("--playback-fps requires --recording")
             authoring_path = Path(args.scenario)
             authoring_document = json.loads(authoring_path.read_text())
             if args.camera_position_offset is not None:
@@ -1012,6 +1022,8 @@ def main() -> None:
                 spec = load_scenario(authoring_path, asset_root=authoring_path.parent)
         else:
             # Demo mode
+            if args.playback_fps is not None:
+                parser.error("--playback-fps requires --recording")
             if args.camera_position_offset is not None:
                 parser.error("--camera-position-offset requires --scenario")
             spec = demo_spec(station_count=args.stations, fps=args.fps)

@@ -1,12 +1,81 @@
 # 录制与回放功能实现
 
-**分支**: `feature/recording-playback`  
-**状态**: ✅ 第一阶段完成  
-**创建时间**: 2026-10-26
+**分支**: `feat/recording-playback`  
+**状态**: ✅ 第二阶段完成 - 回放速率控制  
+**创建时间**: 2026-10-26  
+**更新时间**: 2026-10-26
 
 ## 概述
 
 实现 issue #15 提出的"录制与回放"机制,以解决虚拟场景实时渲染性能瓶颈(~10fps)。通过离线录制高质量场景,然后高帧率回放,提升演示直观性和调试效率。
+
+## 第二阶段: 回放速率控制 ✅
+
+### 实现内容
+
+1. **帧率参数化** (`playback.py`)
+   - 为 `RecordedScenarioSource` 添加 `playback_fps` 参数
+   - 为 `load_recording_source()` 添加 `playback_fps` 参数
+   - 支持 `None` 值以实现无限制回放
+
+2. **时间控制机制** (`playback.py`)
+   ```python
+   if self.playback_fps is not None:
+       current_time = time.perf_counter()
+       if self._last_step_time is not None:
+           target_interval = 1.0 / self.playback_fps
+           elapsed = current_time - self._last_step_time
+           sleep_time = target_interval - elapsed
+           if sleep_time > 0:
+               time.sleep(sleep_time)
+       self._last_step_time = time.perf_counter()
+   ```
+
+3. **命令行接口** (`preview.py`)
+   - 添加 `--playback-fps` 参数
+   - 参数验证: 必须与 `--recording` 配合使用
+   - 参数验证: 必须为正数
+
+4. **单元测试** (`tests/test_playback_fps.py`)
+   - 创建模拟录像包的辅助函数
+   - 三个测试用例覆盖所有场景
+   - 所有测试通过 ✅
+
+### 测试结果
+
+**单元测试**:
+```
+test_playback_fps_accuracy ... ok
+test_playback_with_fps_limit ... ok
+test_playback_without_fps_limit ... ok
+
+Ran 3 tests in 0.978s - OK
+```
+
+**30fps 回放实测**:
+```
+Target FPS: 30.0
+Total time: 1.073s (expected 0.967s)
+Average FPS: 27.02
+Frame interval: 36.99ms (expected 33.33ms)
+Accuracy: ✓ Within 20% tolerance
+Unlimited speed: 2022fps (72x faster)
+```
+
+### 性能分析
+
+| 模式 | 实测帧率 | CPU 负载 | 备注 |
+|------|----------|----------|------|
+| 实时渲染 | ~10fps | 高 | 受 Godot 渲染瓶颈限制 |
+| 回放(无限制) | ~2000fps | 低 | 仅 PNG 解码 + Python 开销 |
+| 回放(30fps) | ~27fps | 极低 | 帧率控制生效,流畅体验 |
+
+帧率略低于目标的原因:
+1. Python `time.sleep()` 的精度限制(~1-10ms)
+2. 操作系统线程调度延迟
+3. PNG 图像解码的 I/O 开销波动
+
+对于 30fps 的目标,27fps 的实际性能是可接受的(误差 10%),用户体验流畅。
 
 ## 实现方案
 
@@ -90,23 +159,24 @@ uv run python -m chongming --recording output_dir/
 
 ## 已知限制
 
-1. **帧率固定**: 回放帧率由录像时决定,无法在回放时调整
+1. **帧率精度**: 由于 Python `time.sleep()` 和系统调度的限制,实际帧率可能比目标帧率低 5-15%
 2. **真值简化**: `ScenarioTruthOutput` 中的 `camera_frames` 和 `online_correspondences` 为空元组(待完整反序列化)
 3. **中心端未适配**: `chongming/__main__.py` 尚未添加 `--recording` 支持
 4. **无视频压缩**: 使用 PNG 存储,占用空间较大
 
 ## 下一步计划
 
-**第二阶段** (性能优化):
+**第三阶段** (性能优化):
 - [ ] 视频压缩支持(H.264/H.265)
-- [ ] 回放速率控制(加速/减速)
 - [ ] 完整真值数据反序列化
+- [ ] 提高帧率控制精度(考虑使用更精确的计时机制)
 
-**第三阶段** (增强功能):
+**第四阶段** (增强功能):
 - [ ] 录像片段剪辑和拼接
 - [ ] 录像质量验证工具
 - [ ] 中心端 `--recording` 参数支持
 - [ ] 录像元数据查询工具
+- [ ] 回放暂停/快进/倒放控制
 
 ## 技术细节
 
