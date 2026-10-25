@@ -847,10 +847,14 @@
             set(id, value);
           if (!data.snapshot || data.snapshot.sequence === shown) return;
           const stations = [
-            ...new Set(data.snapshot.monitor.cameras.map((camera) => camera.station_id)),
+            ...new Set(
+              data.snapshot.monitor.cameras.map((camera) => camera.station_id),
+            ),
           ];
           const current = station();
-          const options = [...$("station").options].map((option) => option.value);
+          const options = [...$("station").options].map(
+            (option) => option.value,
+          );
           if (
             options.length !== stations.length ||
             options.some((value, index) => value !== stations[index])

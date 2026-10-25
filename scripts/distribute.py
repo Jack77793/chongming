@@ -26,7 +26,6 @@ REQUIRED_SOURCE = {
     "treefmt.toml",
     ".editorconfig",
     ".gitignore",
-    ".prettierignore",
     "README.md",
     "LICENSE",
     "docs/Nix开发环境.md",

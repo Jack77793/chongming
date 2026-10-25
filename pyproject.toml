@@ -40,7 +40,6 @@ include = [
     "/*.md",
     "/.editorconfig",
     "/.gitignore",
-    "/.prettierignore",
     "/flake.nix",
     "/flake.lock",
     "/uv.lock",
