@@ -204,7 +204,7 @@ def architecture_specs(
                 base_elevation_m=0.0,
                 maximum_relief_m=0.0,
                 heightfield_asset_uri=None,
-                heightfield_asset_digest=None,
+                heightfield_asset_content_sha256=None,
                 appearance=scene.SurfaceAppearance(
                     linear_rgb=(0.2, 0.2, 0.2), diffuse_reflectance=0.5
                 ),

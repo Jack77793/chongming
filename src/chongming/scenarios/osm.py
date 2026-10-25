@@ -24,7 +24,8 @@ from typing import Any
 
 from chongming.contracts import scene as s
 from chongming.contracts.model import ConfigDigest, GeodeticAnchor
-from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
+from chongming.scenarios.assets import read_verified_json, resolve_external_asset
+from chongming.scenarios.json_content import content_sha256, parse_json
 from chongming.scenarios.osm_features import TAGS as FEATURE_TAGS
 
 FORMAT = "osm-landscape-v2"
@@ -527,15 +528,8 @@ def asset_bytes(imported: s.OSMImport) -> bytes:
 
 
 def validate_import(imported: s.OSMImport) -> None:
-    if (imported.format, imported.importer_version) not in {
-        (FORMAT, IMPORTER_VERSION),
-        ("osm-buildings-v1", "chongming-osm-1"),
-    }:
+    if (imported.format, imported.importer_version) != (FORMAT, IMPORTER_VERSION):
         raise ValueError("unsupported OSM asset/importer version")
-    if imported.format == "osm-buildings-v1" and (
-        imported.roads or imported.points or imported.areas or imported.elevation is not None
-    ):
-        raise ValueError("legacy OSM asset cannot contain landscape features")
     validate_config(imported.config)
     date.fromisoformat(imported.data_date)
     if (
@@ -615,13 +609,13 @@ def validate_import(imported: s.OSMImport) -> None:
             raise ValueError("DEM grid must cover the full OSM selection")
 
 
-def load_landscape(uri: str, digest: str, asset_root: Path) -> s.OSMLandscape:
+def load_landscape(uri: str, expected_content_sha256: str, asset_root: Path) -> s.OSMLandscape:
     from chongming.scenarios.serialization import _decode
 
-    content = read_verified_asset(resolve_external_asset(uri, asset_root), digest)
-    imported: s.OSMImport = _decode(json.loads(content), s.OSMImport)
+    document = read_verified_json(resolve_external_asset(uri, asset_root), expected_content_sha256)
+    imported: s.OSMImport = _decode(document, s.OSMImport)
     validate_import(imported)
-    return s.OSMLandscape(uri, digest, imported)
+    return s.OSMLandscape(uri, expected_content_sha256, imported)
 
 
 def building_objects(imported: s.OSMImport) -> tuple[s.WorldObjectSpec, ...]:
@@ -789,6 +783,7 @@ def main() -> None:
         elevation=elevation,
     )
     content = asset_bytes(result.imported)
+    asset_content_sha256 = content_sha256(parse_json(content))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(content)
     if args.cleaned_output is not None:
@@ -801,7 +796,7 @@ def main() -> None:
         "license": result.imported.license,
         "importer_version": IMPORTER_VERSION,
         "config": asdict(config),
-        "asset_sha256": hashlib.sha256(content).hexdigest(),
+        "asset_content_sha256": asset_content_sha256,
         "source_sha256": result.imported.source_sha256,
         "cleaned_sha256": hashlib.sha256(result.cleaned_xml).hexdigest(),
         "source_bytes": result.source_bytes,

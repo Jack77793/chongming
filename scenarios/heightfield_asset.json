@@ -11,7 +11,7 @@
     "spacing_m": 10,
     "asset": {
       "uri": "assets/ridge.json",
-      "sha256": "82da29198f4ac987280a950419c5a3e49fdf9ebcad152278bcbf2b2b3cee151e"
+      "content_sha256": "6744c8b5dd9c1494b5828de16938651560686bd7b9e155a1a3fd73acfce4bd03"
     }
   },
   "targets": [

@@ -45,7 +45,7 @@ from chongming.contracts.scene import (
 )
 from chongming.joint_calibration import JointCalibrationRunner
 from chongming.rendering.godot import close_default_renderer, default_renderer
-from chongming.scenarios.assets import read_verified_asset
+from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
 from chongming.scenarios.serialization import load_scenario
@@ -53,7 +53,7 @@ from chongming.scenarios.serialization import load_scenario
 logger = logging.getLogger(__name__)
 
 # The optional Hannover landscape must be explicitly provisioned and pinned.
-_HANNOVER_SHA256 = "c17d27172db7e63a5ba62c4d2ee371220a390546e17e5192620e5d3487a650b4"
+_HANNOVER_CONTENT_SHA256 = "d02d6a1e8437374b4842f91c66a04b0cfb3da522c3e7747e8e5b298d5eb61388"
 
 
 class DiscreteRenderClock:
@@ -191,7 +191,7 @@ class PreviewRuntime:
         if self._landscape_asset is not None:
             if self._authoring_path is None:
                 raise ValueError("--landscape-asset requires --scenario")
-            read_verified_asset(self._landscape_asset, _HANNOVER_SHA256)
+            read_verified_json(self._landscape_asset, _HANNOVER_CONTENT_SHA256)
         self._editing = False
         self._edit_token: str | None = None
         self._draft: dict[str, Any] | None = None
@@ -482,11 +482,11 @@ class PreviewRuntime:
             ):
                 raise ValueError("landscape is not provisioned")
             path = self._landscape_asset
-            read_verified_asset(path, _HANNOVER_SHA256)
+            read_verified_json(path, _HANNOVER_CONTENT_SHA256)
             document["osm"] = {
                 "asset": {
                     "uri": os.path.relpath(path, self._authoring_path.parent),
-                    "sha256": _HANNOVER_SHA256,
+                    "content_sha256": _HANNOVER_CONTENT_SHA256,
                 }
             }
             self._publish_draft(document)

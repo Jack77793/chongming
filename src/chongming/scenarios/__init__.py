@@ -6,7 +6,6 @@ from chongming.scenarios.serialization import (
     scenario_from_dict,
     scenario_to_dict,
     validate_scenario_spec,
-    verify_external_asset,
     verify_scenario_assets,
 )
 
@@ -16,6 +15,5 @@ __all__ = [
     "scenario_from_dict",
     "scenario_to_dict",
     "validate_scenario_spec",
-    "verify_external_asset",
     "verify_scenario_assets",
 ]

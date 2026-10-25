@@ -26,6 +26,7 @@ from chongming.modules.scene import (
 from chongming.rendering.geometry import contains_point, surface_hits
 from chongming.rendering.godot import GodotRenderer, _entities
 from chongming.scenarios.demo import state
+from chongming.scenarios.json_content import content_sha256, parse_json
 from chongming.scenarios.osm import (
     asset_bytes,
     building_objects,
@@ -224,23 +225,60 @@ class OSMTests(unittest.TestCase):
             )
         self.assertEqual(len(received), 1)
 
-    def test_verified_local_asset_before_parse_and_version_validation(self) -> None:
+    def test_verified_local_asset_content_and_version_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "asset.json"
-            path.write_bytes(b"not json")
+            path.write_bytes(b"{}")
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
                 load_landscape(path.name, "0" * 64, root)
             with self.assertRaisesRegex(ValueError, "local asset URI"):
                 load_landscape("https://example.org/asset.json", "0" * 64, root)
             payload = asset_bytes(prepare())
             path.write_bytes(payload)
-            landscape = load_landscape(path.name, hashlib.sha256(payload).hexdigest(), root)
+            landscape = load_landscape(path.name, content_sha256(parse_json(payload)), root)
             with self.assertRaisesRegex(ValueError, "version"):
                 validate_import(replace(landscape.imported, format="future-version"))
             building = replace(landscape.imported.buildings[0], height_m=99)
             with self.assertRaisesRegex(ValueError, "height disagrees"):
                 validate_import(replace(landscape.imported, buildings=(building,)))
+
+    def test_landscape_decodes_the_single_verified_parse(self) -> None:
+        payload = asset_bytes(prepare())
+        digest = content_sha256(parse_json(payload))
+        with patch.object(Path, "read_bytes", side_effect=[payload, b"changed"]) as read:
+            landscape = load_landscape("asset.json", digest, ROOT)
+        read.assert_called_once()
+        self.assertEqual(landscape.imported, prepare())
+
+    def test_landscape_does_not_decode_unverified_content(self) -> None:
+        payload = asset_bytes(prepare())
+        with (
+            patch.object(Path, "read_bytes", return_value=payload),
+            patch("chongming.scenarios.serialization._decode") as decode,
+            self.assertRaisesRegex(ValueError, "content digest mismatch"),
+        ):
+            load_landscape("asset.json", "0" * 64, ROOT)
+        decode.assert_not_called()
+
+    def test_compiled_landscape_reverification_uses_content_identity(self) -> None:
+        spec = load_scenario(ROOT / "scenarios/osm.json")
+        landscape = spec.scene_definition.osm_landscape
+        assert landscape is not None
+        content = (ROOT / "scenarios" / landscape.asset_uri).read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            asset = root / landscape.asset_uri
+            asset.parent.mkdir(parents=True)
+            asset.write_text(json.dumps(parse_json(content), indent=2) + "\n")
+            compiled = root / "compiled.json"
+            save_compiled_scenario(spec, compiled)
+            self.assertEqual(load_compiled_scenario(compiled), spec)
+            document = json.loads(content)
+            document["attribution"] += " changed"
+            asset.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "content digest mismatch"):
+                load_compiled_scenario(compiled)
 
     def test_scene_roundtrip_authoritative_mesh_and_anchor(self) -> None:
         spec = load_scenario(ROOT / "scenarios/osm.json")
@@ -328,7 +366,7 @@ class OSMTests(unittest.TestCase):
                 report["cleaned_sha256"], hashlib.sha256(cleaned.read_bytes()).hexdigest()
             )
             self.assertEqual(
-                report["asset_sha256"], hashlib.sha256(output.read_bytes()).hexdigest()
+                report["asset_content_sha256"], content_sha256(parse_json(output.read_bytes()))
             )
             self.assertEqual(report["license"], "CC0-1.0")
 

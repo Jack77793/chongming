@@ -14,6 +14,6 @@
   "world_objects": [],
   "vegetation": [],
   "osm": {
-    "asset": {"uri": "assets/osm_demo.buildings.json", "sha256": "bd14d8e51de5c01b14951793efc68864dd709c9a4b912c2e373759fff03f6daf"}
+    "asset": {"uri": "assets/osm_demo.buildings.json", "content_sha256": "e716253489aaf4a07192c362e984dc2105d955ee3e611103a33205cb3a33b0f4"}
   }
 }

@@ -22,7 +22,7 @@
   "osm": {
     "asset": {
       "uri": "assets/osm_landscape_demo.json",
-      "sha256": "390ba8b28c9e9d89e3e55a3518f06017152dc9b042c4a6424e019e55788a177d"
+      "content_sha256": "3ee21daaa601a4860768216c9aad5620596e5d1f60a883c0312c48b7fb8e4cb0"
     }
   }
 }

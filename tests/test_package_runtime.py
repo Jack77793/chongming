@@ -18,6 +18,7 @@ from chongming.preview import PreviewRuntime
 from chongming.rendering.godot import GODOT_VERSION, GodotRenderer
 from chongming.scenarios.authoring import compile_authoring, demo_authoring, save_authoring
 from chongming.scenarios.demo import demo_source
+from chongming.scenarios.json_content import content_sha256, parse_json
 from chongming.scenarios.run import _package_digests, _provenance
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,7 +148,7 @@ class PreviewPathTests(unittest.TestCase):
     def test_explicit_landscape_and_scenario_paths_survive_a_working_directory_change(self) -> None:
         document = demo_authoring(stations=1, duration_s=1)
         content = (ROOT / "scenarios/assets/osm_landscape_demo.json").read_bytes()
-        digest = hashlib.sha256(content).hexdigest()
+        digest = content_sha256(parse_json(content))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             scene = root / "scenes/scene.json"
@@ -155,7 +156,7 @@ class PreviewPathTests(unittest.TestCase):
             asset.parent.mkdir()
             asset.write_bytes(content)
             save_authoring(document, scene)
-            with patch("chongming.preview._HANNOVER_SHA256", digest):
+            with patch("chongming.preview._HANNOVER_CONTENT_SHA256", digest):
                 with chdir(root):
                     runtime = PreviewRuntime(
                         compile_authoring(document),
@@ -166,12 +167,13 @@ class PreviewPathTests(unittest.TestCase):
                 self.assertEqual(runtime.editor_status()["path"], str(scene))
                 self.assertEqual(runtime.editor_status()["landscapes"], ["hannover"])
                 token = runtime.begin_edit()["token"]
+                asset.write_text(json.dumps(parse_json(content), indent=2) + "\n")
                 result = runtime.edit_landscape("hannover", token=token)
                 self.assertEqual(
                     result["document"]["osm"]["asset"],
                     {
                         "uri": "../assets/landscape.json",
-                        "sha256": digest,
+                        "content_sha256": digest,
                     },
                 )
                 runtime.commit_edit(token=token)
@@ -202,7 +204,9 @@ class PreviewPathTests(unittest.TestCase):
             asset = root / "landscape.json"
             content = b"{}"
             asset.write_bytes(content)
-            with patch("chongming.preview._HANNOVER_SHA256", hashlib.sha256(content).hexdigest()):
+            with patch(
+                "chongming.preview._HANNOVER_CONTENT_SHA256", content_sha256(parse_json(content))
+            ):
                 runtime = PreviewRuntime(
                     compile_authoring(document),
                     authoring_document=document,
@@ -210,7 +214,7 @@ class PreviewPathTests(unittest.TestCase):
                     landscape_asset=asset,
                 )
                 token = runtime.begin_edit()["token"]
-                asset.write_bytes(b"changed")
+                asset.write_bytes(b'{"changed":true}')
                 with self.assertRaisesRegex(ValueError, "digest mismatch"):
                     runtime.edit_landscape("hannover", token=token)
                 runtime.cancel_edit(token=token)

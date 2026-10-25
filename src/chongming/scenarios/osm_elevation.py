@@ -176,5 +176,5 @@ def terrain_from_elevation(base: s.TerrainSpec, grid: s.OSMElevation | None) -> 
         heightfield_geometry=s.TriangleMeshGeometry(vertices, tuple(triangles)),
         heightfield_origin_enu_m=grid.origin_enu_m,
         heightfield_asset_uri=None,
-        heightfield_asset_digest=None,
+        heightfield_asset_content_sha256=None,
     )
