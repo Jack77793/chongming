@@ -804,6 +804,7 @@ class LogicalSceneSnapshot:
     illumination: IlluminationSpec
     clouds: tuple[CloudPerturbation, ...] = ()
     render_effects: RenderEffectsSpec = field(default_factory=RenderEffectsSpec)
+    wind: WindPerturbation | None = None
 
 
 @dataclass(frozen=True)

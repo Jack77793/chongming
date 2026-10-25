@@ -21,6 +21,7 @@ func _run() -> void:
 	_test_generator()
 	_test_worker_cache()
 	_test_screen_size_lod()
+	_test_understory_wind()
 	await _test_freeview_world()
 	if failures.is_empty():
 		print("vegetation tests passed")
@@ -156,6 +157,43 @@ func _test_screen_size_lod() -> void:
 	_check(crown.position == Vector3.ZERO and crown.scale == Vector3.ONE,
 		"a far tree should stop animating its crown")
 	_check(worker._instances[0] == tree, "LOD changes must not rebuild tree resources")
+	worker._world.free()
+	worker.free()
+
+
+func _test_understory_wind() -> void:
+	var worker := Worker.new()
+	worker._world = Node3D.new()
+	worker._wind_active = true
+	worker._wind_mean = Vector2(3.0, 0.5)
+	worker._wind_turbulence = 0.4
+	worker._wind_time = 1.25
+	var shrub := Vegetation.create(
+		{"kind": "shrub", "height": 1.6, "radius": 1.6, "seed": 7,
+		 "lod_near": 120.0, "lod_far": 640.0},
+		[0.1, 0.3, 0.07], 0.8
+	)
+	worker._world.add_child(shrub)
+	var shrub_model := shrub.get_node("Model") as Node3D
+	worker._apply_understory_wind(shrub, 200.0, "shrub")
+	_check(shrub_model.position.length() > 0.001, "shrubs should respond to the wind field")
+	_check(shrub_model.scale != Vector3.ONE, "shrub wind should include a small scale change")
+	worker._wind_active = false
+	worker._apply_understory_wind(shrub, 200.0, "shrub")
+	_check(shrub_model.position == Vector3.ZERO, "shrubs should return to rest without wind")
+	var grass := Vegetation.create(
+		{"kind": "grass", "width": 10.0, "depth": 8.0, "height": 0.4, "density": 5.0,
+		 "seed": 9, "lod_near": 120.0, "lod_far": 640.0},
+		[0.1, 0.3, 0.07], 0.8
+	)
+	worker._world.add_child(grass)
+	worker._wind_active = true
+	var clumps := grass.get_node("Clumps") as Node3D
+	worker._apply_understory_wind(grass, 20.0, "grass")
+	_check(clumps.position.length() > 0.0001, "grass patches should respond to the wind field")
+	worker._wind_active = false
+	worker._apply_understory_wind(grass, 20.0, "grass")
+	_check(clumps.position == Vector3.ZERO, "grass should return to rest without wind")
 	worker._world.free()
 	worker.free()
 

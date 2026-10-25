@@ -138,10 +138,12 @@ static func _create_shrub(
 	root.set_meta("variant", str(prototype.name))
 	root.set_meta("visual_kind", "shrub")
 	root.set_meta("visual_height", height)
+	root.set_meta("visual_seed", int(visual.get("seed", 0)))
 	var model := Node3D.new()
 	model.name = "Model"
 	model.rotation.x = PI * 0.5
 	model.scale = Vector3(radius / native_radius, height / native_height, radius / native_radius)
+	model.set_meta("base_scale", model.scale)
 	root.add_child(model)
 	var foliage := MeshInstance3D.new()
 	foliage.name = "Foliage"
@@ -171,6 +173,7 @@ static func _create_grass(
 	root.set_meta("variant", str(prototype.name))
 	root.set_meta("visual_kind", "grass")
 	root.set_meta("visual_height", height)
+	root.set_meta("visual_seed", int(visual.get("seed", 0)))
 	var spacing := clampf(3.0 / sqrt(density), 1.0, 2.8)
 	var columns := maxi(1, ceili(width / spacing))
 	var rows := maxi(1, ceili(depth / spacing))

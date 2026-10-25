@@ -306,6 +306,12 @@ def _request(
         "sunDiameter": scene.illumination.sun_angular_diameter_deg,
         "glareStrength": scene.illumination.glare_strength,
         "cloudTime": scene.sample_time.time_ns / 1e9,
+        "windTime": scene.sample_time.time_ns / 1e9,
+        "wind": (
+            [*scene.wind.mean_velocity_enu_mps, *scene.wind.turbulent_velocity_std_enu_mps]
+            if scene.wind is not None
+            else None
+        ),
         "clouds": [
             {
                 "altitude": cloud.layer_altitude_m,

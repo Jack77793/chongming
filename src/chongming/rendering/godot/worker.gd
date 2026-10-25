@@ -29,6 +29,10 @@ var _signatures: Array[String] = []
 var _resources: Dictionary = {}
 var _busy := false
 var _lod_focal_y := 800.0
+var _wind_active := false
+var _wind_mean := Vector2.ZERO
+var _wind_turbulence := 0.0
+var _wind_time := 0.0
 var _editor_active := false
 var _editor_realtime := false
 var _editor_closed := false
@@ -221,6 +225,12 @@ func _render(request: Dictionary) -> PackedByteArray:
 	)
 	var focal: Array = request["focal"]
 	_lod_focal_y = float(focal[1])
+	_wind_time = float(request.get("windTime", 0.0))
+	var wind_value: Variant = request.get("wind", null)
+	_wind_active = wind_value is Array and wind_value.size() >= 6
+	if _wind_active:
+		_wind_mean = Vector2(float(wind_value[0]), float(wind_value[1]))
+		_wind_turbulence = Vector2(float(wind_value[3]), float(wind_value[4])).length()
 	var near := 0.02
 	var offset := Vector2(
 		(width * 0.5 - float(focal[2]) - 0.5) * near / float(focal[0]),
@@ -650,6 +660,9 @@ func _apply_visual_lod(instance: Node3D, paired: Dictionary) -> void:
 				if pixels >= 24.0
 				else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			)
+		_apply_understory_wind(instance, pixels, "shrub")
+	elif kind == "grass":
+		_apply_understory_wind(instance, pixels, "grass")
 
 
 func _set_tree_shadows(model: Node3D, enabled: bool) -> void:
@@ -671,6 +684,38 @@ func _reset_tree_wind(instance: Node3D) -> void:
 	if crown != null:
 		crown.position = Vector3.ZERO
 		crown.scale = Vector3.ONE
+
+
+func _apply_understory_wind(instance: Node3D, pixels: float, kind: String) -> void:
+	var target_name := "Model" if kind == "shrub" else "Clumps"
+	var target := instance.get_node_or_null(target_name) as Node3D
+	if target == null:
+		return
+	var base_scale := Vector3.ONE
+	if target.has_meta("base_scale"):
+		base_scale = target.get_meta("base_scale")
+	var speed := _wind_mean.length()
+	var minimum_pixels := 5.0 if kind == "grass" else 18.0
+	if not _wind_active or speed <= 0.05 or pixels < minimum_pixels:
+		target.position = Vector3.ZERO
+		target.scale = base_scale
+		return
+	var seed := int(instance.get_meta("visual_seed", 0))
+	var phase := float(posmod(seed, 100003)) / 100003.0 * TAU
+	var time := _wind_time
+	var wave := (
+		sin(time * 1.7 + phase)
+		+ 0.33 * sin(time * 3.3 + phase * 1.7)
+		+ 0.15 * sin(time * 6.1 + phase * 0.7)
+	)
+	var turbulence := 1.0 + minf(1.5, _wind_turbulence / maxf(speed, 0.1))
+	var amplitude := (0.045 if kind == "shrub" else 0.018) * minf(speed, 10.0) * turbulence
+	var direction := _wind_mean.normalized()
+	target.position = Vector3(
+		direction.x * amplitude * wave, direction.y * amplitude * wave, 0.0
+	)
+	var squash := 0.025 * minf(1.0, absf(wave)) * minf(speed / 4.0, 1.0)
+	target.scale = base_scale * Vector3(1.0 + squash, 1.0 - squash * 0.5, 1.0 + squash)
 
 
 func _apply_tree_wind(instance: Node3D, rotation: Array) -> void:

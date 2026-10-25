@@ -44,7 +44,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 
 未写 `world_objects` 时保留内置建筑、球形地物和每站标志物；相机朝向未指定时采用演示朝向。主相机对角线 FOV 60°，辅助相机水平 FOV 2.6°、俯仰角 0，朝向 10 m 外自己的横向 A4 棋盘；标志物 ID 为 `<station-id>-a4`，角点与站配置绑定。仅在主视场内且中心视线未被地形、地物或其他飞行器挡住时发包。校准为理想有效状态，覆盖全部配置时长。
 
-默认乔木、灌木和草使用随仓库分发的 Shapespark CC0 低模卡片资产（`src/chongming/rendering/godot/assets/`），无需运行时下载；乔木 12 个变体、灌木 6 个（含 hedge）、草/地被 12 个（含 grass、clover、flowers）。品种按世界坐标的低频全局噪声选择，密度由另一层低频全局噪声形成林地/草地斑块，尺寸还受确定性哈希/抖动影响；树干静止，近景树冠按平均风和确定性湍流做整坨三轴平移/轻微缩放。逻辑仍用圆柱遮挡代理，不逐叶求交。当前 LOD 以树高投影到屏幕的像素数判断：近景保留卡片树、阴影和风摆，中景关闭阴影与风摆，远景换成单 surface 的交叉 billboard；没有交叉淡入，草仍按 `vegetation_lod_near_m` 剔除。
+默认乔木、灌木和草使用随仓库分发的 Shapespark CC0 低模卡片资产（`src/chongming/rendering/godot/assets/`），无需运行时下载；乔木 12 个变体、灌木 6 个（含 hedge）、草/地被 12 个（含 grass、clover、flowers）。品种按世界坐标的低频全局噪声选择，密度由另一层低频全局噪声形成林地/草地斑块，尺寸还受确定性哈希/抖动影响；树干静止，近景树冠按平均风和确定性湍流做整坨三轴平移/轻微缩放；近景灌木和草/地被也按同一全局风场做整株平移/缩放，远景随 LOD 关闭。逻辑仍用圆柱遮挡代理，不逐叶求交。当前 LOD 以树高投影到屏幕的像素数判断：近景保留卡片树、阴影和风摆，中景关闭阴影与风摆，远景换成单 surface 的交叉 billboard；没有交叉淡入，草仍按 `vegetation_lod_near_m` 剔除。
 
 可对 Agent 说：“复制 center_clean.json，改成三站、两个交叉运动目标、运行 60 秒，清空地物，搜索盒缩小到使第二个目标在盒外；只编辑 JSON，然后执行 --check。”未知字段和非法值会报错，JSON 不加载 Python 代码。
 
@@ -126,7 +126,7 @@ uv run chongming-center --scenario scenarios/center_clean.json --output results/
 }
 ```
 
-乔木的 LOD 阈值按投影高度像素数计算，而不是固定世界距离：近景（约 75 px 以上）使用完整卡片树、阴影和风摆；中景（约 45–75 px）保留完整卡片树但关闭阴影和风摆；远景（约 45 px 以下）换成预渲染的交叉 billboard，使用 `impostors/` 下的透明贴图，单 surface、无阴影、无动画，并最终在 `vegetation_lod_far_m` 剔除。灌木暂按屏幕尺寸关闭阴影；草按 `vegetation_lod_near_m` 剔除。当前没有交叉淡入/合批，阈值附近仍可能 pop；全局 MultiMesh 合批留待下一步。草 patch 的草簇数由面积和密度决定，单 patch 上限 256 个草簇；更大草地仍应拆成多个 patch。
+乔木的 LOD 阈值按投影高度像素数计算，而不是固定世界距离：近景（约 75 px 以上）使用完整卡片树、阴影和风摆；中景（约 45–75 px）保留完整卡片树但关闭阴影和风摆；远景（约 45 px 以下）换成预渲染的交叉 billboard，使用 `impostors/` 下的透明贴图，单 surface、无阴影、无动画，并最终在 `vegetation_lod_far_m` 剔除。灌木暂按屏幕尺寸关闭阴影并随 LOD 关闭风摆；草按 `vegetation_lod_near_m` 剔除，近景按全局风场做整株平移/缩放。当前没有交叉淡入/合批，阈值附近仍可能 pop；全局 MultiMesh 合批留待下一步。草 patch 的草簇数由面积和密度决定，单 patch 上限 256 个草簇；更大草地仍应拆成多个 patch。
 
 OSM 地景支持固定本地建筑、道路、树点、森林/绿地/水体和可选 HGT DEM；示例为 `scenarios/osm_landscape.json`（CC0 合成 fixture，非真实地图）。用 `uv run chongming-preview --scenario scenarios/osm_landscape.json` 复查；用 `chongming-osm` 离线清洗/导入 XML，再将 `osm.asset.uri` 和 SHA-256 写入场景。森林与绿地会按 `osm.vegetation` 的每公顷密度生成乔木、灌木和草 patch：森林为较密乔木+林下灌木+地被，公园为成簇稀疏乔木+灌木+草；全部使用确定性哈希和抖动网格，排除建筑、道路、水体、既有树冠及 DEM 陡变。省略 `vegetation` 使用默认值，旧场景仍可加载；真实 Hannover 样区的配置、来源和复现命令见 [OSM 地景整合说明](../docs/OSM地景整合说明.md)，本地复查产物写入被忽略的 `output/` 目录。选区使用 WGS84 包围框，预览回调和固定 Hannover 地景切换已经接入；任意选区 UI 尚未实现。
 
