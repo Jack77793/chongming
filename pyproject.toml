@@ -39,3 +39,6 @@ target-version = "py312"
 python_version = "3.12"
 strict = true
 packages = ["chongming"]
+
+[tool.uv]
+exclude-newer = "3 days ago"
