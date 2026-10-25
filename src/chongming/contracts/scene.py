@@ -353,33 +353,33 @@ class OSMVegetationConfig:
     """
 
     seed: int = 42
-    forest_tree_density_per_ha: float = 120.0
-    grass_tree_density_per_ha: float = 8.0
-    forest_shrub_density_per_ha: float = 35.0
-    grass_shrub_density_per_ha: float = 20.0
-    forest_grass_density_per_ha: float = 25.0
-    grass_grass_density_per_ha: float = 30.0
+    forest_tree_density_per_ha: float = 200.0
+    grass_tree_density_per_ha: float = 12.0
+    forest_shrub_density_per_ha: float = 55.0
+    grass_shrub_density_per_ha: float = 30.0
+    forest_grass_density_per_ha: float = 35.0
+    grass_grass_density_per_ha: float = 40.0
     tree_height_m: float = 13.0
-    tree_height_jitter: float = 0.30
+    tree_height_jitter: float = 0.38
     tree_crown_radius_m: float = 3.0
-    tree_crown_radius_jitter: float = 0.30
+    tree_crown_radius_jitter: float = 0.38
     shrub_height_m: float = 1.6
-    shrub_height_jitter: float = 0.35
+    shrub_height_jitter: float = 0.40
     shrub_radius_m: float = 1.6
-    shrub_radius_jitter: float = 0.35
+    shrub_radius_jitter: float = 0.40
     grass_patch_size_m: float = 12.0
     grass_patch_size_jitter: float = 0.30
     grass_blade_height_m: float = 0.35
     grass_blade_height_jitter: float = 0.30
-    grass_density_per_m2: float = 4.0
+    grass_density_per_m2: float = 5.0
     forest_clustering: float = 0.35
     grass_clustering: float = 0.80
-    maximum_trees_per_area: int = 192
-    maximum_trees_total: int = 768
-    maximum_shrubs_per_area: int = 160
-    maximum_shrubs_total: int = 640
-    maximum_grass_patches_per_area: int = 192
-    maximum_grass_patches_total: int = 1200
+    maximum_trees_per_area: int = 320
+    maximum_trees_total: int = 1400
+    maximum_shrubs_per_area: int = 280
+    maximum_shrubs_total: int = 1100
+    maximum_grass_patches_per_area: int = 300
+    maximum_grass_patches_total: int = 2200
 
 
 @dataclass(frozen=True)
@@ -522,7 +522,7 @@ class IlluminationSpec:
 class RenderEffectsSpec:
     """Low-cost renderer controls; all effects are optional except vegetation LOD."""
 
-    terrain_detail_strength: float = 0.0
+    terrain_detail_strength: float = 0.35
     ssao_intensity: float = 0.0
     fxaa_enabled: bool = False
     god_rays_strength: float = 0.0

@@ -28,6 +28,7 @@ var _instances: Array[Node3D] = []
 var _signatures: Array[String] = []
 var _resources: Dictionary = {}
 var _busy := false
+var _lod_focal_y := 800.0
 var _editor_active := false
 var _editor_realtime := false
 var _editor_closed := false
@@ -219,6 +220,7 @@ func _render(request: Dictionary) -> PackedByteArray:
 		_enu(request["origin"])
 	)
 	var focal: Array = request["focal"]
+	_lod_focal_y = float(focal[1])
 	var near := 0.02
 	var offset := Vector2(
 		(width * 0.5 - float(focal[2]) - 0.5) * near / float(focal[0]),
@@ -563,10 +565,12 @@ func _sync_entities(entities: Array) -> void:
 			old_instance.free()
 			var new_instance: Node3D
 			if create_visual.get("kind", "") in ["tree", "tree_trunk", "tree_canopy", "shrub", "grass"]:
+				var light_position: Array = light_entity.get("position", [0.0, 0.0, 0.0])
 				new_instance = Vegetation.create(
 					tree_visual if not tree_visual.is_empty() else create_visual,
 					entity.color,
-					float(entity.reflectance)
+					float(entity.reflectance),
+					Vector2(float(light_position[0]), float(light_position[1]))
 				)
 			else:
 				var mesh_instance := MeshInstance3D.new()
@@ -585,8 +589,7 @@ func _sync_entities(entities: Array) -> void:
 			_signatures[index] = signature
 		var instance := _instances[index]
 		instance.transform = Transform3D(_basis(light_entity.rotation), _enu(light_entity.position))
-		if not paired.is_empty():
-			_apply_tree_wind(instance, paired["rotation"])
+		_apply_visual_lod(instance, paired)
 	# Definitions are immutable and the Python registry deliberately re-uploads a
 	# definition if an object returns after being absent. Keep the worker bounded.
 	var used: Dictionary = {}
@@ -610,6 +613,64 @@ func _resolve_entity(light_entity: Dictionary) -> Dictionary:
 		push_error("render entity references unknown resource %s" % token)
 		return {}
 	return _resources[token]
+
+
+func _apply_visual_lod(instance: Node3D, paired: Dictionary) -> void:
+	var kind := str(instance.get_meta("visual_kind", ""))
+	if kind.is_empty():
+		return
+	var height := float(instance.get_meta("visual_height", 1.0))
+	var pixels := 1000.0
+	if _camera != null:
+		var distance := _camera.global_position.distance_to(
+			instance.global_position + Vector3(0.0, height * 0.5, 0.0)
+		)
+		# Projected height in pixels: a compact proxy for visual footprint that
+		# also works for telephoto and wide-angle cameras without hard-coded
+		# world ranges.
+		pixels = _lod_focal_y * height / maxf(distance, 1.0)
+	if kind == "tree":
+		var model := instance.get_node_or_null("Model") as Node3D
+		var far_model := instance.get_node_or_null("FarModel") as Node3D
+		var near_visible := pixels >= 45.0 or far_model == null
+		if model != null:
+			model.visible = near_visible
+		if far_model != null:
+			far_model.visible = not near_visible
+		_set_tree_shadows(model, near_visible and pixels >= 75.0)
+		if near_visible and pixels >= 60.0 and not paired.is_empty():
+			_apply_tree_wind(instance, paired["rotation"])
+		else:
+			_reset_tree_wind(instance)
+	elif kind == "shrub":
+		var foliage := instance.get_node_or_null("Model/Foliage") as GeometryInstance3D
+		if foliage != null:
+			foliage.cast_shadow = (
+				GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+				if pixels >= 24.0
+				else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			)
+
+
+func _set_tree_shadows(model: Node3D, enabled: bool) -> void:
+	if model == null:
+		return
+	var setting := (
+		GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		if enabled
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	)
+	for child_name in ["Trunk", "Crown"]:
+		var child := model.get_node_or_null(child_name) as GeometryInstance3D
+		if child != null:
+			child.cast_shadow = setting
+
+
+func _reset_tree_wind(instance: Node3D) -> void:
+	var crown := instance.get_node_or_null("Model/Crown") as Node3D
+	if crown != null:
+		crown.position = Vector3.ZERO
+		crown.scale = Vector3.ONE
 
 
 func _apply_tree_wind(instance: Node3D, rotation: Array) -> void:

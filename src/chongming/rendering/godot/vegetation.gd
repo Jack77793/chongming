@@ -9,12 +9,16 @@ const Assets = preload("res://vegetation_assets.gd")
 const DEFAULT_LOD_NEAR := 140.0
 const DEFAULT_LOD_FAR := 750.0
 const MAX_GRASS_CLUMPS := 256
+const SHRUB_WEIGHTS := [3, 3, 3, 3, 3, 1]
+const GRASS_WEIGHTS := [6, 6, 6, 2, 2, 2, 2, 2, 1, 1, 1, 1]
 
 
-static func create(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
+static func create(
+	visual: Dictionary, rgb: Array, reflectance: float, world_position: Vector2 = Vector2.ZERO
+) -> Node3D:
 	match str(visual.get("kind", "")):
 		"tree", "tree_trunk":
-			return _create_tree(visual, rgb, reflectance)
+			return _create_tree(visual, rgb, reflectance, world_position)
 		"tree_canopy":
 			# The tree is rendered on the trunk entity.  The canopy entity still
 			# exists in the Python truth stream, but its visual is carried by the
@@ -23,19 +27,52 @@ static func create(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D
 			anchor.name = "TreeCanopyAnchor"
 			return anchor
 		"shrub":
-			return _create_shrub(visual, rgb, reflectance)
+			return _create_shrub(visual, rgb, reflectance, world_position)
 		"grass":
-			return _create_grass(visual, rgb, reflectance)
+			return _create_grass(visual, rgb, reflectance, world_position)
 	return _fallback(visual, rgb, reflectance)
 
 
-static func _create_tree(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
+static func _create_tree(
+	visual: Dictionary, rgb: Array, reflectance: float, world_position: Vector2
+) -> Node3D:
 	var seed := int(visual.get("seed", 0))
-	var prototype: Dictionary = Assets.tree(seed)
+	var variant_index := _variant_index(
+		world_position, seed, Assets.tree_count(), 55.0, 11
+	)
+	var prototype: Dictionary = Assets.tree_at(variant_index)
+	var far_prototype: Dictionary = Assets.tree_low(variant_index)
 	if prototype.is_empty():
 		return _fallback(visual, rgb, reflectance)
 	var height := maxf(0.1, float(visual.get("height", 10.0)))
 	var radius := maxf(0.05, float(visual.get("radius", 2.0)))
+	var far := _lod_far(visual)
+	var root := Node3D.new()
+	root.name = "VegetationTree"
+	root.set_meta("variant", str(prototype.name))
+	root.set_meta("visual_kind", "tree")
+	root.set_meta("visual_height", height)
+	root.set_meta("visual_radius", radius)
+	root.set_meta("tree_variant_index", variant_index)
+	var model := _tree_model(prototype, height, radius, true, far, variant_index)
+	model.name = "Model"
+	root.add_child(model)
+	if not far_prototype.is_empty():
+		var far_model := _tree_model(far_prototype, height, radius, false, far, variant_index)
+		far_model.name = "FarModel"
+		far_model.visible = false
+		root.add_child(far_model)
+	return root
+
+
+static func _tree_model(
+	prototype: Dictionary,
+	height: float,
+	radius: float,
+	detailed: bool,
+	lod_far: float,
+	variant_index: int
+) -> Node3D:
 	var native_height := maxf(0.1, float(prototype.native_height))
 	var native_radius := maxf(0.05, float(prototype.native_radius))
 	var scale_y := height / native_height
@@ -43,33 +80,53 @@ static func _create_tree(visual: Dictionary, rgb: Array, reflectance: float) -> 
 	# semantic crown into a tall column.  Very narrow scene proxies still get a
 	# plausible visual crown; the logical occlusion proxy remains unchanged.
 	var scale_xz := maxf(radius / native_radius, scale_y * 0.82)
-	var root := Node3D.new()
-	root.name = "VegetationTree"
-	root.set_meta("variant", str(prototype.name))
 	var model := Node3D.new()
-	model.name = "Model"
+	if not detailed:
+		var impostor_mesh := Assets.tree_impostor_mesh(variant_index)
+		var far_tree := MeshInstance3D.new()
+		far_tree.name = "FarTree"
+		far_tree.visibility_range_end = lod_far
+		far_tree.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if impostor_mesh != null:
+			# Crossed billboard: one surface, four triangles, no shadow.  It is
+			# already in body coordinates, so no Y-up conversion is needed.
+			far_tree.mesh = impostor_mesh
+			far_tree.material_override = Assets.tree_impostor_material(variant_index)
+			far_tree.scale = Vector3(height, height, height)
+		else:
+			# Safety net if an impostor texture is absent.
+			model.rotation.x = PI * 0.5
+			model.scale = Vector3(scale_xz, scale_y, scale_xz)
+			far_tree.mesh = prototype.mesh
+		model.add_child(far_tree)
+		return model
 	# The vendored kit is Y-up; the scene protocol and worker are Z-up (body).
 	model.rotation.x = PI * 0.5
 	model.scale = Vector3(scale_xz, scale_y, scale_xz)
-	root.add_child(model)
 	var trunk := MeshInstance3D.new()
 	trunk.name = "Trunk"
 	trunk.mesh = prototype.trunk
-	trunk.visibility_range_end = _lod_far(visual)
+	trunk.visibility_range_end = lod_far
 	trunk.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	model.add_child(trunk)
 	var crown := MeshInstance3D.new()
 	crown.name = "Crown"
 	crown.mesh = prototype.crown
-	crown.visibility_range_end = _lod_far(visual)
+	crown.visibility_range_end = lod_far
 	crown.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	crown.set_meta("native_height", native_height)
 	model.add_child(crown)
-	return root
+	return model
 
 
-static func _create_shrub(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
-	var prototype: Dictionary = Assets.shrub(int(visual.get("seed", 0)))
+static func _create_shrub(
+	visual: Dictionary, rgb: Array, reflectance: float, world_position: Vector2
+) -> Node3D:
+	var prototype: Dictionary = Assets.shrub_at(
+		_variant_index_weighted(
+			world_position, int(visual.get("seed", 0)), SHRUB_WEIGHTS, 38.0, 23
+		)
+	)
 	if prototype.is_empty():
 		return _fallback(visual, rgb, reflectance)
 	var height := maxf(0.05, float(visual.get("height", 1.0)))
@@ -79,6 +136,8 @@ static func _create_shrub(visual: Dictionary, rgb: Array, reflectance: float) ->
 	var root := Node3D.new()
 	root.name = "VegetationShrub"
 	root.set_meta("variant", str(prototype.name))
+	root.set_meta("visual_kind", "shrub")
+	root.set_meta("visual_height", height)
 	var model := Node3D.new()
 	model.name = "Model"
 	model.rotation.x = PI * 0.5
@@ -93,8 +152,14 @@ static func _create_shrub(visual: Dictionary, rgb: Array, reflectance: float) ->
 	return root
 
 
-static func _create_grass(visual: Dictionary, rgb: Array, reflectance: float) -> Node3D:
-	var prototype: Dictionary = Assets.grass(int(visual.get("seed", 0)))
+static func _create_grass(
+	visual: Dictionary, rgb: Array, reflectance: float, world_position: Vector2
+) -> Node3D:
+	var prototype: Dictionary = Assets.grass_at(
+		_variant_index_weighted(
+			world_position, int(visual.get("seed", 0)), GRASS_WEIGHTS, 28.0, 37
+		)
+	)
 	if prototype.is_empty():
 		return _fallback(visual, rgb, reflectance)
 	var width := maxf(0.1, float(visual.get("width", 1.0)))
@@ -104,6 +169,8 @@ static func _create_grass(visual: Dictionary, rgb: Array, reflectance: float) ->
 	var root := Node3D.new()
 	root.name = "VegetationGrassPatch"
 	root.set_meta("variant", str(prototype.name))
+	root.set_meta("visual_kind", "grass")
+	root.set_meta("visual_height", height)
 	var spacing := clampf(3.0 / sqrt(density), 1.0, 2.8)
 	var columns := maxi(1, ceili(width / spacing))
 	var rows := maxi(1, ceili(depth / spacing))
@@ -185,6 +252,61 @@ static func _fallback(visual: Dictionary, rgb: Array, reflectance: float) -> Nod
 		mesh.material_override = material
 		root.add_child(mesh)
 	return root
+
+
+static func _variant_index(
+	world_position: Vector2, seed: int, count: int, scale: float, salt: int
+) -> int:
+	if count <= 0:
+		return 0
+	var regional := _value_noise(
+		world_position.x / scale, world_position.y / scale, 4242 + salt
+	)
+	var local := float(posmod(seed, 100003)) / 100003.0
+	var fraction := clampf(regional * 0.72 + local * 0.28, 0.0, 0.999999)
+	return clampi(int(floor(fraction * count)), 0, count - 1)
+
+
+static func _variant_index_weighted(
+	world_position: Vector2, seed: int, weights: Array, scale: float, salt: int
+) -> int:
+	var total := 0
+	for weight in weights:
+		total += int(weight)
+	if total <= 0:
+		return 0
+	var regional := _value_noise(
+		world_position.x / scale, world_position.y / scale, 4242 + salt
+	)
+	var local := float(posmod(seed, 100003)) / 100003.0
+	var fraction := clampf(regional * 0.72 + local * 0.28, 0.0, 0.999999)
+	var target := fraction * float(total)
+	for index in range(weights.size()):
+		target -= float(weights[index])
+		if target < 0.0:
+			return index
+	return weights.size() - 1
+
+
+static func _value_noise(x: float, z: float, salt: int) -> float:
+	var x0 := floori(x)
+	var z0 := floori(z)
+	var fx := x - float(x0)
+	var fz := z - float(z0)
+	var u := fx * fx * (3.0 - 2.0 * fx)
+	var v := fz * fz * (3.0 - 2.0 * fz)
+	var h00 := _hash01(x0, z0, salt)
+	var h10 := _hash01(x0 + 1, z0, salt)
+	var h01 := _hash01(x0, z0 + 1, salt)
+	var h11 := _hash01(x0 + 1, z0 + 1, salt)
+	return lerpf(lerpf(h00, h10, u), lerpf(h01, h11, u), v)
+
+
+static func _hash01(x: int, z: int, salt: int) -> float:
+	var value := (x * 374761393 + z * 668265263 + salt * 1442695041) & 0x7fffffff
+	value = (value ^ (value >> 13)) * 1274126177
+	value = (value ^ (value >> 16)) & 0x7fffffff
+	return float(value & 0xffff) / 65535.0
 
 
 static func _lod_near(visual: Dictionary) -> float:

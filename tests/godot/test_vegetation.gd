@@ -2,6 +2,7 @@ extends SceneTree
 
 const Vegetation = preload("res://vegetation.gd")
 const Worker = preload("res://worker.gd")
+const Assets = preload("res://vegetation_assets.gd")
 
 class PreviewWorker extends Worker:
 	func _ready() -> void:
@@ -19,6 +20,7 @@ func _run() -> void:
 	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
 	_test_generator()
 	_test_worker_cache()
+	_test_screen_size_lod()
 	await _test_freeview_world()
 	if failures.is_empty():
 		print("vegetation tests passed")
@@ -62,7 +64,7 @@ func _test_generator() -> void:
 	var first := Vegetation.create(tree_visual, [0.12, 0.35, 0.08], 0.8)
 	var replay := Vegetation.create(tree_visual, [0.12, 0.35, 0.08], 0.8)
 	var different := Vegetation.create(
-		tree_visual.merged({"seed": 12346}, true), [0.12, 0.35, 0.08], 0.8
+		tree_visual.merged({"seed": 54321}, true), [0.12, 0.35, 0.08], 0.8
 	)
 	var first_trunk := first.get_node("Model/Trunk") as MeshInstance3D
 	var first_crown := first.get_node("Model/Crown") as MeshInstance3D
@@ -75,6 +77,10 @@ func _test_generator() -> void:
 	_check(first_crown.mesh == replay_crown.mesh, "the same tree seed must share the same crown mesh")
 	_check(first_trunk.visibility_range_end == 640.0, "tree trunk should use the far LOD distance")
 	_check(first_crown.visibility_range_end == 640.0, "tree crown should use the far LOD distance")
+	var first_far := first.get_node_or_null("FarModel") as Node3D
+	_check(first_far != null and not first_far.visible, "trees need a hidden far LOD model")
+	_check(first_far != null and first_far.get_node("FarTree") is MeshInstance3D,
+		"the far LOD model should contain a mesh")
 	_check(first_crown.get_meta("native_height", 0.0) > 0.0, "crown needs its native height for wind")
 	var crown_material := first_crown.mesh.surface_get_material(0)
 	_check(crown_material is BaseMaterial3D, "crown surfaces must have a material")
@@ -119,6 +125,39 @@ func _test_generator() -> void:
 	shrub.free()
 	grass.free()
 	grass_replay.free()
+
+
+func _test_screen_size_lod() -> void:
+	_check(Assets.tree_count() == 12, "all 12 vendored tree variants should be available")
+	_check(Assets.shrub_count() == 6, "all 6 shrub/hedge variants should be available")
+	_check(Assets.grass_count() == 12, "all 12 grass/clover/flower variants should be available")
+	var worker := Worker.new()
+	worker._world = Node3D.new()
+	root.add_child(worker._world)
+	worker._camera = Camera3D.new()
+	worker._world.add_child(worker._camera)
+	worker._lod_focal_y = 800.0
+	var pair := _tree_pair(12345)
+	worker._camera.position = Vector3(0.0, 0.0, 4.0)
+	worker._sync_entities(pair)
+	var tree := worker._instances[0]
+	var model := tree.get_node("Model") as Node3D
+	var far_model := tree.get_node("FarModel") as Node3D
+	var crown := tree.get_node("Model/Crown") as Node3D
+	var trunk := tree.get_node("Model/Trunk") as GeometryInstance3D
+	_check(model.visible and not far_model.visible, "a near tree should use the detailed LOD")
+	_check(trunk.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON,
+		"a near tree should cast shadows")
+	worker._camera.position = Vector3(0.0, 0.0, 1000.0)
+	worker._sync_entities(pair)
+	_check(not model.visible and far_model.visible, "a small on-screen tree should use the billboard LOD")
+	_check(trunk.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_OFF,
+		"a far tree should stop casting shadows")
+	_check(crown.position == Vector3.ZERO and crown.scale == Vector3.ONE,
+		"a far tree should stop animating its crown")
+	_check(worker._instances[0] == tree, "LOD changes must not rebuild tree resources")
+	worker._world.free()
+	worker.free()
 
 
 func _test_worker_cache() -> void:
