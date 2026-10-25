@@ -90,7 +90,7 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 manifest = json.loads((output / "manifest.json").read_text())
                 terrain = manifest["scenario"]["scenario"]["scene_definition"]["terrain"]
                 self.assertEqual(
-                    terrain["heightfield_asset_digest"] is not None, name.endswith("_asset")
+                    terrain["heightfield_asset_content_sha256"] is not None, name.endswith("_asset")
                 )
                 sessions = [
                     binding[key]
@@ -101,7 +101,7 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 for sample in truth:
                     terrain = sample["logical_scene"]["terrain"]
                     terrain["heightfield_asset_uri"] = None
-                    terrain["heightfield_asset_digest"] = None
+                    terrain["heightfield_asset_content_sha256"] = None
                 outputs.append(
                     normalize(
                         {
@@ -113,7 +113,7 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 )
             self.assertEqual(outputs[0], outputs[1])
             # A modified asset fails before output creation or source startup.
-            document["terrain"]["asset"]["sha256"] = "0" * 64
+            document["terrain"]["asset"]["content_sha256"] = "0" * 64
             save_authoring(document, path)
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
                 run_scene(path, root / "invalid", video_enabled=False)
@@ -135,8 +135,9 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 manifest = json.loads((output / "manifest.json").read_text())
                 self.assertEqual(manifest["scope"], "virtual-subsystem")
                 self.assertEqual(len(manifest["stream_mapping"]), 4)
-                self.assertTrue(manifest["source_digest"])
-                self.assertTrue(manifest["dependency_lock_digest"])
+                self.assertTrue(manifest["package_digest"])
+                self.assertIn("chongming/web/preview.html", manifest["package_digests"])
+                self.assertIn("dependency_lock_digest", manifest)
                 online = records(output / "online.jsonl")
                 truth = records(output / "truth.jsonl")
                 self.assertEqual(len(online), 3)

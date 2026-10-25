@@ -19,7 +19,7 @@ from typing import Any
 from chongming.contracts import model as m
 from chongming.contracts import scene as s
 from chongming.contracts.scene import BehaviorId
-from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
+from chongming.scenarios.assets import read_verified_json, resolve_external_asset
 from chongming.scenarios.demo import (
     calibration_panel,
     demo_spec,
@@ -137,19 +137,20 @@ def _terrain(value: Any, base: s.TerrainSpec, asset_root: Path | None) -> s.Terr
         raise ValueError("terrain.spacing_m must be positive")
     if ("heights_m" in value) == ("asset" in value):
         raise ValueError("heightfield requires exactly one of heights_m or asset")
-    asset_uri, asset_digest = None, None
+    asset_uri, asset_content_sha256 = None, None
     if "asset" in value:
-        asset = _fields(value["asset"], {"uri", "sha256"}, "terrain.asset")
+        asset = _fields(value["asset"], {"uri", "content_sha256"}, "terrain.asset")
         asset_uri = _identifier(_required(asset, "uri"), "terrain.asset.uri")
-        asset_digest = _identifier(_required(asset, "sha256"), "terrain.asset.sha256")
+        asset_content_sha256 = _identifier(
+            _required(asset, "content_sha256"), "terrain.asset.content_sha256"
+        )
         if asset_root is None:
             raise ValueError("compiling external terrain requires asset_root")
-        content = read_verified_asset(resolve_external_asset(asset_uri, asset_root), asset_digest)
-        try:
-            grid = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise ValueError(f"invalid heightfield asset JSON: {error}") from error
-        grid = _fields(grid, {"heights_m"}, "heightfield asset")
+        grid = _fields(
+            read_verified_json(resolve_external_asset(asset_uri, asset_root), asset_content_sha256),
+            {"heights_m"},
+            "heightfield asset",
+        )
         heights = _required(grid, "heights_m")
     else:
         heights = value["heights_m"]
@@ -188,7 +189,7 @@ def _terrain(value: Any, base: s.TerrainSpec, asset_root: Path | None) -> s.Terr
         heightfield_geometry=geometry,
         heightfield_origin_enu_m=(east, north),
         heightfield_asset_uri=asset_uri,
-        heightfield_asset_digest=asset_digest,
+        heightfield_asset_content_sha256=asset_content_sha256,
     )
 
 
@@ -973,12 +974,12 @@ def compile_authoring(
         from chongming.scenarios.osm import attach_landscape, load_landscape
 
         osm = _fields(document["osm"], {"asset", "vegetation"}, "osm")
-        asset = _fields(_required(osm, "asset"), {"uri", "sha256"}, "osm.asset")
+        asset = _fields(_required(osm, "asset"), {"uri", "content_sha256"}, "osm.asset")
         if asset_root is None:
             raise ValueError("compiling OSM requires asset_root")
         landscape = load_landscape(
             _identifier(_required(asset, "uri"), "osm.asset.uri"),
-            _identifier(_required(asset, "sha256"), "osm.asset.sha256"),
+            _identifier(_required(asset, "content_sha256"), "osm.asset.content_sha256"),
             asset_root,
         )
         if "vegetation" in osm:

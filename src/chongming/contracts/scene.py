@@ -227,7 +227,7 @@ class TerrainSpec:
     base_elevation_m: float
     maximum_relief_m: float
     heightfield_asset_uri: str | None
-    heightfield_asset_digest: str | None
+    heightfield_asset_content_sha256: str | None
     appearance: SurfaceAppearance
     occludes_sight_lines: bool
     heightfield_geometry: TriangleMeshGeometry | None = None
@@ -385,7 +385,7 @@ class OSMVegetationConfig:
 @dataclass(frozen=True)
 class OSMLandscape:
     asset_uri: str
-    asset_sha256: str
+    asset_content_sha256: str
     imported: OSMImport
     vegetation: OSMVegetationConfig = field(default_factory=OSMVegetationConfig)
 

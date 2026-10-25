@@ -31,7 +31,7 @@ from chongming.contracts.scene import (
     TerrainModel,
     WorldObjectId,
 )
-from chongming.scenarios.assets import read_verified_asset, resolve_external_asset
+from chongming.scenarios.assets import read_verified_json, resolve_external_asset
 
 FORMAT_VERSION = "scenario-json-v1"
 
@@ -519,18 +519,20 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
     for item in spec.perturbations.camera_pose:
         if item.station_id not in station_ids:
             raise ValueError("camera perturbation references an unknown station")
-    if terrain.heightfield_asset_uri is not None and terrain.heightfield_asset_digest is None:
-        raise ValueError("heightfield_asset_uri requires heightfield_asset_digest")
-    if terrain.heightfield_asset_digest is not None and terrain.heightfield_asset_uri is None:
-        raise ValueError("heightfield_asset_digest requires heightfield_asset_uri")
+    if (
+        terrain.heightfield_asset_uri is not None
+        and terrain.heightfield_asset_content_sha256 is None
+    ):
+        raise ValueError("heightfield_asset_uri requires heightfield_asset_content_sha256")
+    if (
+        terrain.heightfield_asset_content_sha256 is not None
+        and terrain.heightfield_asset_uri is None
+    ):
+        raise ValueError("heightfield_asset_content_sha256 requires heightfield_asset_uri")
     if terrain.model is TerrainModel.FLAT and terrain.maximum_relief_m != 0.0:
         raise ValueError("flat terrain must have zero maximum relief")
     if spec.imaging.sensor_artifacts.output_pixel_format is not PixelFormat.RGB8:
         raise ValueError("the current first-party imager requires RGB8")
-
-
-def verify_external_asset(path: Path, expected_digest: str) -> None:
-    read_verified_asset(path, expected_digest)
 
 
 def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
@@ -540,7 +542,7 @@ def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
         from chongming.scenarios.osm import load_landscape, validate_vegetation_config
 
         validate_vegetation_config(landscape.vegetation)
-        loaded = load_landscape(landscape.asset_uri, landscape.asset_sha256, asset_root)
+        loaded = load_landscape(landscape.asset_uri, landscape.asset_content_sha256, asset_root)
         # The optional procedural vegetation policy is authored per scenario and
         # deliberately not part of the canonical OSM asset digest. Everything
         # else in the compiled landscape must still match the verified file.
@@ -550,9 +552,9 @@ def verify_scenario_assets(spec: ScenarioSpec, asset_root: Path) -> None:
     if terrain.heightfield_asset_uri is None:
         return
     asset = resolve_external_asset(terrain.heightfield_asset_uri, asset_root)
-    if terrain.heightfield_asset_digest is None:
-        raise ValueError("heightfield asset is missing a digest")
-    verify_external_asset(asset, terrain.heightfield_asset_digest)
+    if terrain.heightfield_asset_content_sha256 is None:
+        raise ValueError("heightfield asset is missing a content digest")
+    read_verified_json(asset, terrain.heightfield_asset_content_sha256)
 
 
 def validate_supported_features(spec: ScenarioSpec) -> None:

@@ -98,7 +98,7 @@ def terrain() -> TerrainSpec:
         base_elevation_m=-100.0,
         maximum_relief_m=0.0,
         heightfield_asset_uri=None,
-        heightfield_asset_digest=None,
+        heightfield_asset_content_sha256=None,
         appearance=SurfaceAppearance((0.2, 0.2, 0.2), 0.5),
         occludes_sight_lines=True,
     )

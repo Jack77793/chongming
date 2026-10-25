@@ -20,7 +20,8 @@ import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
+from contextlib import ExitStack
+from importlib.resources import as_file, files
 from typing import Any
 
 import numpy as np
@@ -39,8 +40,6 @@ from chongming.contracts.scene import (
     TriangleMeshGeometry,
 )
 
-_ROOT = Path(__file__).resolve().parents[3]
-_PROJECT = Path(__file__).with_name("godot")
 _REQUEST_HEADER = struct.Struct("<I")
 _RESPONSE_HEADER = struct.Struct("<QQ")
 _MAX_REQUEST = 256 * 1024 * 1024
@@ -502,6 +501,10 @@ class GodotRenderer:
         if not version.startswith(f"{GODOT_VERSION}.stable."):
             raise RuntimeError(f"Godot {GODOT_VERSION} stable required; found {version!r}")
         self.version = version
+        self._files = ExitStack()
+        project = self._files.enter_context(as_file(files("chongming.rendering").joinpath("godot")))
+        # Keep the working directory separate from read-only package resources.
+        workspace = self._files.enter_context(tempfile.TemporaryDirectory(prefix="chongming-"))
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -509,12 +512,12 @@ class GodotRenderer:
         token = uuid.uuid4().hex
         # A headless display selects Godot's dummy renderer. Keep a graphics
         # context with a minimized window instead; force_draw is request-driven.
-        self._log = tempfile.TemporaryFile()  # noqa: SIM115 - owned until close()
+        self._log = self._files.enter_context(tempfile.TemporaryFile())  # noqa: SIM115 - ExitStack
         self._process: subprocess.Popen[bytes] | None = subprocess.Popen(
             [
                 executable,
                 "--path",
-                str(_PROJECT),
+                str(project),
                 "--audio-driver",
                 "Dummy",
                 "--rendering-method",
@@ -529,7 +532,7 @@ class GodotRenderer:
                 "--token",
                 token,
             ],
-            cwd=_ROOT,
+            cwd=workspace,
             stdout=self._log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -595,9 +598,9 @@ class GodotRenderer:
                 if stream is not None:
                     stream.close()
             self._process = None
-        log = getattr(self, "_log", None)
-        if log is not None and not log.closed:
-            log.close()
+        resources = getattr(self, "_files", None)
+        if resources is not None:
+            resources.close()
 
     def __del__(self) -> None:  # pragma: no cover - interpreter shutdown order varies
         self.close()

@@ -17,6 +17,7 @@ from chongming.contracts import scene as s
 from chongming.rendering.geometry import contains_point, mesh_segment_may_intersect, surface_hits
 from chongming.rendering.godot import _entities, _EntityResources
 from chongming.scenarios.demo import demo_spec, state
+from chongming.scenarios.json_content import content_sha256, parse_json
 from chongming.scenarios.osm import (
     asset_bytes,
     attach_landscape,
@@ -165,7 +166,7 @@ class LandscapeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "land.json").write_bytes(payload)
-            land = load_landscape("land.json", hashlib.sha256(payload).hexdigest(), root)
+            land = load_landscape("land.json", content_sha256(parse_json(payload)), root)
             spec = attach_landscape(demo_spec(), land)
             validate_scenario_spec(spec)
             save_compiled_scenario(spec, root / "scene.json")
@@ -192,7 +193,8 @@ class LandscapeTests(unittest.TestCase):
         imported = prepare(GRID)
         payload = asset_bytes(imported)
         spec = attach_landscape(
-            demo_spec(), s.OSMLandscape("memory:landscape.json", hashlib.sha256(payload).hexdigest(), imported)
+            demo_spec(),
+            s.OSMLandscape("memory:landscape.json", content_sha256(parse_json(payload)), imported),
         )
         scene = sample(spec)
         registry = _EntityResources()

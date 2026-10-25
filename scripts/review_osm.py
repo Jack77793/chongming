@@ -69,7 +69,7 @@ def main() -> None:
         meshes.append(terrain_mesh)
     report: dict[str, Any] = {
         "scenario": str(args.scenario),
-        "asset_sha256": landscape.asset_sha256,
+        "asset_content_sha256": landscape.asset_content_sha256,
         "provenance": asdict(landscape.imported),
         "compile_load_ms": load_ms,
         "compile_python_peak_bytes": peak,

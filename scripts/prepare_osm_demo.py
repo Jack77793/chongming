@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from chongming.contracts import scene as s
+from chongming.scenarios.json_content import content_sha256, parse_json
 from chongming.scenarios.osm import asset_bytes, prepare_osm
 from chongming.scenarios.serialization import _decode
 
@@ -54,9 +55,10 @@ def main() -> None:
         elevation=elevation,
     ).imported
     content = asset_bytes(imported)
+    digest = content_sha256(parse_json(content))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(content)
-    print(json.dumps({"asset": str(args.output), "sha256": hashlib.sha256(content).hexdigest()}))
+    print(json.dumps({"asset": str(args.output), "content_sha256": digest}))
 
 
 if __name__ == "__main__":

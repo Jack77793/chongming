@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -23,6 +22,7 @@ from chongming.scenarios.authoring import (
     save_authoring,
 )
 from chongming.scenarios.demo import demo_source, demo_spec
+from chongming.scenarios.json_content import JsonValue, content_sha256, parse_json
 from chongming.scenarios.serialization import (
     load_compiled_scenario,
     load_scenario,
@@ -116,7 +116,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
         terrain = external.scene_definition.terrain
         self.assertEqual(terrain.heightfield_asset_uri, "assets/ridge.json")
         self.assertEqual(
-            replace(terrain, heightfield_asset_uri=None, heightfield_asset_digest=None),
+            replace(terrain, heightfield_asset_uri=None, heightfield_asset_content_sha256=None),
             inline.scene_definition.terrain,
         )
         from chongming.rendering.godot import _entities
@@ -152,7 +152,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 "type": "heightfield",
                 "asset": {
                     "uri": "assets/ridge%20grid.json",
-                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_sha256": content_sha256(parse_json(content)),
                 },
             }
             path = root / "scene.json"
@@ -178,7 +178,7 @@ class ScenarioPersistenceTests(unittest.TestCase):
             {"heights_m": [[0, 0], [0, 0]]},
             {"asset": None},
             {"asset": {"uri": "assets/ridge.json"}},
-            {"asset": {"uri": "assets/ridge.json", "sha256": "bad"}},
+            {"asset": {"uri": "assets/ridge.json", "content_sha256": "bad"}},
             {"asset": {**original["terrain"]["asset"], "ignored": True}},
         ]
         for uri in (
@@ -200,16 +200,12 @@ class ScenarioPersistenceTests(unittest.TestCase):
 
     def test_external_heightfield_validates_verified_grid_before_runtime(self) -> None:
         invalid = (
-            b"not json",
-            b"\xff",
             b"[]",
             b"{}",
             b'{"heights_m": [[0, 1], [2, 3]], "ignored": 1}',
             b'{"heights_m": [[0, 1], [2]]}',
             b'{"heights_m": [[0, 1], [-1, 3]]}',
             b'{"heights_m": [[0, 1], [true, 3]]}',
-            b'{"heights_m": [[0, 1], [NaN, 3]]}',
-            b'{"heights_m": [[0, 1], [Infinity, 3]]}',
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -219,20 +215,24 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 asset.write_bytes(content)
                 document["terrain"] = {
                     "type": "heightfield",
-                    "asset": {"uri": asset.name, "sha256": hashlib.sha256(content).hexdigest()},
+                    "asset": {
+                        "uri": asset.name,
+                        "content_sha256": content_sha256(parse_json(content)),
+                    },
                 }
                 with self.subTest(content=content), self.assertRaises((ValueError, TypeError)):
                     compile_authoring(document, asset_root=root)
             asset.write_bytes(b'{"heights_m": [[0, 1], [2, 3]]}')
+            document["terrain"]["asset"]["content_sha256"] = "0" * 64
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
                 compile_authoring(document, asset_root=root)
             with self.assertRaisesRegex(ValueError, "asset_root"):
                 compile_authoring(document)
 
-    def test_external_heightfield_parses_the_same_bytes_that_were_verified(self) -> None:
+    def test_external_heightfield_uses_the_single_verified_parse(self) -> None:
         root = Path(__file__).resolve().parents[1] / "scenarios"
         original = (root / "assets/ridge.json").read_bytes()
-        # A changing file must not be re-read between digest validation and parsing.
+        # Hashing and compiling must use one parsed value from one file read.
         document = json.loads((root / "heightfield_asset.json").read_text())
         with patch.object(Path, "read_bytes", side_effect=[original, b"tampered"]) as read:
             compiled = compile_authoring(document, asset_root=root)
@@ -308,12 +308,8 @@ class ScenarioPersistenceTests(unittest.TestCase):
                 scene.SimulationTime(spec.timeline.clock_domain.clock_domain_id, 0, 0)
             )
 
-        nominal_cameras = {
-            camera.camera_role: camera for camera in sample(nominal).cameras
-        }
-        perturbed_cameras = {
-            camera.camera_role: camera for camera in sample(perturbed).cameras
-        }
+        nominal_cameras = {camera.camera_role: camera for camera in sample(nominal).cameras}
+        perturbed_cameras = {camera.camera_role: camera for camera in sample(perturbed).cameras}
         for role, nominal_camera in nominal_cameras.items():
             actual = perturbed_cameras[role]
             for actual_value, expected_value in zip(
@@ -405,28 +401,26 @@ class ScenarioPersistenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "experimental"):
             validate_scenario_spec(bad)
 
-    def test_external_asset_digest_is_checked(self) -> None:
+    def test_compiled_heightfield_reverification_uses_content_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            asset = root / "terrain.bin"
-            asset.write_bytes(b"heightfield-v1")
-            digest = hashlib.sha256(asset.read_bytes()).hexdigest()
-            base = demo_spec(fps=2)
-            terrain = replace(
-                base.scene_definition.terrain,
-                model=scene.TerrainModel.HEIGHTFIELD,
-                maximum_relief_m=2.0,
-                heightfield_asset_uri=asset.name,
-                heightfield_asset_digest=digest,
-            )
-            spec = replace(
-                base,
-                scene_definition=replace(base.scene_definition, terrain=terrain),
-            )
+            asset = root / "terrain.json"
+            grid: JsonValue = {"heights_m": [[0, 1], [2, 3]]}
+            asset.write_text(json.dumps(grid))
+            document = demo_authoring(duration_s=1)
+            document["terrain"] = {
+                "type": "heightfield",
+                "asset": {"uri": asset.name, "content_sha256": content_sha256(grid)},
+            }
+            spec = compile_authoring(document, asset_root=root)
+            compiled = root / "compiled.json"
+            save_compiled_scenario(spec, compiled)
+            asset.write_text(json.dumps(grid, indent=2) + "\n")
             verify_scenario_assets(spec, root)
-            asset.write_bytes(b"tampered")
+            self.assertEqual(load_compiled_scenario(compiled), spec)
+            asset.write_text('{"heights_m":[[0,1],[2,4]]}')
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
-                verify_scenario_assets(spec, root)
+                load_compiled_scenario(compiled)
 
 
 def load_scenario_from_document(document: dict[str, object]) -> scene.ScenarioSpec:

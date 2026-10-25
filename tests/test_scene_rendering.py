@@ -108,8 +108,11 @@ class SceneConfigurationTests(unittest.TestCase):
             "roles": ["main"],
         }
         document["clouds"] = [
-            {"layer_altitude_m": 1800, "optical_density": 0.5,
-             "drift_velocity_enu_mps": [1.5, 0.25, 0]},
+            {
+                "layer_altitude_m": 1800,
+                "optical_density": 0.5,
+                "drift_velocity_enu_mps": [1.5, 0.25, 0],
+            },
         ]
         document["rendering"] = {
             "terrain_detail_strength": 0.75,
@@ -121,7 +124,9 @@ class SceneConfigurationTests(unittest.TestCase):
         }
         spec = compile_authoring(document)
         illumination = spec.scene_definition.illumination
-        self.assertAlmostEqual(sum(value * value for value in illumination.sun_direction_enu_unit), 1.0)
+        self.assertAlmostEqual(
+            sum(value * value for value in illumination.sun_direction_enu_unit), 1.0
+        )
         self.assertEqual(illumination.atmospheric_visibility_m, 8000)
         self.assertEqual(len(spec.perturbations.camera_jitter), len(spec.station_configs))
         self.assertEqual(spec.perturbations.clouds[0].drift_velocity_enu_mps, (1.5, 0.25, 0.0))
@@ -132,10 +137,17 @@ class SceneConfigurationTests(unittest.TestCase):
         replay = logic.sample(s.SimulationTime("demo-clock", 123_000_000, 999))
         later = logic.sample(s.SimulationTime("demo-clock", 173_000_000, 5))
         main = next(camera for camera in first.cameras if camera.camera_role is m.CameraRole.MAIN)
-        replay_main = next(camera for camera in replay.cameras if camera.camera_role is m.CameraRole.MAIN)
-        later_main = next(camera for camera in later.cameras if camera.camera_role is m.CameraRole.MAIN)
+        replay_main = next(
+            camera for camera in replay.cameras if camera.camera_role is m.CameraRole.MAIN
+        )
+        later_main = next(
+            camera for camera in later.cameras if camera.camera_role is m.CameraRole.MAIN
+        )
         self.assertEqual(main.optical_state, replay_main.optical_state)
-        self.assertNotEqual(main.optical_state.rotation_enu_from_body, later_main.optical_state.rotation_enu_from_body)
+        self.assertNotEqual(
+            main.optical_state.rotation_enu_from_body,
+            later_main.optical_state.rotation_enu_from_body,
+        )
         np.testing.assert_allclose(
             np.asarray(main.optical_state.rotation_enu_from_body).T
             @ np.asarray(main.optical_state.rotation_enu_from_body),
@@ -154,8 +166,9 @@ class SceneConfigurationTests(unittest.TestCase):
             main.optical_state.angular_velocity_body_radps,
             atol=1e-8,
         )
-        nominal = snapshot(replace(spec, perturbations=replace(spec.perturbations, camera_jitter=())),
-                           123_000_000)
+        nominal = snapshot(
+            replace(spec, perturbations=replace(spec.perturbations, camera_jitter=())), 123_000_000
+        )
         self.assertEqual(first.cameras[1].optical_state, nominal.cameras[1].optical_state)
         request = _request(first, main, [])
         self.assertEqual(request["atmosphericVisibility"], 8000)
@@ -177,8 +190,7 @@ class SceneConfigurationTests(unittest.TestCase):
             {"clouds": [{"layer_altitude_m": 1000, "optical_density": 2}]},
             {"clouds": [{"layer_altitude_m": 1000, "optical_density": 0.5}] * 3},
             {"rendering": {"fxaa_enabled": 1}},
-            {"rendering": {"vegetation_lod_near_m": 500,
-                            "vegetation_lod_far_m": 100}},
+            {"rendering": {"vegetation_lod_near_m": 500, "vegetation_lod_far_m": 100}},
         )
         for update in invalid:
             document = demo_authoring()
@@ -221,9 +233,7 @@ class SceneConfigurationTests(unittest.TestCase):
         )
         canopy = first.vegetation[1]
         x, y, z = canopy.base_pose.position_enu_m
-        hit = VisibilityModule._segment_hit(
-            canopy, (x, y - 5, z + 1), (x, y + 5, z + 1)
-        )
+        hit = VisibilityModule._segment_hit(canopy, (x, y - 5, z + 1), (x, y + 5, z + 1))
         self.assertIsNotNone(hit)
         assert hit is not None
         self.assertEqual(hit[1].blocker_object_id, canopy.vegetation_id)
@@ -231,10 +241,11 @@ class SceneConfigurationTests(unittest.TestCase):
         from chongming.rendering.godot import _entities
 
         tree_payload = [
-            entity for entity in _entities(first)
-            if entity["object_id"] == "oak-01/canopy"
+            entity for entity in _entities(first) if entity["object_id"] == "oak-01/canopy"
         ]
-        self.assertEqual(tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m))
+        self.assertEqual(
+            tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m)
+        )
         self.assertEqual(tree_payload[0]["visual"]["kind"], "tree_canopy")
         self.assertEqual(tree_payload[0]["visual"]["height"], first.vegetation[1].visual.height_m)
         self.assertEqual(tree_payload[0]["visual"]["radius"], first.vegetation[1].visual.radius_m)
@@ -244,10 +255,21 @@ class SceneConfigurationTests(unittest.TestCase):
     def test_shrub_and_grass_compile_to_semantic_visuals_and_simple_proxies(self) -> None:
         document = demo_authoring()
         document["vegetation"] = [
-            {"id": "shrub-01", "type": "shrub", "position_enu_m": [2, 20, 0],
-             "height_m": 2.0, "radius_m": 2.5},
-            {"id": "grass-01", "type": "grass", "position_enu_m": [-3, 16, 0],
-             "size_m": [12, 8], "blade_height_m": 0.5, "density_per_m2": 14},
+            {
+                "id": "shrub-01",
+                "type": "shrub",
+                "position_enu_m": [2, 20, 0],
+                "height_m": 2.0,
+                "radius_m": 2.5,
+            },
+            {
+                "id": "grass-01",
+                "type": "grass",
+                "position_enu_m": [-3, 16, 0],
+                "size_m": [12, 8],
+                "blade_height_m": 0.5,
+                "density_per_m2": 14,
+            },
         ]
         spec = compile_authoring(document)
         shrub, grass = spec.scene_definition.vegetation
@@ -258,8 +280,11 @@ class SceneConfigurationTests(unittest.TestCase):
         scene = snapshot(spec)
         from chongming.rendering.godot import _entities
 
-        payloads = {item["object_id"]: item["visual"] for item in _entities(scene)
-                    if item["visual"] is not None}
+        payloads = {
+            item["object_id"]: item["visual"]
+            for item in _entities(scene)
+            if item["visual"] is not None
+        }
         self.assertEqual(payloads["shrub-01/shrub"]["kind"], "shrub")
         self.assertEqual(payloads["grass-01/grass"]["kind"], "grass")
         self.assertEqual(payloads["grass-01/grass"]["lod_near"], 140)
@@ -267,12 +292,17 @@ class SceneConfigurationTests(unittest.TestCase):
     def test_tree_and_wind_authoring_rejects_invalid_dimensions_and_ids(self) -> None:
         for update in (
             {"vegetation": "tree"},
-            {"vegetation": [{"id": "tree", "position_enu_m": [0, 0, 0],
-                             "height_m": -1, "crown_radius_m": 1}]},
-            {"vegetation": [{"id": "tree", "position_enu_m": [0, 0, 0],
-                             "height_m": 4, "crown_radius_m": 1},
-                            {"id": "tree", "position_enu_m": [1, 0, 0],
-                             "height_m": 4, "crown_radius_m": 1}]},
+            {
+                "vegetation": [
+                    {"id": "tree", "position_enu_m": [0, 0, 0], "height_m": -1, "crown_radius_m": 1}
+                ]
+            },
+            {
+                "vegetation": [
+                    {"id": "tree", "position_enu_m": [0, 0, 0], "height_m": 4, "crown_radius_m": 1},
+                    {"id": "tree", "position_enu_m": [1, 0, 0], "height_m": 4, "crown_radius_m": 1},
+                ]
+            },
             {"wind": {"turbulent_velocity_std_enu_mps": [-1, 0, 0]}},
         ):
             document = demo_authoring()
@@ -366,17 +396,28 @@ class SurfaceRenderingTests(unittest.TestCase):
             scene.cameras[0],
             optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, math.atan(0.25))),
             actual_intrinsics=replace(
-                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
-                focal_x_px=300.0, focal_y_px=300.0, principal_x_px=150.0, principal_y_px=65.0,
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=256,
+                image_height_px=192,
+                focal_x_px=300.0,
+                focal_y_px=300.0,
+                principal_x_px=150.0,
+                principal_y_px=65.0,
             ),
         )
-        illumination = s.IlluminationSpec(tuple(direction), 85000, (0.42, 0.63, 0.86),
-                                        None, 2.0, 0.0)
+        illumination = s.IlluminationSpec(
+            tuple(direction), 85000, (0.42, 0.63, 0.86), None, 2.0, 0.0
+        )
         scene = replace(scene, cameras=(camera,), flying_objects=(), illumination=illumination)
         blocker = s.WorldObjectSpec(
-            s.WorldObjectId("solar-blocker"), "solar-blocker", s.WorldObjectKind.OBSTACLE,
-            "test", state(tuple(direction * 40 + (0, 0, 3))), s.BoxGeometry((2, 2, 2)),
-            s.SurfaceAppearance((0.01, 0.01, 0.01), 1.0), True,
+            s.WorldObjectId("solar-blocker"),
+            "solar-blocker",
+            s.WorldObjectKind.OBSTACLE,
+            "test",
+            state(tuple(direction * 40 + (0, 0, 3))),
+            s.BoxGeometry((2, 2, 2)),
+            s.SurfaceAppearance((0.01, 0.01, 0.01), 1.0),
+            True,
         )
         renderer = GodotRenderer()
         self.addCleanup(renderer.close)
@@ -391,13 +432,13 @@ class SurfaceRenderingTests(unittest.TestCase):
         enhanced = pixels(replace(scene, illumination=replace(illumination, glare_strength=0.5)))
         occluded = replace(scene, world_objects=(blocker,))
         hidden = pixels(occluded)
-        hidden_optics = pixels(replace(occluded, illumination=replace(illumination, glare_strength=0.5)))
-        beams = pixels(replace(
-            scene, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)
-        ))
-        hidden_beams = pixels(replace(
-            occluded, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)
-        ))
+        hidden_optics = pixels(
+            replace(occluded, illumination=replace(illumination, glare_strength=0.5))
+        )
+        beams = pixels(replace(scene, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8)))
+        hidden_beams = pixels(
+            replace(occluded, render_effects=s.RenderEffectsSpec(god_rays_strength=0.8))
+        )
         self.assertGreater(np.count_nonzero(np.min(solar, axis=2) > 245), 20)
         self.assertEqual(np.count_nonzero(np.min(hidden, axis=2) > 245), 0)
         # An off-centre principal point must still align solar image metering.
@@ -420,21 +461,37 @@ class SurfaceRenderingTests(unittest.TestCase):
     def test_aerial_perspective_attenuates_distant_objects_more_than_near_objects(self) -> None:
         scene = snapshot(test_scene(s.SphereGeometry(0.6), (-1.0, 10.0, 3.0)))
         camera = replace(
-            scene.cameras[0], optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, 0.0)),
+            scene.cameras[0],
+            optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, 0.0)),
             actual_intrinsics=replace(
-                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
-                focal_x_px=300.0, focal_y_px=300.0, principal_x_px=127.5, principal_y_px=95.5,
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=256,
+                image_height_px=192,
+                focal_x_px=300.0,
+                focal_y_px=300.0,
+                principal_x_px=127.5,
+                principal_y_px=95.5,
             ),
         )
-        distant = replace(scene.flying_objects[0], truth_object_id=s.TruthObjectId("distant"),
-                          geometry=s.SphereGeometry(6.0), state=state((10.0, 100.0, 3.0)))
-        scene = replace(scene, cameras=(camera,), flying_objects=scene.flying_objects + (distant,),
-                        illumination=s.IlluminationSpec((0.0, -0.8, 0.6), 85000, (0.42, 0.63, 0.86)))
+        distant = replace(
+            scene.flying_objects[0],
+            truth_object_id=s.TruthObjectId("distant"),
+            geometry=s.SphereGeometry(6.0),
+            state=state((10.0, 100.0, 3.0)),
+        )
+        scene = replace(
+            scene,
+            cameras=(camera,),
+            flying_objects=scene.flying_objects + (distant,),
+            illumination=s.IlluminationSpec((0.0, -0.8, 0.6), 85000, (0.42, 0.63, 0.86)),
+        )
         renderer = GodotRenderer()
         self.addCleanup(renderer.close)
         raw, _ = renderer.render(scene, camera)
         baseline = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
-        hazed = replace(scene, illumination=replace(scene.illumination, atmospheric_visibility_m=500))
+        hazed = replace(
+            scene, illumination=replace(scene.illumination, atmospheric_visibility_m=500)
+        )
         raw, _ = renderer.render(hazed, camera)
         enhanced = np.frombuffer(raw, np.uint8).reshape(192, 256, 3)
         near_lift = enhanced[92:99, 94:101].mean() - baseline[92:99, 94:101].mean()
@@ -450,8 +507,13 @@ class SurfaceRenderingTests(unittest.TestCase):
             scene.cameras[0],
             optical_state=state((0.0, 0.0, 3.0), optical_rotation(0.0, math.radians(32))),
             actual_intrinsics=replace(
-                scene.cameras[0].actual_intrinsics, image_width_px=256, image_height_px=192,
-                focal_x_px=230.0, focal_y_px=230.0, principal_x_px=127.5, principal_y_px=95.5,
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=256,
+                image_height_px=192,
+                focal_x_px=230.0,
+                focal_y_px=230.0,
+                principal_x_px=127.5,
+                principal_y_px=95.5,
             ),
         )
         cloud = s.CloudPerturbation(1600.0, 0.82, (12.0, 4.0, 0.0))
@@ -459,8 +521,9 @@ class SurfaceRenderingTests(unittest.TestCase):
             scene,
             cameras=(camera,),
             flying_objects=(),
-            illumination=s.IlluminationSpec((0.3, 0.8, 0.5), 80000, (0.42, 0.63, 0.86),
-                                            None, 0.53, 0.0),
+            illumination=s.IlluminationSpec(
+                (0.3, 0.8, 0.5), 80000, (0.42, 0.63, 0.86), None, 0.53, 0.0
+            ),
             clouds=(cloud,),
             sample_time=s.SimulationTime("cloud-test", 2_000_000_000, 1),
         )
@@ -473,9 +536,9 @@ class SurfaceRenderingTests(unittest.TestCase):
 
         first = render(scene)
         replay = render(scene)
-        later = render(replace(
-            scene, sample_time=s.SimulationTime("cloud-test", 12_000_000_000, 999)
-        ))
+        later = render(
+            replace(scene, sample_time=s.SimulationTime("cloud-test", 12_000_000_000, 999))
+        )
         clear = render(replace(scene, clouds=()))
         self.assertLess(float(np.abs(first.astype(int) - replay.astype(int)).mean()), 0.5)
         self.assertGreater(float(np.abs(first.astype(int) - later.astype(int)).mean()), 1.0)
@@ -499,8 +562,11 @@ class SurfaceRenderingTests(unittest.TestCase):
                 np.array(camera.optical_state.rotation_enu_from_body) @ np.array((x, y, 10.0))
                 + camera.optical_state.position_enu_m
             )
-            target = replace(scene.flying_objects[0], state=state(point),
-                             appearance=s.SurfaceAppearance((0.4, 0.01, 0.01), 1.0))
+            target = replace(
+                scene.flying_objects[0],
+                state=state(point),
+                appearance=s.SurfaceAppearance((0.4, 0.01, 0.01), 1.0),
+            )
             current = replace(scene, cameras=(camera,), flying_objects=(target,))
             pixels, _ = render_gpu(current, camera)
             ys, xs = np.nonzero(pixels[:, :, 0].astype(int) > pixels[:, :, 1].astype(int) + 40)
@@ -793,10 +859,18 @@ class SurfaceRenderingTests(unittest.TestCase):
 class PreviewTests(unittest.TestCase):
     def test_freeview_is_independent_of_sensor_pixels_and_experiment_controls(self) -> None:
         scene = snapshot(test_scene(s.SphereGeometry(1.0)))
-        camera = replace(scene.cameras[0], actual_intrinsics=replace(
-            scene.cameras[0].actual_intrinsics, image_width_px=96, image_height_px=64,
-            focal_x_px=65, focal_y_px=65, principal_x_px=47.5, principal_y_px=31.5,
-        ))
+        camera = replace(
+            scene.cameras[0],
+            actual_intrinsics=replace(
+                scene.cameras[0].actual_intrinsics,
+                image_width_px=96,
+                image_height_px=64,
+                focal_x_px=65,
+                focal_y_px=65,
+                principal_x_px=47.5,
+                principal_y_px=31.5,
+            ),
+        )
         with_renderer = GodotRenderer()
         try:
             original, _ = with_renderer.render(scene, camera)
@@ -842,15 +916,21 @@ class PreviewTests(unittest.TestCase):
             path = Path(directory) / "scenario.json"
             save_authoring(document, path)
             runtime = PreviewRuntime(
-                compile_authoring(document), authoring_document=document, authoring_path=path,
+                compile_authoring(document),
+                authoring_document=document,
+                authoring_path=path,
                 video_enabled=False,
             )
             document["stations"][0]["position_enu_m"] = [25, 12, 8]
             save_authoring(document, path)
             begun = runtime.begin_edit()
             self.assertEqual(begun["document"], document)
-            runtime.edit_update("station", document["stations"][0]["id"],
-                                {"position_enu_m": [35, 12, 8]}, token=begun["token"])
+            runtime.edit_update(
+                "station",
+                document["stations"][0]["id"],
+                {"position_enu_m": [35, 12, 8]},
+                token=begun["token"],
+            )
             document["duration_s"] = 2
             save_authoring(document, path)
             with self.assertRaisesRegex(ValueError, "changed outside"):
@@ -861,14 +941,18 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(reopened["document"], document)
             runtime.cancel_edit(token=reopened["token"])
 
-    def test_editor_updates_native_view_without_sensor_frames_and_cancel_restores_state(self) -> None:
+    def test_editor_updates_native_view_without_sensor_frames_and_cancel_restores_state(
+        self,
+    ) -> None:
         document = demo_authoring(stations=1, duration_s=1)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scenario.json"
             save_authoring(document, path)
             original = path.read_bytes()
             runtime = PreviewRuntime(
-                compile_authoring(document), authoring_document=document, authoring_path=path,
+                compile_authoring(document),
+                authoring_document=document,
+                authoring_path=path,
                 video_enabled=False,
             )
             runtime.start()
@@ -880,21 +964,35 @@ class PreviewTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "lock"):
                     runtime.begin_edit()
                 with runtime._condition:
-                    self.assertTrue(runtime._condition.wait_for(
-                        lambda: runtime._latest_step is not None and not runtime._producing,
-                        timeout=5,
-                    ))
+                    self.assertTrue(
+                        runtime._condition.wait_for(
+                            lambda: runtime._latest_step is not None and not runtime._producing,
+                            timeout=5,
+                        )
+                    )
                 first = runtime.snapshot()["logical_step_count"]
                 self.assertTrue(runtime._latest_step.truth.camera_frames)
                 self.assertFalse(runtime._latest_step.video.frames)
-                runtime.edit_update("station", document["stations"][0]["id"],
-                                    {"position_enu_m": [35, 12, 8]}, token=token)
+                runtime.edit_update(
+                    "station",
+                    document["stations"][0]["id"],
+                    {"position_enu_m": [35, 12, 8]},
+                    token=token,
+                )
                 with runtime._condition:
-                    self.assertTrue(runtime._condition.wait_for(
-                        lambda: runtime._latest_step is not None
-                        and runtime._latest_step.truth.logical_scene.cameras[0].optical_state.position_enu_m[0] == 35
-                        and not runtime._producing, timeout=5,
-                    ))
+                    self.assertTrue(
+                        runtime._condition.wait_for(
+                            lambda: (
+                                runtime._latest_step is not None
+                                and runtime._latest_step.truth.logical_scene.cameras[
+                                    0
+                                ].optical_state.position_enu_m[0]
+                                == 35
+                                and not runtime._producing
+                            ),
+                            timeout=5,
+                        )
+                    )
                 self.assertEqual(runtime.snapshot()["gpu_submissions"], 0)
                 count = runtime.snapshot()["logical_step_count"]
                 time.sleep(0.1)
@@ -937,12 +1035,16 @@ class PreviewTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 token = begun["token"]
                 self.assertEqual(post("create", {"kind": "target", "id": "unauthorized"})[0], 400)
-                self.assertEqual(post("create", {"kind": "target", "id": "target-b", "token": token})[0], 200)
+                self.assertEqual(
+                    post("create", {"kind": "target", "id": "target-b", "token": token})[0], 200
+                )
                 self.assertEqual(post("commit", {})[0], 409)
                 status, committed = post("commit", {"token": token})
                 self.assertEqual(status, 200)
                 self.assertFalse(committed["active"])
-                self.assertIn("target-b", {item["id"] for item in json.loads(path.read_text())["targets"]})
+                self.assertIn(
+                    "target-b", {item["id"] for item in json.loads(path.read_text())["targets"]}
+                )
             finally:
                 server.shutdown()
                 thread.join(timeout=2)

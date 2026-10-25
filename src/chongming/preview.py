@@ -45,28 +45,15 @@ from chongming.contracts.scene import (
 )
 from chongming.joint_calibration import JointCalibrationRunner
 from chongming.rendering.godot import close_default_renderer, default_renderer
+from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
 from chongming.scenarios.serialization import load_scenario
 
 logger = logging.getLogger(__name__)
 
-# Only provisioned, pinned local assets can be selected from the editor.
-_LANDSCAPE_ASSETS = {
-    "hannover": (
-        Path(__file__).resolve().parents[2] / "output/osm/hannover-500m/landscape-dem.json",
-        "c17d27172db7e63a5ba62c4d2ee371220a390546e17e5192620e5d3487a650b4",
-    ),
-}
-
-
-def _landscape_asset_path(landscape_id: str, authoring_path: Path | None) -> Path:
-    """Resolve a pinned asset beside the active authoring file when available."""
-    configured_path, _digest = _LANDSCAPE_ASSETS[landscape_id]
-    candidates = [configured_path]
-    if authoring_path is not None:
-        candidates.insert(0, authoring_path.parent / configured_path.name)
-    return next((path for path in candidates if path.is_file()), configured_path)
+# The optional Hannover landscape must be explicitly provisioned and pinned.
+_HANNOVER_CONTENT_SHA256 = "d02d6a1e8437374b4842f91c66a04b0cfb3da522c3e7747e8e5b298d5eb61388"
 
 
 class DiscreteRenderClock:
@@ -195,10 +182,16 @@ class PreviewRuntime:
         video_enabled: bool = True,
         authoring_document: dict[str, Any] | None = None,
         authoring_path: Path | None = None,
+        landscape_asset: Path | None = None,
     ) -> None:
         self.spec = spec
         self._authoring_document = copy.deepcopy(authoring_document) if authoring_document else None
-        self._authoring_path = authoring_path
+        self._authoring_path = authoring_path.resolve() if authoring_path is not None else None
+        self._landscape_asset = landscape_asset.resolve() if landscape_asset is not None else None
+        if self._landscape_asset is not None:
+            if self._authoring_path is None:
+                raise ValueError("--landscape-asset requires --scenario")
+            read_verified_json(self._landscape_asset, _HANNOVER_CONTENT_SHA256)
         self._editing = False
         self._edit_token: str | None = None
         self._draft: dict[str, Any] | None = None
@@ -303,11 +296,9 @@ class PreviewRuntime:
                 ),
                 "path": str(self._authoring_path) if self._authoring_path else None,
                 "freeview": self._freeview_enabled,
-                "landscapes": [
-                    name
-                    for name in _LANDSCAPE_ASSETS
-                    if _landscape_asset_path(name, self._authoring_path).is_file()
-                ],
+                "landscapes": ["hannover"]
+                if self._landscape_asset is not None and self._landscape_asset.is_file()
+                else [],
             }
 
     def begin_edit(self) -> dict[str, Any]:
@@ -484,16 +475,18 @@ class PreviewRuntime:
     def edit_landscape(self, landscape_id: str, *, token: str | None = None) -> dict[str, Any]:
         with self._edit_lock:
             document = copy.deepcopy(self._require_edit(token))
-            if landscape_id not in _LANDSCAPE_ASSETS or self._authoring_path is None:
+            if (
+                landscape_id != "hannover"
+                or self._landscape_asset is None
+                or self._authoring_path is None
+            ):
                 raise ValueError("landscape is not provisioned")
-            _configured_path, digest = _LANDSCAPE_ASSETS[landscape_id]
-            path = _landscape_asset_path(landscape_id, self._authoring_path)
-            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-                raise ValueError("local landscape asset is missing or has a different digest")
+            path = self._landscape_asset
+            read_verified_json(path, _HANNOVER_CONTENT_SHA256)
             document["osm"] = {
                 "asset": {
                     "uri": os.path.relpath(path, self._authoring_path.parent),
-                    "sha256": digest,
+                    "content_sha256": _HANNOVER_CONTENT_SHA256,
                 }
             }
             self._publish_draft(document)
@@ -954,6 +947,11 @@ def main() -> None:
         help="从 scenario-authoring-v2 文件加载可编辑场景；提供后忽略 --stations/--fps",
     )
     parser.add_argument(
+        "--landscape-asset",
+        type=Path,
+        help="Path to the pinned Hannover landscape JSON for the scenario editor",
+    )
+    parser.add_argument(
         "--camera-position-offset",
         nargs=3,
         type=float,
@@ -988,6 +986,7 @@ def main() -> None:
             video_enabled=not args.no_video,
             authoring_document=authoring_document,
             authoring_path=authoring_path,
+            landscape_asset=args.landscape_asset,
         )
         server = preview_server(runtime, args.port)
     except (ValueError, OSError) as error:

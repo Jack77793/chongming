@@ -6,7 +6,9 @@ excludes = [
   ".venv/**",
   "venv/**",
   "env/**",
+  "__pycache__/**",
   "**/__pycache__/**",
+  ".godot/**",
   "**/.godot/**",
   ".mypy_cache/**",
   ".pytest_cache/**",
@@ -21,6 +23,13 @@ excludes = [
   "results/**",
   "result",
   "result-*/**",
+  # Dependency locks are source inputs, not formatter inputs.
+  "flake.lock",
+  "uv.lock",
+  "package-lock.json",
+  "**/package-lock.json",
+  "npm-shrinkwrap.json",
+  "**/npm-shrinkwrap.json",
 ]
 
 [formatter.nix]
@@ -36,5 +45,3 @@ includes = ["*.py"]
 command = "prettier"
 options = ["--write"]
 includes = ["*.json", "*.html", "*.js", "*.mjs", "*.cjs", "*.css", "*.md", "*.markdown"]
-# Formatting these files would invalidate asset digests or rewrite generated locks.
-excludes = ["scenarios/assets/**", "**/package-lock.json", "**/npm-shrinkwrap.json"]

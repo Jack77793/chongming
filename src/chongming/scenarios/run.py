@@ -17,9 +17,13 @@ import sys
 import time
 from collections import Counter, deque
 from dataclasses import replace
-from importlib.metadata import version
+from importlib.metadata import distribution, version
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 from uuid import uuid4
 
 from PIL import Image
@@ -46,36 +50,52 @@ def _digest(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
+def _package_digests(directory: Traversable, prefix: str = "chongming") -> dict[str, str]:
+    digests = {}
+    for item in sorted(directory.iterdir(), key=lambda entry: entry.name):
+        if item.name.startswith(".") or item.name == "__pycache__":
+            continue
+        name = f"{prefix}/{item.name}"
+        if item.is_dir():
+            digests.update(_package_digests(item, name))
+        elif not item.name.endswith((".pyc", ".pyo", ".uid")):
+            digests[name] = hashlib.sha256(item.read_bytes()).hexdigest()
+    return digests
+
+
 def _provenance() -> dict[str, Any]:
-    root = Path(__file__).resolve().parents[3]
-    try:
-        revision = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        dirty = bool(
-            subprocess.check_output(
-                ["git", "status", "--porcelain"],
+    direct_url = json.loads(distribution("chongming").read_text("direct_url.json") or "{}")
+    editable = direct_url.get("dir_info", {}).get("editable") is True
+    root = Path(url2pathname(urlsplit(direct_url["url"]).path)) if editable else None
+    revision: str | None = None
+    dirty: bool | None = None
+    if root is not None and (root / ".git").exists():
+        try:
+            revision = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
                 cwd=root,
                 text=True,
+                stderr=subprocess.DEVNULL,
             ).strip()
-        )
-    except (OSError, subprocess.CalledProcessError):
-        revision, dirty = None, None
-    sources = {
-        str(p.relative_to(root)): _digest(p)
-        for p in sorted((root / "src").rglob("*"))
-        if p.is_file() and p.suffix in {".py", ".gd", ".tscn", ".godot"}
-    }
+            dirty = bool(
+                subprocess.check_output(
+                    ["git", "status", "--porcelain"],
+                    cwd=root,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            )
+        except (OSError, subprocess.CalledProcessError):
+            revision, dirty = None, None
+    package = _package_digests(files("chongming"))
     return {
+        "installation": "editable" if editable else "installed",
         "code_revision": revision,
         "worktree_dirty": dirty,
-        "source_digests": sources,
-        "source_digest": hashlib.sha256(_json(sources).encode()).hexdigest(),
+        "package_digests": package,
+        "package_digest": hashlib.sha256(_json(package).encode()).hexdigest(),
         "dependency_lock_digest": _digest(root / "uv.lock")
-        if (root / "uv.lock").exists()
+        if root is not None and (root / "uv.lock").is_file()
         else None,
         "python": sys.version,
         "platform": platform.platform(),

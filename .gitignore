@@ -4,27 +4,28 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
 .venv/
 venv/
 env/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Build and tooling output
 .codex-cache/
-.godot/
-*.uid
 build/
 dist/
 *.egg-info/
 .coverage
 htmlcov/
 
-# Nix build links and Godot editor cache
+# Nix build links
 /result
 /result-*
+
+# Godot editor cache
 .godot/
+*.uid
 
 # Runtime output
 logs/
