@@ -61,14 +61,14 @@ chongming-center = "chongming.development:main"
         self.wheel.update(
             {
                 f"{self.metadata_root}METADATA": (
-                    b"Metadata-Version: 2.4\nName: chongming\nVersion: 0.0.0\nLicense-File: LICENSE\n\n"
+                    b"Metadata-Version: 2.4\nName: chongming\nVersion: 0.0.0\nLicense-File: COPYING\n\n"
                 ),
                 f"{self.metadata_root}WHEEL": b"Wheel-Version: 1.0\n",
                 f"{self.metadata_root}RECORD": b"",
                 f"{self.metadata_root}entry_points.txt": (
                     b"[console_scripts]\nchongming-center = chongming.development:main\n"
                 ),
-                f"{self.metadata_root}licenses/LICENSE": self.sources["LICENSE"],
+                f"{self.metadata_root}licenses/COPYING": self.sources["COPYING"],
             }
         )
 
@@ -85,7 +85,15 @@ chongming-center = "chongming.development:main"
         self.write_release()
         self.assertEqual(check_contents(self.directory, self.version), self.sources)
         bundle = read_tar(self.paths["bundle"], self.root)
-        for name in ("README.md", "LICENSE", "docs/虚拟场景预览.md", "scenarios/assets/grid.json"):
+        for name in (
+            "README.md",
+            "AGENTS.md",
+            "COPYING",
+            "docs/user-guide.md",
+            "docs/development.md",
+            "docs/design.md",
+            "scenarios/assets/grid.json",
+        ):
             self.assertEqual(bundle[name], self.sources[name])
         self.assertIn(self.paths["sdist"].name, bundle)
         self.assertIn(self.paths["wheel"].name, bundle)
@@ -104,7 +112,7 @@ chongming-center = "chongming.development:main"
             check_wheel(self.sources, self.wheel, self.version)
 
     def test_wheel_license_and_entry_points_are_checked(self) -> None:
-        for name in ("licenses/LICENSE", "entry_points.txt"):
+        for name in ("licenses/COPYING", "entry_points.txt"):
             with self.subTest(name=name):
                 wheel = {**self.wheel, f"{self.metadata_root}{name}": b""}
                 with self.assertRaises(ValueError):
@@ -121,10 +129,18 @@ chongming-center = "chongming.development:main"
             check_wheel(self.sources, self.wheel, self.version)
 
     def test_missing_required_document_is_rejected(self) -> None:
-        del self.sources["docs/Nix开发环境.md"]
-        self.write_release()
-        with self.assertRaisesRegex(ValueError, "sdist is missing.*Nix"):
-            check_contents(self.directory, self.version)
+        for name in (
+            "AGENTS.md",
+            "docs/user-guide.md",
+            "docs/development.md",
+            "docs/design.md",
+        ):
+            with self.subTest(name=name):
+                content = self.sources.pop(name)
+                self.write_release()
+                with self.assertRaisesRegex(ValueError, "sdist is missing"):
+                    check_contents(self.directory, self.version)
+                self.sources[name] = content
 
     def test_tampered_release_file_is_rejected_by_checksums(self) -> None:
         self.write_release()

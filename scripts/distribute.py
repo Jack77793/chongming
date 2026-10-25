@@ -27,10 +27,11 @@ REQUIRED_SOURCE = {
     ".editorconfig",
     ".gitignore",
     "README.md",
-    "LICENSE",
-    "docs/Nix开发环境.md",
-    "docs/虚拟场景预览.md",
-    "scenarios/README.md",
+    "AGENTS.md",
+    "COPYING",
+    "docs/user-guide.md",
+    "docs/development.md",
+    "docs/design.md",
     "scripts/distribute.py",
     "scripts/check_installed.py",
     "tests/test_distribution.py",
@@ -150,7 +151,7 @@ def check_wheel(sources: dict[str, bytes], wheel: dict[str, bytes], version: str
         wheel,
         {
             f"{metadata_root}{name}"
-            for name in ("METADATA", "WHEEL", "entry_points.txt", "RECORD", "licenses/LICENSE")
+            for name in ("METADATA", "WHEEL", "entry_points.txt", "RECORD", "licenses/COPYING")
         },
         "Wheel",
     )
@@ -159,9 +160,9 @@ def check_wheel(sources: dict[str, bytes], wheel: dict[str, bytes], version: str
     metadata = BytesParser().parsebytes(wheel[f"{metadata_root}METADATA"])
     if (metadata["Name"], metadata["Version"]) != ("chongming", version):
         raise ValueError("Wheel name or version does not match the source project")
-    if metadata.get_all("License-File") != ["LICENSE"]:
-        raise ValueError("Wheel license metadata does not declare LICENSE")
-    if wheel[f"{metadata_root}licenses/LICENSE"] != sources["LICENSE"]:
+    if metadata.get_all("License-File") != ["COPYING"]:
+        raise ValueError("Wheel license metadata does not declare COPYING")
+    if wheel[f"{metadata_root}licenses/COPYING"] != sources["COPYING"]:
         raise ValueError("Wheel license differs from the source license")
     entry_points = configparser.ConfigParser()
     entry_points.read_string(wheel[f"{metadata_root}entry_points.txt"].decode())
@@ -182,7 +183,7 @@ def bundle_contents(
     contents = {
         name: data
         for name, data in sources.items()
-        if name.endswith(".md") or name.startswith("scenarios/") or name == "LICENSE"
+        if name.endswith(".md") or name.startswith("scenarios/") or name == "COPYING"
     }
     for key in ("sdist", "wheel", "requirements"):
         contents[paths[key].name] = paths[key].read_bytes()
