@@ -29,6 +29,7 @@ var _signatures: Array[String] = []
 var _resources: Dictionary = {}
 var _busy := false
 var _lod_focal_y := 800.0
+var _has_mesh_terrain := false
 var _wind_active := false
 var _wind_mean := Vector2.ZERO
 var _wind_turbulence := 0.0
@@ -288,7 +289,11 @@ func _render(request: Dictionary) -> PackedByteArray:
 	_sun.light_energy = float(request["illuminance"]) / 100000.0 * (1.0 - cloud_cover * 0.32)
 	var sun_direction := _enu(request["sun"]).normalized()
 	_sun.basis = Basis.looking_at(-sun_direction, Vector3.FORWARD if absf(sun_direction.y) > 0.99 else Vector3.UP)
-	_ground.position = Vector3(_camera.position.x, float(request["terrainElevation"]), _camera.position.z)
+	_ground.position = Vector3(
+		_camera.position.x,
+		float(request["terrainElevation"]) - (1.0 if _has_mesh_terrain else 0.0),
+		_camera.position.z
+	)
 	_ground_material.set_shader_parameter("base_color", Vector3(
 		float(request.terrainColor[0]) * float(request.terrainReflectance),
 		float(request.terrainColor[1]) * float(request.terrainReflectance),
@@ -541,8 +546,9 @@ func _sync_entities(entities: Array) -> void:
 		):
 			has_mesh_terrain = true
 			break
+	_has_mesh_terrain = has_mesh_terrain
 	if _ground != null:
-		_ground.visible = not has_mesh_terrain
+		_ground.visible = true
 	for index in range(entities.size()):
 		var light_entity: Dictionary = entities[index]
 		var entity: Dictionary = resolved[index]
