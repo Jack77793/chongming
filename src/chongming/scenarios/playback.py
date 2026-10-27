@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +25,12 @@ from chongming.contracts.model import (
     StationId,
 )
 from chongming.contracts.scene import (
+    CameraFrameTruth,
+    LogicalSceneSnapshot,
     ScenarioPacketOutput,
     ScenarioSpec,
     ScenarioStep,
+    ScenarioStepTiming,
     ScenarioTruthOutput,
     ScenarioVideoOutput,
     SimulationTime,
@@ -223,14 +225,38 @@ class RecordedScenarioSource:
             # Restore world_objects into logical_scene
             logical_scene_data["world_objects"] = static_world_objects
 
-            # For now, we create a minimal truth output (full deserialization TBD)
+            # Restore the per-camera truth needed by preview overlays and
+            # downstream evaluators. The logical scene remains a JSON mapping
+            # because playback does not need to rehydrate every scene subtype.
+            from chongming.scenarios.serialization import _decode
+
+            logical_scene = (
+                _decode(logical_scene_data, LogicalSceneSnapshot)
+                if logical_scene_data.get("$type") == "LogicalSceneSnapshot"
+                else logical_scene_data
+            )
+            camera_frames = tuple(
+                _decode(frame, CameraFrameTruth)
+                for frame in truth.get("camera_frames", [])
+            )
             truth_output = ScenarioTruthOutput(
                 scenario_id=self.spec.scenario_id,
                 sample_time=sample_time,
-                logical_scene=logical_scene_data,  # type: ignore[arg-type]
-                camera_frames=(),
+                logical_scene=logical_scene,
+                camera_frames=camera_frames,
                 online_correspondences=(),
                 experiment_perturbations=truth["experiment_perturbations"],  # type: ignore[arg-type]
+                timing=(
+                    ScenarioStepTiming(
+                        **{
+                            key: value
+                            for key, value in timing["stages"].items()
+                            if key != "$type"
+                        }
+                    )
+                    if isinstance(timing.get("stages"), dict)
+                    else None
+                ),
             )
 
             # Frame rate control: add delay to match target playback fps

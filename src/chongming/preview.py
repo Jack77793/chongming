@@ -48,8 +48,8 @@ from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
-from chongming.scenarios.source import ScenarioSource
 from chongming.scenarios.serialization import load_scenario
+from chongming.scenarios.source import ScenarioSource
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,7 @@ def _preview_metadata(step: ScenarioStep, sequence: int, loop_no: int) -> dict[s
             "rays": [asdict(item) for item in step.packets.rays],
         },
         "monitor": {
+            "occlusion_mode": scene.occlusion_mode.value,
             "scene_counts": {
                 "world_objects": len(scene.world_objects),
                 "vegetation": len(scene.vegetation),

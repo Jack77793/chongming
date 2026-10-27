@@ -69,6 +69,13 @@ class TimeScale(StrEnum):
     UTC = "utc"
 
 
+class OcclusionMode(StrEnum):
+    """Whether the scene generator can provide geometric occlusion truth."""
+
+    KNOWN = "known"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class ClockDomainSpec:
     """Map this experiment's nanoseconds to a declared continuous time scale.
@@ -582,6 +589,7 @@ class SceneDefinition:
     vegetation: tuple[VegetationSpec, ...] = ()
     render_effects: RenderEffectsSpec = field(default_factory=RenderEffectsSpec)
     osm_landscape: OSMLandscape | None = None
+    occlusion_mode: OcclusionMode = OcclusionMode.KNOWN
 
 
 @dataclass(frozen=True)
@@ -774,7 +782,8 @@ class TargetVisibilityTruth:
     sight_segment: SightSegment
     occlusions: tuple[SegmentOcclusionTruth, ...]
     capture_eligible: bool
-    # capture_eligible iff center is in view and the finite segment is unobstructed.
+    # In known mode this also requires an unobstructed finite sight segment.
+    # In unknown mode it means only that the target center is in the camera FOV.
 
 
 @dataclass(frozen=True)
@@ -787,6 +796,8 @@ class LandmarkVisibilityTruth:
     sight_segment: SightSegment
     occlusions: tuple[SegmentOcclusionTruth, ...]
     capture_eligible: bool
+    # In known mode this also requires an unobstructed finite sight segment.
+    # In unknown mode it means only that the landmark is in the camera FOV.
 
 
 @dataclass(frozen=True)
@@ -802,6 +813,7 @@ class LogicalSceneSnapshot:
     target_visibility: tuple[TargetVisibilityTruth, ...]
     landmark_visibility: tuple[LandmarkVisibilityTruth, ...]
     illumination: IlluminationSpec
+    occlusion_mode: OcclusionMode = OcclusionMode.KNOWN
     clouds: tuple[CloudPerturbation, ...] = ()
     render_effects: RenderEffectsSpec = field(default_factory=RenderEffectsSpec)
     wind: WindPerturbation | None = None

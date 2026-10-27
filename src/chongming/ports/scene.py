@@ -70,7 +70,7 @@ class CameraProjector(Protocol):
 
 class VisibilityResolver(Protocol):
     def resolve(self, query: VisibilityQuery) -> TargetVisibilityTruth:
-        """Test center-in-FOV and occlusion on the finite camera-to-center segment."""
+        """Resolve FOV eligibility and, when available, finite-segment occlusion."""
         ...
 
     def resolve_reference(self, query: ReferenceVisibilityQuery) -> LandmarkVisibilityTruth:
