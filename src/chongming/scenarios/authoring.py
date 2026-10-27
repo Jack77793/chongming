@@ -80,7 +80,7 @@ def _geometry(value: dict[str, Any]) -> s.GeometrySpec:
     _fields(
         value,
         {"type"}
-        | {"sphere": {"radius_m"}, "box": {"half_extents_m"}, "aircraft": set()}.get(kind, set()),
+        | {"sphere": {"radius_m"}, "box": {"half_extents_m"}, "aircraft": {"model"}}.get(kind, set()),
         "geometry",
     )
     if kind == "sphere":
@@ -91,6 +91,12 @@ def _geometry(value: dict[str, Any]) -> s.GeometrySpec:
             raise ValueError("half_extents_m must contain three numbers")
         return s.BoxGeometry(tuple(_number(x, "half_extents_m") for x in extents))  # type: ignore[arg-type]
     if kind == "aircraft":
+        model = value.get("model")
+        if model is not None:
+            if not isinstance(model, str) or not model:
+                raise ValueError("aircraft model must be a non-empty string")
+            return s.ExternalAssetGeometry(_identifier(model, "geometry.model"))
+        # Default to hardcoded triangle mesh for backward compatibility
         return s.TriangleMeshGeometry(
             (
                 (0.0, 2.8, 0.0),

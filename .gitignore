@@ -45,3 +45,7 @@ results/
 *.hevc
 *.onnx
 *.bin
+
+# External projects and recordings
+external-projects/
+recordings/

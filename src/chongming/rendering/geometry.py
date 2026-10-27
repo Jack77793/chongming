@@ -156,6 +156,11 @@ def surface_hits(
             depth[replace] = cap[replace]
             normals[replace, 2] = 1.0 if z == geometry.height_m else -1.0
     else:
+        if not isinstance(geometry, TriangleMeshGeometry):
+            raise TypeError(
+                f"External assets are not supported in Python-side ray tracing; "
+                f"got {type(geometry).__name__}"
+            )
         vertices = np.asarray(geometry.vertices_body_m, dtype=np.float64)
         for triangle in geometry.triangle_vertex_indices:
             if min(triangle) < 0 or max(triangle) >= len(vertices):
@@ -216,6 +221,11 @@ def contains_point(origin: Vec3M, pose: KinematicState, geometry: GeometrySpec) 
         )
     # A closed, consistently wound mesh subtends 4*pi steradians from inside.
     # This covers cameras/targets inside concave OSM prisms.
+    if not isinstance(geometry, TriangleMeshGeometry):
+        raise TypeError(
+            f"External assets are not supported in Python-side containment checks; "
+            f"got {type(geometry).__name__}"
+        )
     vertices = np.asarray(geometry.vertices_body_m, dtype=np.float64)
     if (
         np.any(point < vertices.min(axis=0))
