@@ -138,10 +138,12 @@ class AssociationConflictReason(StrEnum):
     INSUFFICIENT_INDEPENDENT_STATIONS = "insufficient_independent_stations"
     TEMPORAL_GATE_FAILED = "temporal_gate_failed"
     SPATIAL_GATE_FAILED = "spatial_gate_failed"
+    CANDIDATE_SEARCH_TRUNCATED = "candidate_search_truncated"
 
 
 class AssociationBatchStatus(StrEnum):
     ASSOCIATIONS_SELECTED = "associations_selected"
+    NO_VALID_ASSOCIATION = "no_valid_association"
     ASSOCIATION_AMBIGUOUS = "association_ambiguous"
     INSUFFICIENT_STATIONS = "insufficient_stations"
     NO_CANDIDATE_IN_VOLUME = "no_candidate_in_volume"
@@ -160,6 +162,10 @@ class GeometryReason(StrEnum):
     EXCESSIVE_RESIDUAL = "excessive_residual"
     REFERENCE_TIME_ALIGNMENT_UNAVAILABLE = "reference_time_alignment_unavailable"
     SOLVER_FAILURE = "solver_failure"
+    NONFORWARD_SOLUTION = "nonforward_solution"
+    INVALID_SUPPORT_GROUP = "invalid_support_group"
+    UNSUPPORTED_CALIBRATION_USAGE = "unsupported_calibration_usage"
+    UNSUPPORTED_UNCERTAINTY_MODEL = "unsupported_uncertainty_model"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -258,7 +264,11 @@ class AssociationPolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class GeometryPolicy:
-    """At least two independent stations; numerical quality limits remain supplied."""
+    """At least two independent stations; numerical quality limits remain supplied.
+
+    The angle limit applies to the strongest acute pair; the normal-matrix
+    condition and maximum per-ray residual assess the complete support group.
+    """
 
     minimum_independent_stations: int
     minimum_intersection_angle_rad: float
@@ -465,6 +475,8 @@ class AssociatedRayGroup:
 
     Across selected groups in one batch an EventId is used at most once. Group IDs
     are scoped by window (which includes the center session); truth IDs are absent.
+    Without a motion prior, reference time is the midpoint of the earliest/latest
+    supporting exposure midpoints, not an assumed position at the window center.
     """
 
     hypothesis_id: str

@@ -1,4 +1,4 @@
-"""Constructor-wired localization and tracking stages, pending implementation.
+"""Pending comparison strategy, uncertainty weighting, tracking and orchestration.
 
 Both candidate strategies and all pipeline stages are constructed at startup.
 Configuration selects how a stage processes evidence, not whether it exists.
@@ -10,16 +10,11 @@ from dataclasses import dataclass
 
 from chongming.contracts.fusion import (
     AdmittedRay,
-    AssociationBatch,
-    AssociationPolicy,
     CalibrationUsageRule,
     CandidateBatch,
-    CandidatePolicy,
     EventClockReading,
     FusionBatchResult,
     FusionPolicy,
-    GeometryBatch,
-    GeometryPolicy,
     RayGeometryWeight,
     RegistryWriteResult,
     SealedObservationWindow,
@@ -48,26 +43,10 @@ from chongming.ports.fusion import (
     EventClockMapping,
     EventWindows,
     GeometryRefiner,
-    GeometryWeighting,
-    SpatialCandidateStrategy,
     StationRegistry,
 )
 
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
-
-
-@dataclass(frozen=True, kw_only=True)
-class VoxelCandidateModule(ModuleShell):
-    """Vote only on forward ray/search-box intersection, per independent station."""
-
-    policy: CandidatePolicy
-
-    def propose(
-        self,
-        window: SealedObservationWindow,
-        predictions: tuple[TrackPrediction, ...],
-    ) -> CandidateBatch:
-        raise NotImplementedError(_TODO)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -85,52 +64,10 @@ class DirectGeometryCandidateModule(ModuleShell):
 
 
 @dataclass(frozen=True, kw_only=True)
-class CandidateGenerationModule(ModuleShell):
-    policy: CandidatePolicy
-    voxel: SpatialCandidateStrategy
-    direct: SpatialCandidateStrategy
-
-    def generate(
-        self,
-        window: SealedObservationWindow,
-        predictions: tuple[TrackPrediction, ...],
-    ) -> CandidateBatch:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class CrossStationAssociationModule(ModuleShell):
-    policy: AssociationPolicy
-
-    def associate(
-        self,
-        window: SealedObservationWindow,
-        candidates: CandidateBatch,
-        predictions: tuple[TrackPrediction, ...],
-    ) -> AssociationBatch:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
 class CalibrationWeightingModule(ModuleShell):
     rules: tuple[CalibrationUsageRule, ...]
 
     def weight(self, ray: AdmittedRay) -> RayGeometryWeight:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class GeometryRefinementModule(ModuleShell):
-    center_session_id: SessionId
-    policy: GeometryPolicy
-    weights: GeometryWeighting
-
-    def refine(
-        self,
-        window: SealedObservationWindow,
-        association: AssociationBatch,
-        predictions: tuple[TrackPrediction, ...],
-    ) -> GeometryBatch:
         raise NotImplementedError(_TODO)
 
 

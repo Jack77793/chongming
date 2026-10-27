@@ -90,7 +90,7 @@ def development_run(spec: s.ScenarioSpec, output: Path) -> r.RunSpec:
             minimum_intersection_angle_rad=0.01,
             maximum_condition_number=1e6,
             maximum_residual_m=1,
-            robust_loss_definition="huber",
+            robust_loss_definition="least_squares",
             robust_loss_scale_m=1,
             motion_alignment_model=f.MotionAlignmentModel.NARROW_WINDOW_WITHOUT_PRIOR,
             conservative_speed_bound_mps=None,

@@ -31,7 +31,8 @@ from chongming.contracts.scene import (
 )
 from chongming.modules import base
 from chongming.modules.base import ModuleShell
-from chongming.modules.fusion import DirectGeometryCandidateModule, VoxelCandidateModule
+from chongming.modules.fusion import DirectGeometryCandidateModule
+from chongming.modules.fusion_geometry import VoxelCandidateModule
 from chongming.ports import development, device, fusion, runtime
 from tests.fixtures import architecture_specs
 
@@ -269,12 +270,8 @@ class ArchitectureStructureTests(unittest.TestCase):
                 "DeviceModule": {"process_main", "process_auxiliary", "tick"},
             },
             "fusion.py": {
-                "VoxelCandidateModule": {"propose"},
                 "DirectGeometryCandidateModule": {"propose"},
-                "CandidateGenerationModule": {"generate"},
-                "CrossStationAssociationModule": {"associate"},
                 "CalibrationWeightingModule": {"weight"},
-                "GeometryRefinementModule": {"refine"},
                 "CenterTrackingModule": {"predict", "update", "advance"},
                 "CenterFusionModule": {
                     "register_station",

@@ -26,11 +26,13 @@ from chongming.modules.device import (
 )
 from chongming.modules.fusion import (
     CalibrationWeightingModule,
-    CandidateGenerationModule,
     CenterFusionModule,
     CenterTrackingModule,
-    CrossStationAssociationModule,
     DirectGeometryCandidateModule,
+)
+from chongming.modules.fusion_geometry import (
+    CandidateGenerationModule,
+    CrossStationAssociationModule,
     GeometryRefinementModule,
     VoxelCandidateModule,
 )
@@ -314,6 +316,7 @@ def declare_assembly(spec: ScenarioSpec, run: RunSpec) -> ArchitectureAssembly:
     weights = CalibrationWeightingModule(rules=fusion_policy.admission.calibration_usage_rules)
     geometry = GeometryRefinementModule(
         center_session_id=run.center_session_id,
+        world_frame_id=fusion_policy.admission.world_frame_id,
         policy=fusion_policy.geometry,
         weights=weights,
     )

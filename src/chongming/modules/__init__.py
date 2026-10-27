@@ -15,11 +15,13 @@ from .device import (
 )
 from .fusion import (
     CalibrationWeightingModule,
-    CandidateGenerationModule,
     CenterFusionModule,
     CenterTrackingModule,
-    CrossStationAssociationModule,
     DirectGeometryCandidateModule,
+)
+from .fusion_geometry import (
+    CandidateGenerationModule,
+    CrossStationAssociationModule,
     GeometryRefinementModule,
     VoxelCandidateModule,
 )
