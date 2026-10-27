@@ -13,6 +13,8 @@ var _buffer := PackedByteArray()
 var _expected_payload := -1
 var _port := 0
 var _token := ""
+var _external_scene_path := ""
+var _external_scene_active := false
 var _viewport: SubViewport
 var _world: Node3D
 var _camera: Camera3D
@@ -69,6 +71,20 @@ func _setup_world() -> void:
 	add_child(_viewport)
 	_world = Node3D.new()
 	_viewport.add_child(_world)
+	if not _external_scene_path.is_empty():
+		_external_scene_active = true
+		var external_scene := load(_external_scene_path) as PackedScene
+		if external_scene == null:
+			push_error("external Godot scene could not be loaded: %s" % _external_scene_path)
+			get_tree().quit(2)
+			return
+		var external_instance := external_scene.instantiate()
+		if not external_instance is Node3D:
+			push_error("external Godot scene root must be Node3D: %s" % _external_scene_path)
+			get_tree().quit(2)
+			return
+		external_instance.name = "ExternalScene"
+		_world.add_child(external_instance)
 	_camera = Camera3D.new()
 	_camera.cull_mask = 1
 	_camera.current = true
@@ -177,6 +193,8 @@ func _parse_arguments() -> void:
 			_port = int(args[index + 1])
 		elif args[index] == "--token":
 			_token = args[index + 1]
+		elif args[index] == "--external-scene":
+			_external_scene_path = args[index + 1]
 	if _port <= 0:
 		push_error("Godot renderer requires --port")
 		get_tree().quit(2)
@@ -554,7 +572,7 @@ func _sync_entities(entities: Array) -> void:
 		# A heightfield is the sole terrain and shadow receiver. Keeping the
 		# fallback plane enabled creates a second visible/shadow-catching ground
 		# one metre below the DEM, especially obvious in freeview.
-		_ground.visible = not has_mesh_terrain
+		_ground.visible = not has_mesh_terrain and not _external_scene_active
 	for index in range(entities.size()):
 		var light_entity: Dictionary = entities[index]
 		var entity: Dictionary = resolved[index]

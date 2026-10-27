@@ -70,6 +70,7 @@ from chongming.contracts.scene import (
     MonitoringFrame,
     MonitoringSnapshot,
     MonitoringSpec,
+    OcclusionMode,
     OnlineEvaluationData,
     OnlineTruthCorrespondence,
     ProjectedLandmarkTruth,
@@ -564,16 +565,23 @@ class CameraProjectionModule(ModuleShell):
 
 
 class VisibilityModule(ModuleShell):
+    def __init__(self, occlusion_mode: OcclusionMode = OcclusionMode.KNOWN) -> None:
+        self.occlusion_mode = occlusion_mode
+
     business_implemented = True
 
     def resolve(self, query: VisibilityQuery) -> TargetVisibilityTruth:
-        occlusions = self._occlusions(
-            query.projection,
-            query.camera.optical_state.position_enu_m,
-            query.target.center_reference_point_enu_m,
-            query.terrain,
-            query.world_objects,
-            query.vegetation,
+        occlusions = (
+            self._occlusions(
+                query.projection,
+                query.camera.optical_state.position_enu_m,
+                query.target.center_reference_point_enu_m,
+                query.terrain,
+                query.world_objects,
+                query.vegetation,
+            )
+            if self.occlusion_mode is OcclusionMode.KNOWN
+            else ()
         )
         return TargetVisibilityTruth(
             station_id=query.camera.station_id,
@@ -590,13 +598,17 @@ class VisibilityModule(ModuleShell):
         )
 
     def resolve_reference(self, query: ReferenceVisibilityQuery) -> LandmarkVisibilityTruth:
-        occlusions = self._occlusions(
-            query.projection,
-            query.camera.optical_state.position_enu_m,
-            query.landmark.position_enu_m,
-            query.terrain,
-            query.world_objects,
-            query.vegetation,
+        occlusions = (
+            self._occlusions(
+                query.projection,
+                query.camera.optical_state.position_enu_m,
+                query.landmark.position_enu_m,
+                query.terrain,
+                query.world_objects,
+                query.vegetation,
+            )
+            if self.occlusion_mode is OcclusionMode.KNOWN
+            else ()
         )
         return LandmarkVisibilityTruth(
             station_id=query.camera.station_id,
@@ -768,6 +780,8 @@ class SceneLogicModule(ModuleShell):
         self._scene = scene
         self._perturbations = perturbations
         self._random_seed = random_seed
+        if isinstance(self.visibility, VisibilityModule):
+            self.visibility.occlusion_mode = scene.occlusion_mode
 
     def sample(self, time: SimulationTime) -> LogicalSceneSnapshot:
         scene = getattr(self, "_scene", None)
@@ -1016,6 +1030,7 @@ class SceneLogicModule(ModuleShell):
             target_visibility=tuple(target_visibility),
             landmark_visibility=tuple(landmark_visibility),
             illumination=scene.illumination,
+            occlusion_mode=scene.occlusion_mode,
             clouds=perturbations.clouds,
             render_effects=scene.render_effects,
             wind=perturbations.wind,

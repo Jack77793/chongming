@@ -1,0 +1,39 @@
+{
+  "format": "scenario-authoring-v2",
+  "scenario_id": "truck-town-external-v1",
+  "random_seed": 42,
+  "duration_s": 8,
+  "fps": 30,
+  "occlusion_mode": "unknown",
+  "stations": [
+    {
+      "id": "station-01",
+      "position_enu_m": [-10, -22, 8],
+      "main_yaw_deg": 35,
+      "main_elevation_deg": -8,
+      "auxiliary_yaw_deg": 10
+    },
+    {
+      "id": "station-02",
+      "position_enu_m": [28, -18, 7],
+      "main_yaw_deg": 145,
+      "main_elevation_deg": -7,
+      "auxiliary_yaw_deg": 130
+    }
+  ],
+  "targets": [
+    {
+      "id": "truck-town-target",
+      "display_name": "Truck Town target",
+      "geometry": {"type": "aircraft"},
+      "motion": {
+        "type": "constant_velocity",
+        "position_enu_m": [5, 5, 18],
+        "velocity_enu_mps": [2, 0.5, 0]
+      }
+    }
+  ],
+  "world_objects": [],
+  "vegetation": [],
+  "wind": null
+}

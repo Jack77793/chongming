@@ -22,6 +22,7 @@ import time
 import uuid
 from contextlib import ExitStack
 from importlib.resources import as_file, files
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,8 @@ _REQUEST_HEADER = struct.Struct("<I")
 _RESPONSE_HEADER = struct.Struct("<QQ")
 _MAX_REQUEST = 256 * 1024 * 1024
 GODOT_VERSION = "4.7.2"
+_EXTERNAL_PROJECT_ENV = "CHONGMING_GODOT_EXTERNAL_PROJECT"
+_EXTERNAL_SCENE_ENV = "CHONGMING_GODOT_EXTERNAL_SCENE"
 
 
 def _rotation(state: KinematicState) -> list[float]:
@@ -503,8 +506,58 @@ class GodotRenderer:
         self.version = version
         self._files = ExitStack()
         project = self._files.enter_context(as_file(files("chongming.rendering").joinpath("godot")))
-        # Keep the working directory separate from read-only package resources.
         workspace = self._files.enter_context(tempfile.TemporaryDirectory(prefix="chongming-"))
+        launch_project = Path(workspace) / "project"
+        external_project = os.environ.get(_EXTERNAL_PROJECT_ENV)
+        external_scene = os.environ.get(_EXTERNAL_SCENE_ENV)
+        if bool(external_project) != bool(external_scene):
+            raise ValueError(
+                f"{_EXTERNAL_PROJECT_ENV} and {_EXTERNAL_SCENE_ENV} must be set together"
+            )
+        if external_project is not None and external_scene is not None:
+            source = Path(external_project).expanduser().resolve()
+            if not source.is_dir():
+                raise ValueError(f"external Godot project does not exist: {source}")
+            if not external_scene.startswith("res://"):
+                raise ValueError(f"external Godot scene must use a res:// path: {external_scene!r}")
+            # Overlay the package worker project on a copy of the external project.
+            # The external project.godot is intentionally ignored so the worker
+            # remains the main scene; all external res:// assets stay addressable.
+            shutil.copytree(
+                source,
+                launch_project,
+                ignore=shutil.ignore_patterns(".godot", "project.godot"),
+            )
+            shutil.copytree(project, launch_project, dirs_exist_ok=True)
+        else:
+            shutil.copytree(project, launch_project)
+            external_scene = None
+        if external_scene is not None:
+            # GLTF and other imported assets are materialized in the temporary
+            # worker project, so an external project's source-side .godot
+            # cache cannot be reused after copying.
+            import_result = subprocess.run(
+                [
+                    executable,
+                    "--headless",
+                    "--editor",
+                    "--quit",
+                    "--path",
+                    str(launch_project),
+                    "--audio-driver",
+                    "Dummy",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            if import_result.returncode != 0:
+                detail = import_result.stdout.strip()
+                raise RuntimeError(
+                    "Godot could not import the external project"
+                    f": {detail or 'unknown error'}"
+                )
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -517,7 +570,7 @@ class GodotRenderer:
             [
                 executable,
                 "--path",
-                str(project),
+                str(launch_project),
                 "--audio-driver",
                 "Dummy",
                 "--rendering-method",
@@ -531,6 +584,7 @@ class GodotRenderer:
                 str(port),
                 "--token",
                 token,
+                *(["--external-scene", external_scene] if external_scene is not None else []),
             ],
             cwd=workspace,
             stdout=self._log,

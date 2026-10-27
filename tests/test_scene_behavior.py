@@ -23,6 +23,7 @@ from chongming.contracts.scene import (
     ImageGenerationRequest,
     ImagingSpec,
     KinematicState,
+    OcclusionMode,
     SceneCameraDistortion,
     SceneCameraIntrinsics,
     SceneDistortionModel,
@@ -230,6 +231,41 @@ class ScenePrimitiveTests(unittest.TestCase):
             projection=CameraProjectionModule().project(camera(), (0.0, 0.0, 3.0)),
         )
         self.assertTrue(VisibilityModule().resolve(beyond).capture_eligible)
+
+    def test_unknown_occlusion_mode_keeps_in_view_targets_eligible(self) -> None:
+        obstacle = WorldObjectSpec(
+            object_id=WorldObjectId("obstacle"),
+            display_name="obstacle",
+            kind=WorldObjectKind.OBSTACLE,
+            category="test",
+            pose=state((0.0, 0.0, 5.0)),
+            geometry=SphereGeometry(1.0),
+            appearance=SurfaceAppearance((0.5, 0.5, 0.5), 0.5),
+            occludes_sight_lines=True,
+        )
+        target = FlyingObjectTruth(
+            truth_object_id=TruthObjectId("truth-1"),
+            display_name="target",
+            model_name="sphere",
+            sample_time=SimulationTime("clock", 0, 0),
+            state=state((0.0, 0.0, 10.0)),
+            center_reference_point_enu_m=(0.0, 0.0, 10.0),
+            geometry=SphereGeometry(0.5),
+            appearance=SurfaceAppearance((0.5, 0.5, 0.5), 0.5),
+        )
+        projection = CameraProjectionModule().project(camera(), target.center_reference_point_enu_m)
+        query = VisibilityQuery(
+            sample_time=SimulationTime("clock", 0, 0),
+            camera=camera(),
+            target=target,
+            projection=projection,
+            terrain=terrain(),
+            world_objects=(obstacle,),
+            vegetation=(),
+        )
+        result = VisibilityModule(OcclusionMode.UNKNOWN).resolve(query)
+        self.assertTrue(result.capture_eligible)
+        self.assertEqual(result.occlusions, ())
 
     def test_scene_logic_samples_one_immutable_snapshot(self) -> None:
         spec, _ = architecture_specs()

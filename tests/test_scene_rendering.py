@@ -91,6 +91,19 @@ def render_gpu(
 
 
 class SceneConfigurationTests(unittest.TestCase):
+    def test_authoring_occlusion_mode_is_explicit_and_validated(self) -> None:
+        default_spec = compile_authoring(demo_authoring())
+        self.assertIs(s.OcclusionMode.KNOWN, default_spec.scene_definition.occlusion_mode)
+
+        document = demo_authoring()
+        document["occlusion_mode"] = "unknown"
+        unknown_spec = compile_authoring(document)
+        self.assertIs(s.OcclusionMode.UNKNOWN, unknown_spec.scene_definition.occlusion_mode)
+
+        document["occlusion_mode"] = "unsupported"
+        with self.assertRaisesRegex(ValueError, "occlusion_mode must be 'known' or 'unknown'"):
+            compile_authoring(document)
+
     def test_environment_and_camera_jitter_are_configurable_and_replayable(self) -> None:
         document = demo_authoring()
         document["environment"] = {
@@ -1211,6 +1224,20 @@ class PreviewTests(unittest.TestCase):
             np.asarray(optical_rotation(0.5, 0.2)).T @ optical_rotation(0.5, 0.2),
             np.eye(3),
             atol=1e-12,
+        )
+
+    def test_unknown_occlusion_mode_is_reported_without_rendering(self) -> None:
+        spec = compile_authoring({**demo_authoring(), "occlusion_mode": "unknown"})
+        step = next(iter(demo_source(spec, video_enabled=False).generate(spec)))
+        payload = preview_payload(step, 1, 1)
+        self.assertEqual(payload["monitor"]["occlusion_mode"], "unknown")
+        self.assertEqual(step.truth.logical_scene.occlusion_mode, s.OcclusionMode.UNKNOWN)
+        self.assertTrue(
+            all(
+                not target.visibility.occlusions
+                for frame in step.truth.camera_frames
+                for target in frame.targets
+            )
         )
 
     def test_virtual_calibration_freezes_and_stales_without_replacing_solution(self) -> None:

@@ -349,6 +349,7 @@ def compile_authoring(
         "rendering",
         "osm",
         "camera_position_offset_enu_m",
+        "occlusion_mode",
     }:
         unknown = set(document) - {
             "format",
@@ -369,6 +370,7 @@ def compile_authoring(
             "rendering",
             "osm",
             "camera_position_offset_enu_m",
+            "occlusion_mode",
         }
         raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
     if document.get("format") != AUTHORING_FORMAT:
@@ -406,6 +408,15 @@ def compile_authoring(
         fps=fps,
         station_positions=tuple(positions),
         station_ids=tuple(ids),
+    )
+    raw_occlusion_mode = document.get("occlusion_mode", s.OcclusionMode.KNOWN.value)
+    try:
+        occlusion_mode = s.OcclusionMode(raw_occlusion_mode)
+    except (TypeError, ValueError) as error:
+        raise ValueError("occlusion_mode must be 'known' or 'unknown'") from error
+    spec = replace(
+        spec,
+        scene_definition=replace(spec.scene_definition, occlusion_mode=occlusion_mode),
     )
     environment_doc = document.get("environment")
     illumination = spec.scene_definition.illumination

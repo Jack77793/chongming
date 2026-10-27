@@ -131,10 +131,13 @@ manifest 的 `installation` 区分 `editable` 与 `installed`；`package_digests
 | `vegetation[]`、`wind`                                | 植被类型及尺寸、平均风和湍流；`[]` 清空植被，`null` 关闭风                                                               |
 | `search`                                              | `min_enu_m`、`max_enu_m`、`step_enu_m`；搜索盒外目标仍可产生射线                                                         |
 | `environment`、`camera_jitter`、`clouds`、`rendering` | 可选摄影、抖动、云及渲染效果                                                                                             |
+| `occlusion_mode`                                       | `known`（默认，按规范化几何计算遮挡）或 `unknown`（不判定遮挡，仅按目标是否在视场内生成候选）                         |
 | `camera_position_offset_enu_m`                        | 对真实主辅光心共同施加位移，不修改在线安装配置，用于视差评估                                                             |
 | `osm`                                                 | 本地 `asset` 引用与可选 `vegetation` 策略                                                                                |
 
 省略地物、目标、植被或风字段时可能保留演示默认值；空场景应显式使用空数组及 `wind: null`。主相机为 1920×1080、对角 FOV 60°；辅助相机为 640×480、水平 FOV 2.6°，标称水平朝向 10 m 外与站点 ID 绑定的横向 A4 棋盘。方位角 0° 向北，正向东；显式抖动可使瞬时辅助姿态偏离水平。输出为无 alpha 的 sRGB RGB8。
+
+外部 Godot 场景通常没有可供 Python 复算的完整几何模型，可将 `occlusion_mode` 设为 `unknown`。运行不会因无法判断遮挡而失败；系统仍记录相机姿态、目标状态和图像，并按目标中心是否在视场内生成候选。该模式的结果只适合在同一固定录像上比较不同系统版本或模型的相对排名，不能解释为排除了遮挡影响的准确率，也不适合直接与 `known` 场景的绝对分数比较。
 
 ### 摄影与植被
 
