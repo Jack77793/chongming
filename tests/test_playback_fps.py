@@ -205,9 +205,7 @@ class TestPlaybackFrameRate(unittest.TestCase):
             self.skipTest("Recording too short")
 
         # Calculate intervals between frames
-        intervals = [
-            frame_times[i + 1] - frame_times[i] for i in range(len(frame_times) - 1)
-        ]
+        intervals = [frame_times[i + 1] - frame_times[i] for i in range(len(frame_times) - 1)]
 
         # Expected interval
         expected_interval = 1.0 / target_fps

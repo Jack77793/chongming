@@ -172,8 +172,7 @@ class RecordedScenarioSource:
 
                 # Filter out $type field from capture_time
                 capture_time_data = {
-                    k: v for k, v in frame_record["capture_time"].items()
-                    if k != "$type"
+                    k: v for k, v in frame_record["capture_time"].items() if k != "$type"
                 }
 
                 frames.append(
@@ -201,7 +200,9 @@ class RecordedScenarioSource:
                 frames=tuple(frames),
                 rendered=online.get("rendered", True),
                 render_skip_reason=online.get("render_skip_reason"),
-                skipped_frame_ids=tuple(FrameId(fid) for fid in online.get("skipped_frame_ids", [])),
+                skipped_frame_ids=tuple(
+                    FrameId(fid) for fid in online.get("skipped_frame_ids", [])
+                ),
             )
 
             # Reconstruct packet output (simplified - only what's needed for preview)
