@@ -1,8 +1,8 @@
 """All-module dependency and startup declarations."""
 
+from .center import CenterAssembly
 from .graph import (
     ArchitectureAssembly,
-    CenterAssembly,
     SceneAssembly,
     StationAssembly,
     declare_assembly,

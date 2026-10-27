@@ -330,7 +330,11 @@ class EventAdmissionModule(ModuleShell):
         return self._evaluate(received, received.arrival_time)
 
     def reconsider_quarantined(self, now: m.ProcessingTime) -> tuple[f.AdmissionOutcome, ...]:
-        return tuple(self._evaluate(record.received, now) for record in self.journal.quarantined())
+        pending = sorted(
+            self.journal.quarantined(),
+            key=lambda record: isinstance(record.received.event, m.RayEvent),
+        )
+        return tuple(self._evaluate(record.received, now) for record in pending)
 
     def _record(
         self,

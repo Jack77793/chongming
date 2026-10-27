@@ -132,7 +132,8 @@ from chongming.rendering.godot import (
 )
 from chongming.rendering.occlusion_index import OcclusionIndex
 from chongming.scenarios.behaviors import sample_behavior
-from chongming.scenarios.uncertainty import covariance_factor, gaussian_sample
+from chongming.scenarios.uncertainty import gaussian_sample
+from chongming.uncertainty import covariance_factor
 
 _EPS = 1e-9
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"

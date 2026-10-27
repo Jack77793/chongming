@@ -159,6 +159,16 @@ class ArchitectureStructureTests(unittest.TestCase):
                 del remaining[key]
         self.assertEqual(resolved, set(nodes))
 
+    def test_public_center_exports_resolve_to_the_bound_implementations(self) -> None:
+        from chongming import composition, modules
+        from chongming.modules import shells
+
+        assembly, _ = _construct()
+        self.assertIs(composition.CenterAssembly, type(assembly.center))
+        self.assertIs(modules.CenterFusionModule, type(assembly.center.fusion))
+        self.assertIs(shells.CenterFusionModule, type(assembly.center.fusion))
+        self.assertIs(modules.CenterTrackingModule, type(assembly.center.tracking))
+
     def test_routes_and_candidate_methods_keep_all_modules_constructed(self) -> None:
         signatures: set[frozenset[tuple[str, type[object]]]] = set()
         for path in EventPath:
@@ -272,14 +282,6 @@ class ArchitectureStructureTests(unittest.TestCase):
             "fusion.py": {
                 "DirectGeometryCandidateModule": {"propose"},
                 "CalibrationWeightingModule": {"weight"},
-                "CenterTrackingModule": {"predict", "update", "advance"},
-                "CenterFusionModule": {
-                    "register_station",
-                    "register_calibration",
-                    "process",
-                    "report_progress",
-                    "tick",
-                },
             },
             "runtime.py": {
                 "EventTransportModule": {"submit", "submit_progress", "collect", "drain"},

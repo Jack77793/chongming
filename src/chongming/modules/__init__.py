@@ -15,10 +15,9 @@ from .device import (
 )
 from .fusion import (
     CalibrationWeightingModule,
-    CenterFusionModule,
-    CenterTrackingModule,
     DirectGeometryCandidateModule,
 )
+from .fusion_engine import CenterFusionModule
 from .fusion_geometry import (
     CandidateGenerationModule,
     CrossStationAssociationModule,
@@ -33,6 +32,7 @@ from .fusion_ingress import (
     EventWindowModule,
     StationRegistryModule,
 )
+from .fusion_tracking import CenterTrackingModule
 from .runtime import (
     EventTransportModule,
     EvidenceWriterModule,

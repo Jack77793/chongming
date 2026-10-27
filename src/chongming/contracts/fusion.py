@@ -282,6 +282,12 @@ class GeometryPolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class TrackingPolicy:
+    """Two exposure times initialize velocity; confirmation count is at least two.
+
+    Acceleration covariance is m2/s4 for a constant acceleration per prediction
+    interval, not a continuous-time spectral density. No noise floor is implied.
+    """
+
     confirmation_measurement_count: int
     confirmation_max_gap_ns: int
     coast_after_ns: int

@@ -32,7 +32,7 @@ from chongming.contracts.scene import (
     WorldObjectId,
 )
 from chongming.scenarios.assets import read_verified_json, resolve_external_asset
-from chongming.scenarios.uncertainty import covariance_factor
+from chongming.uncertainty import covariance_factor
 
 FORMAT_VERSION = "scenario-json-v1"
 

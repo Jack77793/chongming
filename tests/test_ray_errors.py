@@ -19,7 +19,7 @@ from chongming.scenarios.authoring import compile_authoring
 from chongming.scenarios.demo import demo_source
 from chongming.scenarios.run import _json
 from chongming.scenarios.serialization import load_scenario, validate_scenario_spec
-from chongming.scenarios.uncertainty import covariance_factor
+from chongming.uncertainty import covariance_factor
 
 SCENARIOS = Path(__file__).resolve().parents[1] / "scenarios"
 ANGULAR: m.Matrix2x2 = ((4e-6, 1e-6), (1e-6, 9e-6))

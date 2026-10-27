@@ -324,7 +324,10 @@ class CleanFusionTests(unittest.TestCase):
                         result.measurement.reference_time_ns, window.reference_time_ns
                     )
                     self.assertEqual(len(result.measurement.residuals_m), count)
-                    self.assertIsNone(result.measurement.conditional_position_covariance_enu_m2)
+                    self.assertEqual(
+                        result.measurement.conditional_position_covariance_enu_m2,
+                        ((0.0, 0.0, 0.0),) * 3,
+                    )
                     self.assertEqual(len(result.shared_installation_state_refs), count)
                     self.assertEqual(len(result.shared_calibration_solution_refs), count)
                     self.assertFalse(result.reasons)

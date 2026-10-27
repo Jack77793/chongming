@@ -3,6 +3,7 @@
 from pathlib import Path
 from uuid import uuid4
 
+from chongming.composition.center import reference_policy
 from chongming.contracts import device as d
 from chongming.contracts import fusion as f
 from chongming.contracts import model as m
@@ -44,69 +45,8 @@ def development_run(spec: s.ScenarioSpec, output: Path) -> r.RunSpec:
             unmodelled_relative_flex_covariance_rad2=None,
         ),
     )
-    policy = f.FusionPolicy(
-        admission=f.AdmissionPolicy(
-            accepted_schema_versions=("event-v1",),
-            world_frame_id=spec.world_frame_id,
-            capture_clock_domain_id=clock,
-            direction_unit_tolerance=1e-6,
-            tangent_basis_orthogonality_tolerance=1e-6,
-            calibration_usage_rules=tuple(
-                f.CalibrationUsageRule(
-                    usage=usage, action=f.CalibrationAction.ACCEPT, geometry_weight_scale=1
-                )
-                for usage in m.CalibrationUsage
-            ),
-        ),
-        windows=f.EventWindowPolicy(
-            capture_clock_domain_id=clock,
-            processing_clock_domain_id=clock,
-            origin_ns=0,
-            width_ns=period,
-            allowed_lateness_ns=0,
-            awaiting_first_event_timeout_ns=10**9,
-            idle_after_ns=10**9,
-            offline_after_ns=3 * 10**9,
-            exclude_idle_stations=False,
-            exclude_offline_stations=False,
-            watermark_strategy=f.WatermarkStrategy.ACTIVE_STATION_MINIMUM,
-            no_active_station_policy=f.EmptyActiveStationPolicy.HOLD,
-        ),
-        candidates=f.CandidatePolicy(
-            search=spec.voxel_search,
-            primary_method=f.CandidateMethod.COARSE_VOXEL,
-            minimum_independent_stations=2,
-            minimum_candidate_score=2,
-            maximum_candidates=None,
-        ),
-        association=f.AssociationPolicy(
-            minimum_independent_stations=2,
-            temporal_gate_ns=period,
-            spatial_gate_m=10,
-            ambiguity_score_margin=0.1,
-        ),
-        geometry=f.GeometryPolicy(
-            minimum_independent_stations=2,
-            minimum_intersection_angle_rad=0.01,
-            maximum_condition_number=1e6,
-            maximum_residual_m=1,
-            robust_loss_definition="least_squares",
-            robust_loss_scale_m=1,
-            motion_alignment_model=f.MotionAlignmentModel.NARROW_WINDOW_WITHOUT_PRIOR,
-            conservative_speed_bound_mps=None,
-        ),
-        tracking=f.TrackingPolicy(
-            confirmation_measurement_count=2,
-            confirmation_max_gap_ns=10**9,
-            coast_after_ns=10**9,
-            delete_after_ns=3 * 10**9,
-            association_gate_mahalanobis_squared=9,
-            process_acceleration_covariance_enu_m2ps4=(
-                (1.0, 0.0, 0.0),
-                (0.0, 1.0, 0.0),
-                (0.0, 0.0, 1.0),
-            ),
-        ),
+    policy = reference_policy(
+        search=spec.voxel_search, clock_domain_id=clock, window_width_ns=period
     )
     return r.RunSpec(
         run_id=str(uuid4()),

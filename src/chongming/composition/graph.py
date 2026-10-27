@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from chongming.composition.center import CenterAssembly, declare_center
 from chongming.contracts.model import StationConfig, StationId
 from chongming.contracts.runtime import ModuleNode, RunSpec, StartupPlan
 from chongming.contracts.scene import ScenarioSpec
@@ -23,26 +24,6 @@ from chongming.modules.device import (
     RayGenerationModule,
     ReferenceRecognitionModule,
     Tracking2DModule,
-)
-from chongming.modules.fusion import (
-    CalibrationWeightingModule,
-    CenterFusionModule,
-    CenterTrackingModule,
-    DirectGeometryCandidateModule,
-)
-from chongming.modules.fusion_geometry import (
-    CandidateGenerationModule,
-    CrossStationAssociationModule,
-    GeometryRefinementModule,
-    VoxelCandidateModule,
-)
-from chongming.modules.fusion_ingress import (
-    AdmissionJournalModule,
-    CalibrationRegistryModule,
-    EventAdmissionModule,
-    EventClockMappingModule,
-    EventWindowModule,
-    StationRegistryModule,
 )
 from chongming.modules.runtime import (
     EventTransportModule,
@@ -91,24 +72,6 @@ class SceneAssembly:
     virtual_sequencers: tuple[EventSequencerModule, ...]
     virtual_observations: VirtualObservationModule
     scenario: ScenarioModule
-
-
-@dataclass(frozen=True, kw_only=True)
-class CenterAssembly:
-    stations: StationRegistryModule
-    calibrations: CalibrationRegistryModule
-    journal: AdmissionJournalModule
-    admission: EventAdmissionModule
-    clock_mapping: EventClockMappingModule
-    windows: EventWindowModule
-    voxels: VoxelCandidateModule
-    direct_candidates: DirectGeometryCandidateModule
-    candidates: CandidateGenerationModule
-    association: CrossStationAssociationModule
-    weights: CalibrationWeightingModule
-    geometry: GeometryRefinementModule
-    tracking: CenterTrackingModule
-    fusion: CenterFusionModule
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -289,104 +252,12 @@ def declare_assembly(spec: ScenarioSpec, run: RunSpec) -> ArchitectureAssembly:
     )
     bind("scene/source", scenario, ("scene/clock", "scene/logic", "scene/imaging", "scene/virtual"))
 
-    fusion_policy = run.fusion_policy
-    stations = StationRegistryModule()
-    calibrations = CalibrationRegistryModule(stations=stations)
-    journal = AdmissionJournalModule()
-    clock_mapping = EventClockMappingModule(mapping=run.processing_to_capture_clock)
-    admission = EventAdmissionModule(
-        policy=fusion_policy.admission,
-        stations=stations,
-        calibrations=calibrations,
-        journal=journal,
-        clock=clock_mapping,
-    )
-    windows = EventWindowModule(
+    center, center_bindings = declare_center(
         center_session_id=run.center_session_id,
-        policy=fusion_policy.windows,
-        clock=clock_mapping,
-        stations=stations,
+        policy=run.fusion_policy,
+        clock_mapping=run.processing_to_capture_clock,
     )
-    voxels = VoxelCandidateModule(policy=fusion_policy.candidates)
-    direct = DirectGeometryCandidateModule(search=fusion_policy.candidates.search)
-    candidates = CandidateGenerationModule(
-        policy=fusion_policy.candidates, voxel=voxels, direct=direct
-    )
-    association = CrossStationAssociationModule(policy=fusion_policy.association)
-    weights = CalibrationWeightingModule(rules=fusion_policy.admission.calibration_usage_rules)
-    geometry = GeometryRefinementModule(
-        center_session_id=run.center_session_id,
-        world_frame_id=fusion_policy.admission.world_frame_id,
-        policy=fusion_policy.geometry,
-        weights=weights,
-    )
-    tracking3d = CenterTrackingModule(
-        center_session_id=run.center_session_id,
-        clock_domain_id=fusion_policy.windows.capture_clock_domain_id,
-        world_frame_id=fusion_policy.admission.world_frame_id,
-        policy=fusion_policy.tracking,
-    )
-    fusion = CenterFusionModule(
-        center_session_id=run.center_session_id,
-        policy=fusion_policy,
-        stations=stations,
-        calibrations=calibrations,
-        admission=admission,
-        windows=windows,
-        candidates=candidates,
-        association=association,
-        geometry=geometry,
-        tracker=tracking3d,
-        clock=clock_mapping,
-    )
-    center = CenterAssembly(
-        stations=stations,
-        calibrations=calibrations,
-        journal=journal,
-        admission=admission,
-        clock_mapping=clock_mapping,
-        windows=windows,
-        voxels=voxels,
-        direct_candidates=direct,
-        candidates=candidates,
-        association=association,
-        weights=weights,
-        geometry=geometry,
-        tracking=tracking3d,
-        fusion=fusion,
-    )
-    bind("center/stations", stations)
-    bind("center/calibrations", calibrations, ("center/stations",))
-    bind("center/journal", journal)
-    bind("center/clock-mapping", clock_mapping)
-    bind(
-        "center/admission",
-        admission,
-        ("center/stations", "center/calibrations", "center/journal", "center/clock-mapping"),
-    )
-    bind("center/windows", windows, ("center/clock-mapping", "center/stations"))
-    bind("center/voxels", voxels)
-    bind("center/direct-candidates", direct)
-    bind("center/candidates", candidates, ("center/voxels", "center/direct-candidates"))
-    bind("center/association", association)
-    bind("center/weights", weights)
-    bind("center/geometry", geometry, ("center/weights",))
-    bind("center/tracking", tracking3d)
-    bind(
-        "center/fusion",
-        fusion,
-        (
-            "center/stations",
-            "center/calibrations",
-            "center/admission",
-            "center/windows",
-            "center/candidates",
-            "center/association",
-            "center/geometry",
-            "center/tracking",
-            "center/clock-mapping",
-        ),
-    )
+    bindings.extend(center_bindings)
 
     transport = EventTransportModule(
         policy=run.transport_policy,
@@ -406,7 +277,7 @@ def declare_assembly(spec: ScenarioSpec, run: RunSpec) -> ArchitectureAssembly:
         bindings=tuple(bindings),
         scenario=scenario,
         devices=tuple(station.device for station in station_assemblies),
-        fusion=fusion,
+        fusion=center.fusion,
         transport=transport,
         evaluator=evaluator,
         monitor=monitor,

@@ -463,8 +463,9 @@ class CrossStationAssociationModule(ModuleShell):
 class GeometryRefinementModule(ModuleShell):
     """Unweighted continuous localization for admitted clean rays.
 
-    Covariance is not estimated by this solver. Shared errors are only retained as
-    references; uncertainty weighting and robust refinement are separate work.
+    The declared zero independent noise gives zero conditional covariance, not
+    absolute accuracy. Shared errors remain references; weighted/robust fits are
+    separate work. Unknown uncertainty is never replaced by arbitrary noise.
     """
 
     business_implemented = True
@@ -594,7 +595,9 @@ class GeometryRefinementModule(ModuleShell):
             position_enu_m=None
             if position is None
             else (float(position[0]), float(position[1]), float(position[2])),
-            conditional_position_covariance_enu_m2=None,
+            conditional_position_covariance_enu_m2=((0.0, 0.0, 0.0),) * 3
+            if position is not None
+            else None,
             supporting_ray_event_ids=group.supporting_ray_event_ids,
             supporting_station_ids=stations,
             residuals_m=residuals,
