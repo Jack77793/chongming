@@ -315,6 +315,9 @@ def architecture_specs(
             temporal_gate_ns=1_000_000,
             spatial_gate_m=1.0,
             ambiguity_score_margin=1.0,
+            prediction_spatial_gate_m=2.0,
+            maximum_hypotheses=4096,
+            maximum_search_nodes=20000,
         ),
         geometry=fusion.GeometryPolicy(
             minimum_independent_stations=2,
@@ -332,6 +335,9 @@ def architecture_specs(
             coast_after_ns=1_000_000_000,
             delete_after_ns=2_000_000_000,
             association_gate_mahalanobis_squared=1.0,
+            initialization_spatial_gate_m=10.0,
+            association_ambiguity_margin=1e-6,
+            maximum_assignment_search_nodes=20000,
             process_acceleration_covariance_enu_m2ps4=_IDENTITY,
         ),
     )

@@ -195,7 +195,10 @@ class CenterTracker(Protocol):
     ) -> tuple[TrackEvent, ...]:
         """Maintain tentative -> confirmed -> coasting -> deleted session-local IDs.
 
-        Consume sealed windows exactly once in nondecreasing reference-time order;
+        Consume one sealed batch exactly once with one-to-one assignments. Each
+        measurement keeps its own reference time, after the previous consumed
+        horizon and no later than event_time_ns, the current batch horizon.
+        Ambiguous assignments do not update filters or create duplicate tracks;
         a publication is never retrospectively rewritten by a late arrival.
         """
         ...

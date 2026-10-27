@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -399,6 +400,246 @@ class ReferenceFusionTests(unittest.TestCase):
             self.assertFalse(result.batches)
         finally:
             inspector.close()
+
+    def multi_document(self) -> dict[str, Any]:
+        document: dict[str, Any] = json.loads((ROOT / "scenarios/center_clean.json").read_text())
+        document["duration_s"] = 0.2
+        document["stations"].append(
+            {
+                "id": "upper",
+                "position_enu_m": [0, 0, 40],
+                "main_yaw_deg": 0,
+                "main_elevation_deg": -10,
+            }
+        )
+        document["targets"].append(
+            {
+                "id": "second-observation-source",
+                "geometry": {"type": "sphere", "radius_m": 1},
+                "motion": {
+                    "type": "constant_velocity",
+                    "position_enu_m": [15, 80, 35],
+                    "velocity_enu_mps": [-0.5, 0.2, 0],
+                },
+            }
+        )
+        return document
+
+    def test_three_station_source_tracks_two_targets_and_discovers_a_late_detection(self) -> None:
+        spec = compile_authoring(self.multi_document())
+        run = development_run(spec, Path("unused-multi-source-output"))
+        registration = replace(
+            self.registration,
+            stations=spec.station_configs,
+            policy=run.fusion_policy,
+            clock_mapping=run.processing_to_capture_clock,
+        )
+        starts = np.asarray(((-15.0, 62.0, 20.0), (15.0, 80.0, 35.0)))
+        velocities = np.asarray(((1.0, 0.0, 0.0), (-0.5, 0.2, 0.0)))
+        for hidden_steps in (0, 2):
+            with self.subTest(hidden_steps=hidden_steps):
+                algorithm = create_algorithm()
+                algorithm.start(registration)
+                results = []
+                try:
+                    steps = self.steps(spec)
+                    for step in steps:
+                        if step.step_no < hidden_steps:
+                            # Simulate missing detections by dropping the second
+                            # observation per station, without changing progress.
+                            first_ids = {
+                                station.station_id: min(
+                                    received.event.envelope.sequence_no
+                                    for received in step.events
+                                    if isinstance(received.event, m.RayEvent)
+                                    and received.event.envelope.station_id == station.station_id
+                                )
+                                for station in spec.station_configs
+                            }
+                            step = replace(
+                                step,
+                                events=tuple(
+                                    received
+                                    for received in step.events
+                                    if not isinstance(received.event, m.RayEvent)
+                                    or received.event.envelope.sequence_no
+                                    == first_ids[received.event.envelope.station_id]
+                                ),
+                            )
+                        results.append(algorithm.process(step))
+                finally:
+                    algorithm.close()
+                geometry = [
+                    batch
+                    for result in results
+                    for output in result.batches
+                    for batch in output.geometry
+                ]
+                self.assertEqual(
+                    [len(batch.results) for batch in geometry],
+                    [1 if index < hidden_steps else 2 for index in range(len(steps) - 1)],
+                )
+                owner_ids: dict[int, m.TrackId] = {}
+                confirmed: set[int] = set()
+                for result in results:
+                    for measurement in result.measurements:
+                        self.assertIs(measurement.status, m.FusionStatus.LOCATED)
+                        expected = starts + (measurement.reference_time_ns / 1e9) * velocities
+                        point = np.asarray(measurement.position_enu_m)
+                        owner = int(np.argmin(np.linalg.norm(expected - point, axis=1)))
+                        np.testing.assert_allclose(point, expected[owner], rtol=0, atol=1e-9)
+                    for track in result.tracks:
+                        if not track.source_measurement_refs:
+                            continue
+                        expected = starts + (track.event_time_ns / 1e9) * velocities
+                        point = np.asarray(track.position_enu_m)
+                        owner = int(np.argmin(np.linalg.norm(expected - point, axis=1)))
+                        np.testing.assert_allclose(point, expected[owner], rtol=0, atol=1e-9)
+                        self.assertEqual(
+                            track.track_id, owner_ids.setdefault(owner, track.track_id)
+                        )
+                        if track.lifecycle is m.TrackLifecycle.CONFIRMED:
+                            confirmed.add(owner)
+                            np.testing.assert_allclose(
+                                np.asarray(track.velocity_enu_mps),
+                                velocities[owner],
+                                rtol=0,
+                                atol=1e-8,
+                            )
+                self.assertEqual(set(owner_ids), {0, 1})
+                self.assertEqual(confirmed, {0, 1})
+                self.assertEqual(len(set(owner_ids.values())), 2)
+                encoded = json.dumps([asdict(result) for result in results], allow_nan=False)
+                self.assertNotIn("second-observation-source", encoded)
+                self.assertNotIn("moving-sphere", encoded)
+
+    def test_source_crossing_and_mutual_occlusion_keep_center_ids(self) -> None:
+        document = self.multi_document()
+        document["duration_s"] = 0.4
+        crossing_time = (1_000_000 + 5 * (10**9 // 30)) / 1e9
+        for index, target in enumerate(document["targets"]):
+            sign = 1.0 if index == 0 else -1.0
+            target["geometry"]["radius_m"] = 0.05
+            target["motion"]["position_enu_m"] = [-sign * 10 * crossing_time, 70, 24]
+            target["motion"]["velocity_enu_mps"] = [sign * 10, 0, 0]
+        spec = compile_authoring(document)
+        run = development_run(spec, Path("unused-source-crossing-output"))
+        # This exact, noiseless experiment uses a strict geometric gate to
+        # separate very close rays; no true correspondence enters registration.
+        policy = replace(
+            run.fusion_policy,
+            association=replace(run.fusion_policy.association, spatial_gate_m=1e-6),
+        )
+        registration = replace(self.registration, stations=spec.station_configs, policy=policy)
+        algorithm = create_algorithm()
+        algorithm.start(registration)
+        owners: dict[m.TrackId, float] = {}
+        source_empty = False
+        missed_updates = False
+        final_positions: dict[m.TrackId, m.Vec3] = {}
+        try:
+            for step in self.steps(spec):
+                if not step.stream_ended and not any(
+                    isinstance(received.event, m.RayEvent) for received in step.events
+                ):
+                    source_empty = True
+                result = algorithm.process(step)
+                for track in result.tracks:
+                    if "position_seed" in track.reason_codes:
+                        assert track.position_enu_m is not None
+                        self.assertNotIn(track.track_id, owners)
+                        owners[track.track_id] = 1.0 if track.position_enu_m[0] < 0 else -1.0
+                    if not track.source_measurement_refs:
+                        missed_updates = True
+                    if (
+                        track.lifecycle is m.TrackLifecycle.CONFIRMED
+                        and track.source_measurement_refs
+                    ):
+                        sign = owners[track.track_id]
+                        expected = np.asarray(
+                            (sign * 10 * (track.event_time_ns / 1e9 - crossing_time), 70, 24)
+                        )
+                        np.testing.assert_allclose(
+                            np.asarray(track.position_enu_m), expected, rtol=0, atol=1e-9
+                        )
+                        np.testing.assert_allclose(
+                            np.asarray(track.velocity_enu_mps),
+                            np.asarray((sign * 10, 0, 0)),
+                            rtol=0,
+                            atol=1e-8,
+                        )
+                        assert track.position_enu_m is not None
+                        final_positions[track.track_id] = track.position_enu_m
+        finally:
+            algorithm.close()
+        self.assertTrue(source_empty)
+        self.assertTrue(missed_updates)
+        self.assertEqual(len(owners), 2)
+        self.assertEqual(set(final_positions), set(owners))
+        self.assertTrue(
+            all(
+                position[0] * owners[track_id] > 0 for track_id, position in final_positions.items()
+            )
+        )
+
+    def test_multi_target_cli_delivers_two_distinct_confirmed_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scenario = root / "multi.json"
+            scenario.write_text(json.dumps(self.multi_document()), encoding="utf-8")
+            output = root / "run"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "chongming.development",
+                    "--scenario",
+                    str(scenario),
+                    "--output",
+                    str(output),
+                    "--run",
+                    "--tick-hz",
+                    "240",
+                    "--algorithm",
+                    "chongming.reference:create_algorithm",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [
+                json.loads(line)
+                for line in (output / "center-output.jsonl").read_text().splitlines()
+            ]
+            measurements = [measurement for row in rows for measurement in row["measurements"]]
+            tracks = [track for row in rows for track in row["tracks"]]
+            self.assertEqual(len(measurements), 12)
+            self.assertTrue(all(measurement["status"] == "located" for measurement in measurements))
+            self.assertEqual(len({track["track_id"] for track in tracks}), 2)
+            confirmed = [track for track in tracks if track["lifecycle"] == "confirmed"]
+            self.assertEqual(len({track["track_id"] for track in confirmed}), 2)
+            starts = np.asarray(((-15.0, 62.0, 20.0), (15.0, 80.0, 35.0)))
+            velocities = np.asarray(((1.0, 0.0, 0.0), (-0.5, 0.2, 0.0)))
+            for track in confirmed:
+                expected = starts + track["event_time_ns"] / 1e9 * velocities
+                point = np.asarray(track["position_enu_m"])
+                owner = int(np.argmin(np.linalg.norm(expected - point, axis=1)))
+                np.testing.assert_allclose(point, expected[owner], rtol=0, atol=1e-9)
+                np.testing.assert_allclose(
+                    np.asarray(track["velocity_enu_mps"]), velocities[owner], rtol=0, atol=1e-8
+                )
+            self.assertTrue(rows[-1]["stream_ended"])
+            self.assertTrue(
+                any(
+                    len(association["selected_groups"]) == 2
+                    for row in rows
+                    for batch in row["batches"]
+                    for association in batch["associations"]
+                )
+            )
+            self.assertFalse(json.loads((output / "summary.json").read_text())["shutdown_errors"])
 
     def test_online_composition_rejects_inconsistent_clock_and_frame_policy(self) -> None:
         for policy, mapping in (

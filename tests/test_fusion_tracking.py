@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from typing import cast
 
 import numpy as np
 
@@ -24,6 +25,9 @@ class TrackingTests(unittest.TestCase):
             coast_after_ns=SECOND,
             delete_after_ns=3 * SECOND,
             association_gate_mahalanobis_squared=9,
+            initialization_spatial_gate_m=10,
+            association_ambiguity_margin=1e-6,
+            maximum_assignment_search_nodes=20000,
             process_acceleration_covariance_enu_m2ps4=IDENTITY,
         )
         self.tracker = self.make_tracker()
@@ -43,6 +47,7 @@ class TrackingTests(unittest.TestCase):
         position: m.Vec3 | None = None,
         covariance: m.Matrix3x3 | None = IDENTITY,
         suffix: str = "",
+        sequence: int = 1,
     ) -> m.FusionMeasurement:
         return m.FusionMeasurement(
             center_session_id=m.SessionId("center"),
@@ -55,8 +60,8 @@ class TrackingTests(unittest.TestCase):
             position_enu_m=(1 + time / SECOND, 2.0, 3.0) if position is None else position,
             conditional_position_covariance_enu_m2=covariance,
             supporting_ray_event_ids=(
-                (m.StationId("a"), m.SessionId("a"), 1),
-                (m.StationId("b"), m.SessionId("b"), 1),
+                (m.StationId("a"), m.SessionId("a"), sequence),
+                (m.StationId("b"), m.SessionId("b"), sequence),
             ),
             supporting_station_ids=(m.StationId("a"), m.StationId("b")),
             residuals_m=(0.0, 0.0),
@@ -143,9 +148,12 @@ class TrackingTests(unittest.TestCase):
         np.testing.assert_array_equal(
             np.asarray(event.conditional_state_covariance), np.zeros((6, 6))
         )
-        (rejected,) = self.update(
+        rejected, new = self.update(
             self.measurement(3 * SECOND, position=(4.01, 2.0, 3.0), covariance=ZERO), tracker
         )
+        self.assertEqual(rejected.track_id, event.track_id)
+        self.assertNotEqual(new.track_id, event.track_id)
+        self.assertIs(new.lifecycle, m.TrackLifecycle.TENTATIVE)
         self.assertIn("measurement_gate_failed", rejected.reason_codes)
         self.assertEqual(rejected.position_enu_m, (4.0, 2.0, 3.0))
         self.assertFalse(rejected.source_measurement_refs)
@@ -157,13 +165,15 @@ class TrackingTests(unittest.TestCase):
         )
         self.update(self.measurement(0, covariance=covariance), tracker)
         self.update(self.measurement(SECOND, covariance=covariance), tracker)
-        (rejected,) = self.update(
+        rejected, new = self.update(
             self.measurement(2 * SECOND, position=(3.01, 2.0, 3.0), covariance=covariance), tracker
         )
         self.assertIn("measurement_gate_failed", rejected.reason_codes)
-        (accepted,) = self.update(
+        self.assertIs(new.lifecycle, m.TrackLifecycle.TENTATIVE)
+        events = self.update(
             self.measurement(3 * SECOND, position=(4.0, 2.5, 3.0), covariance=covariance), tracker
         )
+        accepted = next(event for event in events if event.track_id == rejected.track_id)
         self.assertIn("measurement_update", accepted.reason_codes)
         assert accepted.position_enu_m is not None and accepted.velocity_enu_mps is not None
         self.assertEqual(accepted.position_enu_m[0], 4.0)
@@ -217,7 +227,10 @@ class TrackingTests(unittest.TestCase):
         self.update(self.measurement(0))
         self.update(self.measurement(SECOND))
         prior = self.tracker.predict("clock", 2 * SECOND)
-        (rejected,) = self.update(self.measurement(2 * SECOND, position=(1000.0, 2.0, 3.0)))
+        rejected, new = self.update(self.measurement(2 * SECOND, position=(1000.0, 2.0, 3.0)))
+        self.assertIs(new.lifecycle, m.TrackLifecycle.TENTATIVE)
+        self.assertEqual(new.position_enu_m, (1000.0, 2.0, 3.0))
+        self.assertNotEqual(rejected.track_id, new.track_id)
         self.assertIn("measurement_gate_failed", rejected.reason_codes)
         self.assertFalse(rejected.source_measurement_refs)
         self.assertEqual(prior, self.tracker.predict("clock", 2 * SECOND))
@@ -241,13 +254,14 @@ class TrackingTests(unittest.TestCase):
                 )
             )
 
-    def test_invalid_measurements_and_unsupported_multiple_targets_are_explicit(self) -> None:
+    def test_invalid_measurements_and_reused_ray_evidence_are_explicit(self) -> None:
         measurement = self.measurement(0)
         invalid = (
             replace(measurement, center_session_id=m.SessionId("other")),
             replace(measurement, clock_domain_id="other"),
             replace(measurement, world_frame_id=m.WorldFrameId("other")),
             replace(measurement, position_enu_m=(float("nan"), 0.0, 0.0)),
+            replace(measurement, position_enu_m=cast(m.Vec3, (0.0, 0.0))),
             replace(measurement, conditional_position_covariance_enu_m2=None),
             replace(
                 measurement,
@@ -261,7 +275,7 @@ class TrackingTests(unittest.TestCase):
         for item in invalid:
             with self.subTest(measurement=item), self.assertRaises(ValueError):
                 self.update(item)
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaisesRegex(ValueError, "ray evidence assigned to multiple"):
             self.tracker.update(
                 (measurement, replace(measurement, measurement_id=m.MeasurementId("second"))),
                 "clock",
@@ -270,12 +284,170 @@ class TrackingTests(unittest.TestCase):
         self.assertFalse(self.tracker.predict("clock", 0))
         self.update(measurement)
 
+    def batch(self, time: int, positions: tuple[m.Vec3, ...]) -> tuple[m.FusionMeasurement, ...]:
+        return tuple(
+            self.measurement(
+                time,
+                position=position,
+                covariance=ZERO,
+                suffix=str(index),
+                sequence=time + index + 1,
+            )
+            for index, position in enumerate(positions)
+        )
+
+    def test_multiple_tracks_bootstrap_and_update_one_to_one_without_input_order_ids(self) -> None:
+        initial = self.tracker.update(
+            self.batch(0, ((0.0, 2.0, 3.0), (10.0, 2.0, 3.0))), "clock", 0
+        )
+        ids = {event.position_enu_m: event.track_id for event in initial}
+        for time in (SECOND, 2 * SECOND):
+            positions: tuple[m.Vec3, ...] = (
+                (time / SECOND, 2.0, 3.0),
+                (10 + time / SECOND, 2.0, 3.0),
+            )
+            events = self.tracker.update(
+                tuple(reversed(self.batch(time, positions))), "clock", time
+            )
+            self.assertEqual(len(events), 2)
+            self.assertEqual(
+                len({ref for event in events for ref in event.source_measurement_refs}), 2
+            )
+            for event in events:
+                self.assertIs(event.lifecycle, m.TrackLifecycle.CONFIRMED)
+                self.assertEqual(event.velocity_enu_mps, (1.0, 0.0, 0.0))
+                assert event.position_enu_m is not None
+                origin = (event.position_enu_m[0] - time / SECOND, 2.0, 3.0)
+                self.assertEqual(event.track_id, ids[origin])
+        self.assertEqual(len(self.tracker.predict("clock", 3 * SECOND)), 2)
+
+    def test_global_assignment_avoids_the_greedy_nearest_edge(self) -> None:
+        tracker = self.make_tracker(replace(self.policy, initialization_spatial_gate_m=2.0))
+        first = tracker.update(self.batch(0, ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0))), "clock", 0)
+        events = tracker.update(
+            self.batch(SECOND, ((1.1, 0.0, 0.0), (3.1, 0.0, 0.0))), "clock", SECOND
+        )
+        self.assertEqual({event.track_id for event in events}, {event.track_id for event in first})
+        self.assertTrue(all(event.lifecycle is m.TrackLifecycle.CONFIRMED for event in events))
+        for event in events:
+            np.testing.assert_allclose(
+                np.asarray(event.velocity_enu_mps), np.asarray((1.1, 0.0, 0.0)), rtol=0, atol=1e-14
+            )
+
+    def test_crossing_tie_preserves_predictions_then_recovers_without_id_swap(self) -> None:
+        first = self.tracker.update(self.batch(0, ((-2.0, 0.0, 0.0), (2.0, 0.0, 0.0))), "clock", 0)
+        directions = {
+            event.track_id: 1.0 if event.position_enu_m == (-2.0, 0.0, 0.0) else -1.0
+            for event in first
+        }
+        self.tracker.update(
+            self.batch(SECOND, ((-1.0, 0.0, 0.0), (1.0, 0.0, 0.0))), "clock", SECOND
+        )
+        expected = self.tracker.predict("clock", 2 * SECOND)
+        tied = self.tracker.update(
+            self.batch(2 * SECOND, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))), "clock", 2 * SECOND
+        )
+        self.assertEqual(len(tied), 2)
+        self.assertTrue(
+            all("measurement_assignment_ambiguous" in event.reason_codes for event in tied)
+        )
+        self.assertTrue(all(not event.source_measurement_refs for event in tied))
+        self.assertEqual(expected, self.tracker.predict("clock", 2 * SECOND))
+        recovered = self.tracker.update(
+            self.batch(3 * SECOND, ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))), "clock", 3 * SECOND
+        )
+        self.assertEqual(len(recovered), 2)
+        for event in recovered:
+            self.assertEqual(event.velocity_enu_mps, (directions[event.track_id], 0.0, 0.0))
+            self.assertEqual(event.position_enu_m, (directions[event.track_id], 0.0, 0.0))
+            self.assertIn("track_recovered", event.reason_codes)
+
+    def test_unambiguous_track_updates_beside_an_ambiguous_assignment(self) -> None:
+        for nodes, reason in (
+            (20000, "measurement_assignment_ambiguous"),
+            (4, "measurement_assignment_search_truncated"),
+        ):
+            with self.subTest(nodes=nodes):
+                tracker = self.make_tracker(
+                    replace(self.policy, maximum_assignment_search_nodes=nodes)
+                )
+                first = tracker.update(
+                    self.batch(0, ((-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (100.0, 0.0, 0.0))),
+                    "clock",
+                    0,
+                )
+                events = tracker.update(
+                    self.batch(SECOND, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (100.0, 0.0, 0.0))),
+                    "clock",
+                    SECOND,
+                )
+                self.assertEqual(len(events), 3)
+                self.assertEqual(
+                    {event.track_id for event in events}, {event.track_id for event in first}
+                )
+                self.assertEqual(sum(reason in event.reason_codes for event in events), 2)
+                (confirmed,) = (
+                    event for event in events if event.lifecycle is m.TrackLifecycle.CONFIRMED
+                )
+                self.assertEqual(confirmed.position_enu_m, (100.0, 0.0, 0.0))
+                self.assertEqual(confirmed.velocity_enu_mps, (0.0, 0.0, 0.0))
+
+    def test_independent_new_target_search_and_per_track_missing_lifecycle(self) -> None:
+        first = self.tracker.update(self.batch(0, ((0.0, 0.0, 0.0), (20.0, 0.0, 0.0))), "clock", 0)
+        first_ids = {event.position_enu_m: event.track_id for event in first}
+        self.tracker.update(
+            self.batch(SECOND, ((1.0, 0.0, 0.0), (21.0, 0.0, 0.0))), "clock", SECOND
+        )
+        events = self.tracker.update(
+            self.batch(2 * SECOND, ((2.0, 0.0, 0.0), (100.0, 0.0, 0.0))), "clock", 2 * SECOND
+        )
+        self.assertEqual(len(events), 3)
+        (coast,) = (event for event in events if event.lifecycle is m.TrackLifecycle.COASTING)
+        self.assertEqual(coast.track_id, first_ids[(20.0, 0.0, 0.0)])
+        (new,) = (event for event in events if event.lifecycle is m.TrackLifecycle.TENTATIVE)
+        self.assertEqual(new.position_enu_m, (100.0, 0.0, 0.0))
+        self.assertNotIn(new.track_id, first_ids.values())
+        later = self.tracker.update(self.batch(4 * SECOND, ((4.0, 0.0, 0.0),)), "clock", 4 * SECOND)
+        (deleted,) = (event for event in later if event.lifecycle is m.TrackLifecycle.DELETED)
+        self.assertEqual(deleted.track_id, coast.track_id)
+        (maintained,) = (event for event in later if event.lifecycle is m.TrackLifecycle.CONFIRMED)
+        self.assertEqual(maintained.track_id, first_ids[(0.0, 0.0, 0.0)])
+
+    def test_batch_horizon_does_not_retime_distinct_measurement_exposures(self) -> None:
+        self.tracker.update(self.batch(0, ((0.0, 0.0, 0.0), (20.0, 0.0, 0.0))), "clock", 0)
+        first = self.measurement(SECOND // 2, position=(0.5, 0.0, 0.0), covariance=ZERO, sequence=2)
+        second = self.measurement(
+            3 * SECOND // 4, position=(20.75, 0.0, 0.0), covariance=ZERO, sequence=3
+        )
+        events = self.tracker.update((second, first), "clock", SECOND)
+        self.assertEqual([event.event_time_ns for event in events], [SECOND // 2, 3 * SECOND // 4])
+        self.assertTrue(all(event.velocity_enu_mps == (1.0, 0.0, 0.0) for event in events))
+        with self.assertRaisesRegex(ValueError, "later exposure"):
+            self.tracker.update(
+                (replace(second, measurement_id=m.MeasurementId("late")),), "clock", SECOND + 1
+            )
+
+    def test_invalid_batch_is_atomic_and_duplicate_measurement_refs_are_rejected(self) -> None:
+        first, second = self.batch(0, ((0.0, 0.0, 0.0), (20.0, 0.0, 0.0)))
+        for invalid in (
+            replace(second, world_frame_id=m.WorldFrameId("other")),
+            replace(second, measurement_id=first.measurement_id),
+        ):
+            with self.assertRaises(ValueError):
+                self.tracker.update((first, invalid), "clock", 0)
+        events = self.tracker.update((first, second), "clock", 0)
+        self.assertEqual(len(events), 2)
+        self.assertEqual({event.track_id for event in events}, {"track-1", "track-2"})
+
     def test_invalid_policy_is_rejected_but_zero_process_noise_is_legal(self) -> None:
         for policy in (
             replace(self.policy, confirmation_measurement_count=1),
             replace(self.policy, confirmation_max_gap_ns=0),
             replace(self.policy, delete_after_ns=self.policy.coast_after_ns),
             replace(self.policy, association_gate_mahalanobis_squared=float("nan")),
+            replace(self.policy, initialization_spatial_gate_m=0),
+            replace(self.policy, association_ambiguity_margin=float("nan")),
+            replace(self.policy, maximum_assignment_search_nodes=0),
             replace(
                 self.policy,
                 process_acceleration_covariance_enu_m2ps4=(

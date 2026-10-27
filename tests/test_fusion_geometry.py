@@ -16,9 +16,9 @@ from chongming.composition.graph import declare_assembly
 from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.modules.fusion import CalibrationWeightingModule, DirectGeometryCandidateModule
+from chongming.modules.fusion_association import CrossStationAssociationModule
 from chongming.modules.fusion_geometry import (
     CandidateGenerationModule,
-    CrossStationAssociationModule,
     GeometryRefinementModule,
     VoxelCandidateModule,
     _ray_voxels,
@@ -200,6 +200,258 @@ class CleanFusionTests(unittest.TestCase):
             unassigned_ray_event_ids=(),
             status=f.AssociationBatchStatus.ASSOCIATIONS_SELECTED,
         )
+
+    def multi_association(
+        self,
+        rays: tuple[f.AdmittedRay, ...],
+        *,
+        predictions: tuple[f.TrackPrediction, ...] = (),
+        policy: f.AssociationPolicy | None = None,
+    ) -> tuple[f.SealedObservationWindow, f.AssociationBatch]:
+        window = self.window(rays)
+        associator = CrossStationAssociationModule(
+            policy=replace(self.associator.policy, spatial_gate_m=1e-6)
+            if policy is None
+            else policy
+        )
+        return window, associator.associate(
+            window, self.voxels.propose(window, predictions), predictions
+        )
+
+    def test_two_targets_inside_one_voxel_use_each_station_ray_once(self) -> None:
+        targets: tuple[m.Vec3, ...] = (TARGET, (0.64, 0.72, 0.8))
+        rays = tuple(
+            self.ray(station, origin, target=target, sequence=index + 2)
+            for station, origin in (
+                ("a", (-2.0, -1.0, 0.0)),
+                ("b", (2.0, -1.0, 0.0)),
+                ("c", (0.0, 3.0, 0.1)),
+            )
+            for index, target in enumerate(targets)
+        )
+        rays = tuple(
+            replace(
+                ray,
+                event=replace(
+                    ray.event,
+                    local_track_id=m.LocalTrackId("unrelated"),
+                    detection_score=float(index * 100),
+                ),
+            )
+            for index, ray in enumerate(rays)
+        )
+        window, association = self.multi_association(rays)
+        self.assertIs(association.status, f.AssociationBatchStatus.ASSOCIATIONS_SELECTED)
+        self.assertEqual(len(association.selected_groups), 2)
+        assigned = [
+            event_id
+            for group in association.selected_groups
+            for event_id in group.supporting_ray_event_ids
+        ]
+        self.assertEqual(len(set(assigned)), 6)
+        self.assertTrue(
+            all(
+                len(group.supporting_station_ids) == len(set(group.supporting_station_ids)) == 3
+                for group in association.selected_groups
+            )
+        )
+        self.assertFalse(association.unassigned_ray_event_ids)
+        results = sorted(
+            self.geometry.refine(window, association, ()).results,
+            key=lambda result: result.measurement.position_enu_m or (),
+        )
+        for result, target in zip(results, targets, strict=True):
+            self.assert_position(result.measurement, target)
+        reordered = self.multi_association(tuple(reversed(rays)))[1]
+        self.assertEqual(association, reordered)
+
+    def test_two_station_ghost_pairings_need_evidence_not_detector_labels(self) -> None:
+        targets: tuple[m.Vec3, ...] = ((-0.5, 1.0, 0.5), (0.5, 1.0, 0.5))
+        rays = tuple(
+            self.ray(station, origin, target=target, sequence=index + 2)
+            for station, origin in (("a", (-2.0, -1.0, 0.5)), ("b", (2.0, -1.0, 0.5)))
+            for index, target in enumerate(targets)
+        )
+        window, ambiguous = self.multi_association(rays)
+        self.assertIs(ambiguous.status, f.AssociationBatchStatus.ASSOCIATION_AMBIGUOUS)
+        self.assertFalse(ambiguous.selected_groups)
+        self.assertEqual(len(ambiguous.unassigned_ray_event_ids), 4)
+        predictions = tuple(
+            f.TrackPrediction(
+                center_session_id=self.center,
+                track_id=m.TrackId(f"prior-{index}"),
+                clock_domain_id=window.key.capture_clock_domain_id,
+                world_frame_id=self.search.world_frame_id,
+                reference_time_ns=TIME,
+                position_enu_m=target,
+                velocity_enu_mps=(0.0, 0.0, 0.0),
+                conditional_state_covariance_enu=None,
+            )
+            for index, target in enumerate(targets)
+        )
+        policy = replace(self.associator.policy, spatial_gate_m=1e-6, prediction_spatial_gate_m=0.1)
+        _, selected = self.multi_association(rays, predictions=predictions, policy=policy)
+        self.assertIs(selected.status, f.AssociationBatchStatus.ASSOCIATIONS_SELECTED)
+        self.assertEqual(
+            {group.prior_track_id for group in selected.selected_groups},
+            {prediction.track_id for prediction in predictions},
+        )
+        self.assertEqual(len(selected.selected_groups), 2)
+        _, new_target = self.multi_association(rays, predictions=predictions[:1], policy=policy)
+        self.assertEqual(len(new_target.selected_groups), 2)
+        self.assertEqual(
+            sum(group.prior_track_id is None for group in new_target.selected_groups), 1
+        )
+        self.assertTrue(self.voxels.propose(window, predictions[:1]).unguided_search_performed)
+
+    def test_independent_target_survives_an_ambiguous_or_truncated_component(self) -> None:
+        first, second, third = self.rays()
+        duplicate = replace(
+            first,
+            event=replace(first.event, envelope=replace(first.event.envelope, sequence_no=99)),
+        )
+        target: m.Vec3 = (1.7, 2.0, 1.4)
+        independent = (
+            self.ray("d", (-2.0, 3.0, 1.0), target=target),
+            self.ray("e", (2.0, 3.0, 1.0), target=target),
+        )
+        rays = (first, second, third, duplicate, *independent)
+        for nodes in (20000, 4):
+            with self.subTest(maximum_nodes=nodes):
+                policy = replace(
+                    self.associator.policy, spatial_gate_m=1e-6, maximum_search_nodes=nodes
+                )
+                window, association = self.multi_association(rays, policy=policy)
+                self.assertIs(association.status, f.AssociationBatchStatus.PARTIALLY_ASSOCIATED)
+                self.assertEqual(len(association.selected_groups), 1)
+                self.assertEqual(
+                    set(association.selected_groups[0].supporting_station_ids), {"d", "e"}
+                )
+                self.assertEqual(len(association.unassigned_ray_event_ids), 4)
+                (result,) = self.geometry.refine(window, association, ()).results
+                self.assert_position(result.measurement, target)
+                if nodes == 4:
+                    self.assertTrue(
+                        any(
+                            f.AssociationConflictReason.ASSOCIATION_SEARCH_TRUNCATED
+                            in conflict.reasons
+                            for conflict in association.conflicts
+                        )
+                    )
+
+    def test_station_subsets_recover_when_an_extra_ray_fails_the_temporal_gate(self) -> None:
+        first, second, third = self.rays()
+        third = replace(
+            third,
+            event=replace(
+                third.event,
+                capture_time=replace(
+                    third.event.capture_time, exposure_start_ns=TIME + 50, exposure_end_ns=TIME + 50
+                ),
+            ),
+        )
+        window, association = self.multi_association((first, second, third))
+        self.assertIs(association.status, f.AssociationBatchStatus.ASSOCIATIONS_SELECTED)
+        (group,) = association.selected_groups
+        self.assertEqual(group.supporting_station_ids, ("a", "b"))
+        self.assertEqual(association.unassigned_ray_event_ids, (event_id(third),))
+        (result,) = self.geometry.refine(window, association, ()).results
+        self.assert_position(result.measurement, TARGET)
+        self.assertTrue(
+            any(
+                f.AssociationConflictReason.TEMPORAL_GATE_FAILED in conflict.reasons
+                for conflict in association.conflicts
+            )
+        )
+
+    def test_combination_budget_never_turns_partial_enumeration_into_success(self) -> None:
+        window, association = self.multi_association(
+            self.rays(), policy=replace(self.associator.policy, maximum_hypotheses=1)
+        )
+        self.assertIs(association.status, f.AssociationBatchStatus.ASSOCIATION_AMBIGUOUS)
+        self.assertFalse(association.selected_groups)
+        self.assertEqual(len(association.unassigned_ray_event_ids), 3)
+        self.assertTrue(
+            any(
+                f.AssociationConflictReason.ASSOCIATION_SEARCH_TRUNCATED in conflict.reasons
+                for conflict in association.conflicts
+            )
+        )
+        self.assertFalse(self.geometry.refine(window, association, ()).results)
+
+    def test_prior_expansion_is_bounded_even_for_one_ray_combination(self) -> None:
+        rays = self.rays()[:2]
+        window = self.window(rays)
+        predictions = tuple(
+            f.TrackPrediction(
+                center_session_id=self.center,
+                track_id=m.TrackId(f"nearby-{index}"),
+                clock_domain_id=window.key.capture_clock_domain_id,
+                world_frame_id=self.search.world_frame_id,
+                reference_time_ns=TIME,
+                position_enu_m=TARGET,
+                velocity_enu_mps=(0.0, 0.0, 0.0),
+                conditional_state_covariance_enu=None,
+            )
+            for index in range(4)
+        )
+        _, association = self.multi_association(
+            rays,
+            predictions=predictions,
+            policy=replace(self.associator.policy, maximum_hypotheses=4),
+        )
+        self.assertIs(association.status, f.AssociationBatchStatus.ASSOCIATION_AMBIGUOUS)
+        self.assertFalse(association.selected_groups)
+        self.assertTrue(
+            any(
+                f.AssociationConflictReason.ASSOCIATION_SEARCH_TRUNCATED in conflict.reasons
+                for conflict in association.conflicts
+            )
+        )
+
+    def test_rank_deficient_hypotheses_do_not_inflate_assignment_support(self) -> None:
+        rays = tuple(
+            self.ray(station, (-2.0, -1.0, 0.0), direction=(1.0, 0.0, 0.0))
+            for station in ("a", "b", "c")
+        )
+        window, association = self.multi_association(rays)
+        self.assertIs(association.status, f.AssociationBatchStatus.NO_VALID_ASSOCIATION)
+        self.assertFalse(association.selected_groups)
+        self.assertTrue(
+            all(
+                f.AssociationConflictReason.DEGENERATE_GEOMETRY in conflict.reasons
+                for conflict in association.conflicts
+            )
+        )
+        self.assertFalse(self.geometry.refine(window, association, ()).results)
+
+    def test_prediction_without_current_independent_station_support_is_not_a_target(self) -> None:
+        ray = self.rays()[0]
+        window = self.window((ray,))
+        prediction = f.TrackPrediction(
+            center_session_id=self.center,
+            track_id=m.TrackId("old"),
+            clock_domain_id=window.key.capture_clock_domain_id,
+            world_frame_id=self.search.world_frame_id,
+            reference_time_ns=TIME,
+            position_enu_m=TARGET,
+            velocity_enu_mps=(0.0, 0.0, 0.0),
+            conditional_state_covariance_enu=None,
+        )
+        _, association = self.multi_association((ray,), predictions=(prediction,))
+        self.assertIs(association.status, f.AssociationBatchStatus.INSUFFICIENT_STATIONS)
+        self.assertFalse(association.selected_groups)
+        with self.assertRaisesRegex(ValueError, "prediction"):
+            self.multi_association(
+                (ray,), predictions=(replace(prediction, world_frame_id=m.WorldFrameId("wrong")),)
+            )
+        for policy in (
+            replace(self.associator.policy, maximum_search_nodes=0),
+            replace(self.associator.policy, maximum_hypotheses=0),
+            replace(self.associator.policy, prediction_spatial_gate_m=0),
+        ):
+            with self.assertRaisesRegex(ValueError, "association policy"):
+                CrossStationAssociationModule(policy=policy)
 
     def test_forward_traversal_supercovers_boundaries_and_clips_range(self) -> None:
         search = replace(self.search, min_enu_m=(0.0, 0.0, 0.0), max_enu_m=(2.0, 2.0, 2.0))

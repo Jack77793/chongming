@@ -138,11 +138,14 @@ class AssociationConflictReason(StrEnum):
     INSUFFICIENT_INDEPENDENT_STATIONS = "insufficient_independent_stations"
     TEMPORAL_GATE_FAILED = "temporal_gate_failed"
     SPATIAL_GATE_FAILED = "spatial_gate_failed"
+    DEGENERATE_GEOMETRY = "degenerate_geometry"
     CANDIDATE_SEARCH_TRUNCATED = "candidate_search_truncated"
+    ASSOCIATION_SEARCH_TRUNCATED = "association_search_truncated"
 
 
 class AssociationBatchStatus(StrEnum):
     ASSOCIATIONS_SELECTED = "associations_selected"
+    PARTIALLY_ASSOCIATED = "partially_associated"
     NO_VALID_ASSOCIATION = "no_valid_association"
     ASSOCIATION_AMBIGUOUS = "association_ambiguous"
     INSUFFICIENT_STATIONS = "insufficient_stations"
@@ -256,10 +259,20 @@ class CandidatePolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class AssociationPolicy:
+    """Rank disjoint groups by station pairs, prior matches, then normalized error.
+
+    The margin applies to the summed squared residual/prediction gate ratios.
+    The hypothesis budget bounds examined ray combinations and expanded prior
+    choices; the node budget applies independently to each conflict component.
+    """
+
     minimum_independent_stations: int
     temporal_gate_ns: int
     spatial_gate_m: float
     ambiguity_score_margin: float
+    prediction_spatial_gate_m: float
+    maximum_hypotheses: int
+    maximum_search_nodes: int
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -286,6 +299,9 @@ class TrackingPolicy:
 
     Acceleration covariance is m2/s4 for a constant acceleration per prediction
     interval, not a continuous-time spectral density. No noise floor is implied.
+    Uninitialized seeds use a Euclidean position gate, not a guessed velocity
+    prior. Assignment costs are squared gate ratios; the margin applies to their
+    sum. The node budget applies independently to each conflict component.
     """
 
     confirmation_measurement_count: int
@@ -293,6 +309,9 @@ class TrackingPolicy:
     coast_after_ns: int
     delete_after_ns: int
     association_gate_mahalanobis_squared: float
+    initialization_spatial_gate_m: float
+    association_ambiguity_margin: float
+    maximum_assignment_search_nodes: int
     process_acceleration_covariance_enu_m2ps4: Matrix3x3
 
 

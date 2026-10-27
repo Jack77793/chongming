@@ -17,10 +17,10 @@ from .fusion import (
     CalibrationWeightingModule,
     DirectGeometryCandidateModule,
 )
+from .fusion_association import CrossStationAssociationModule
 from .fusion_engine import CenterFusionModule
 from .fusion_geometry import (
     CandidateGenerationModule,
-    CrossStationAssociationModule,
     GeometryRefinementModule,
     VoxelCandidateModule,
 )

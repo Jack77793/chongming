@@ -99,8 +99,9 @@ class CenterFusionModule(ModuleShell):
                 for measurement in current
                 if measurement.status is m.FusionStatus.LOCATED
             ]
-            event_time = (
-                located[0].reference_time_ns if len(located) == 1 else window.reference_time_ns
+            event_time = max(
+                (measurement.reference_time_ns for measurement in located),
+                default=window.reference_time_ns,
             )
             tracks.extend(self.tracker.update(current, clock, event_time))
             # Exposure reference may lie on either side of the window center.

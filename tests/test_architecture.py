@@ -168,6 +168,7 @@ class ArchitectureStructureTests(unittest.TestCase):
         self.assertIs(modules.CenterFusionModule, type(assembly.center.fusion))
         self.assertIs(shells.CenterFusionModule, type(assembly.center.fusion))
         self.assertIs(modules.CenterTrackingModule, type(assembly.center.tracking))
+        self.assertIs(modules.CrossStationAssociationModule, type(assembly.center.association))
 
     def test_routes_and_candidate_methods_keep_all_modules_constructed(self) -> None:
         signatures: set[frozenset[tuple[str, type[object]]]] = set()

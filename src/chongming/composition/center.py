@@ -6,10 +6,10 @@ from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.contracts.runtime import ModuleNode
 from chongming.modules.fusion import CalibrationWeightingModule, DirectGeometryCandidateModule
+from chongming.modules.fusion_association import CrossStationAssociationModule
 from chongming.modules.fusion_engine import CenterFusionModule
 from chongming.modules.fusion_geometry import (
     CandidateGenerationModule,
-    CrossStationAssociationModule,
     GeometryRefinementModule,
     VoxelCandidateModule,
 )
@@ -87,6 +87,9 @@ def reference_policy(
             temporal_gate_ns=window_width_ns,
             spatial_gate_m=10,
             ambiguity_score_margin=0.1,
+            prediction_spatial_gate_m=2,
+            maximum_hypotheses=4096,
+            maximum_search_nodes=20000,
         ),
         geometry=f.GeometryPolicy(
             minimum_independent_stations=2,
@@ -104,6 +107,9 @@ def reference_policy(
             coast_after_ns=10**9,
             delete_after_ns=3 * 10**9,
             association_gate_mahalanobis_squared=9,
+            initialization_spatial_gate_m=10,
+            association_ambiguity_margin=1e-6,
+            maximum_assignment_search_nodes=20000,
             process_acceleration_covariance_enu_m2ps4=(
                 (1.0, 0.0, 0.0),
                 (0.0, 1.0, 0.0),
