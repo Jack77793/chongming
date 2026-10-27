@@ -788,12 +788,16 @@ def tree_objects(
         size_factor = 1.0
         if _unit(digest, 8) < 0.16:
             size_factor = 0.52 + 0.30 * _unit(digest, 12)
-        height = config.tree_height_m * (
-            1.0 + config.tree_height_jitter * (2.0 * _unit(digest, 0) - 1.0)
-        ) * size_factor
-        crown = config.tree_crown_radius_m * (
-            1.0 + config.tree_crown_radius_jitter * (2.0 * _unit(digest, 4) - 1.0)
-        ) * (0.82 + 0.18 * size_factor)
+        height = (
+            config.tree_height_m
+            * (1.0 + config.tree_height_jitter * (2.0 * _unit(digest, 0) - 1.0))
+            * size_factor
+        )
+        crown = (
+            config.tree_crown_radius_m
+            * (1.0 + config.tree_crown_radius_jitter * (2.0 * _unit(digest, 4) - 1.0))
+            * (0.82 + 0.18 * size_factor)
+        )
         tree_index.add(candidate.x, candidate.y)
         canopy_color = (0.09, 0.25, 0.05) if area.category == "forest" else (0.11, 0.29, 0.07)
         objects.extend(
