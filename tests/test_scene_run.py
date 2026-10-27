@@ -12,8 +12,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from PIL import Image
-
 from chongming.contracts import scene as s
 from chongming.contracts.model import CameraRole
 from chongming.modules.scene import _scheduled_exposures
@@ -152,9 +150,12 @@ class SceneRunAcceptanceTests(unittest.TestCase):
                 frames = [f for record in online for f in record["frames"]]
                 self.assertEqual(len(frames), 12)
                 self.assertEqual({f["camera_role"] for f in frames}, {"main", "auxiliary"})
-                with Image.open(output / frames[0]["path"]) as image:
-                    self.assertEqual(image.size, (64, 48))
-                    self.assertEqual(image.mode, "RGB")
+                video = json.loads((output / "video.json").read_text())
+                self.assertEqual(video["format"], "video-h264-v1")
+                stream = video["streams"]["camera-000"]
+                self.assertEqual((stream["width_px"], stream["height_px"]), (64, 48))
+                self.assertTrue((output / stream["path"]).is_file())
+                self.assertTrue(all(frame["path"].endswith(".mp4") for frame in frames))
                 sessions = [
                     session[k]
                     for session in manifest["station_sessions"]

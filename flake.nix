@@ -18,6 +18,7 @@
 
       runtimeEnv = pkgs: {
         CHONGMING_GODOT = lib.getExe pkgs.godot_4_7;
+        CHONGMING_FFMPEG = lib.getExe pkgs.ffmpeg;
         LD_LIBRARY_PATH = lib.makeLibraryPath [
           pkgs.stdenv.cc.cc.lib
           pkgs.zlib
@@ -54,6 +55,7 @@
                   pkgs.python312
                   pkgs.uv
                   pkgs.godot_4_7
+                  pkgs.ffmpeg
                 ];
                 runtimeEnv = runtimeEnv pkgs;
                 text = ''
@@ -82,6 +84,7 @@
                   pkgs.python312
                   pkgs.uv
                   pkgs.godot_4_7
+                  pkgs.ffmpeg
                   pkgs.ruff
                   pkgs.git
                   treefmt

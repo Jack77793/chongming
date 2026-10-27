@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
-
-from PIL import Image
 
 from chongming.scenarios.playback import load_recording_source
 
@@ -22,15 +23,65 @@ def create_minimal_recording(directory: Path, frame_count: int = 10) -> None:
     """
     directory.mkdir(parents=True, exist_ok=True)
 
-    # Create video directory with minimal frames
+    width, height = 64, 48
+    ffmpeg = os.environ.get("CHONGMING_FFMPEG") or shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise unittest.SkipTest("FFmpeg is required for video playback tests")
     video_dir = directory / "video"
     video_dir.mkdir()
-
-    # Create a simple black image for each frame
-    img = Image.new("RGB", (640, 480), color=(0, 0, 0))
+    video_path = video_dir / "camera-000.mp4"
+    raw_buffer = bytearray()
     for i in range(frame_count):
-        frame_path = video_dir / f"frame_{i:04d}.png"
-        img.save(frame_path)
+        for row in range(height):
+            for column in range(width):
+                raw_buffer.extend(((i * 17) % 256, (row * 3) % 256, (column * 5) % 256))
+    raw = bytes(raw_buffer)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s:v",
+            f"{width}x{height}",
+            "-r",
+            "5",
+            "-i",
+            "-",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "8",
+            "-pix_fmt",
+            "yuv444p",
+            str(video_path),
+        ],
+        input=raw,
+        check=True,
+    )
+    (directory / "video.json").write_text(
+        json.dumps(
+            {
+                "format": "video-h264-v1",
+                "streams": {
+                    "camera-000": {
+                        "path": "video/camera-000.mp4",
+                        "width_px": width,
+                        "height_px": height,
+                        "pixel_format": "rgb8",
+                        "frame_count": frame_count,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     # Create minimal online.jsonl
     online_records = []
@@ -57,7 +108,10 @@ def create_minimal_recording(directory: Path, frame_count: int = 10) -> None:
                         "rolling_shutter_model": "none",
                     },
                     "camera_config_ref": "config-01",
-                    "path": f"video/frame_{i:04d}.png",
+                    "path": "video/camera-000.mp4",
+                    "frame_index": i,
+                    "width_px": width,
+                    "height_px": height,
                 }
             ],
             "rendered": True,
@@ -143,8 +197,7 @@ class TestPlaybackFrameRate(unittest.TestCase):
         start_time = time.perf_counter()
         step_count = 0
 
-        for _ in source.generate(source.spec):
-            step_count += 1
+        for step_count, _ in enumerate(source.generate(source.spec), start=1):
             # Only test first few frames to keep test fast
             if step_count >= 5:
                 break
@@ -174,10 +227,7 @@ class TestPlaybackFrameRate(unittest.TestCase):
 
         # Measure time to play through recording
         start_time = time.perf_counter()
-        step_count = 0
-
-        for _ in source.generate(source.spec):
-            step_count += 1
+        for step_count, _ in enumerate(source.generate(source.spec), start=1):
             if step_count >= 5:
                 break
 

@@ -82,18 +82,19 @@ uv run --frozen chongming-center --scenario scenarios/center_clean.json --output
 uv run --frozen chongming-scene --scenario scenarios/empty.json --output results/scene-test --no-video
 ```
 
-省略 `--no-video` 输出 PNG 序列；`--render-every N` 按各相机独立曝光计数抽取像素，默认每帧绘制。所有逻辑曝光仍被访问，跳过的帧记录 ID 和原因。
+省略 `--no-video` 输出高质量 H.264 视频流；`--render-every N` 按各相机独立曝光计数抽取像素，默认每帧绘制。所有逻辑曝光仍被访问，跳过的帧记录 ID 和原因。录制需要 Nix 环境提供的 FFmpeg。
 
 | 文件                           | 内容                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------- |
 | `authoring.json`               | 输入的可编辑场景，输入为 authoring 格式时保存                                 |
 | `scenario.json`                | 有限导出的编译场景，用于诊断                                                  |
 | `manifest.json`                | 运行范围、配置、会话、渲染策略及来源记录；通过 `scenario_path` 和摘要引用场景 |
-| `online.jsonl`                 | 普通帧元数据、事件及像素跳过记录                                              |
-| `truth-static.json`            | 运行期间不变的特权场景对象快照，仅供评估                                      |
-| `truth.jsonl`                  | 逐步真实状态及事件到目标的对应；静态对象通过摘要引用，仅供评估                |
-| `timing.jsonl`、`summary.json` | 逐步耗时、计数、结束或失败状态                                                |
-| `video/camera-*/`              | 按流编号保存的 PNG，不以用户 ID 构造路径                                      |
+| `online.jsonl`                 | 普通帧元数据、事件及像素跳过记录              |
+| `truth-static.json`            | 运行期间不变的特权场景对象快照，仅供评估      |
+| `truth.jsonl`                  | 逐步真实状态及事件到目标的对应；静态对象通过摘要引用，仅供评估 |
+| `timing.jsonl`、`summary.json` | 逐步耗时、计数、结束或失败状态                |
+| `video/camera-*.mp4`           | 按流编号保存的高质量 H.264 视频，不以用户 ID 构造路径 |
+| `video.json`                   | 视频编码、尺寸、帧率、帧数和文件摘要              |
 
 中心工具另保存 `center-registration.json`、`center-input.jsonl` 和 `center-output.jsonl`。完整 manifest 与真值是审计资料，不是中心算法输入。失败时保留已写证据，不自动清理输出目录。
 

@@ -2,7 +2,8 @@
 
 This entry point does not pretend that the unfinished device/fusion runner is
 implemented. Every configured exposure is visited; default runs render every
-frame. PNG sequences plus capture metadata represent each finite video stream.
+frame. High-quality H.264 streams plus capture metadata represent each finite
+video stream.
 """
 
 from __future__ import annotations
@@ -10,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
+import shutil
 import statistics
 import subprocess
 import sys
@@ -27,8 +30,6 @@ from urllib.parse import urlsplit
 from urllib.request import url2pathname
 from uuid import uuid4
 
-from PIL import Image
-
 from chongming.contracts.scene import ScenarioSpec, ScenarioStep
 from chongming.rendering.godot import GODOT_VERSION, close_default_renderer, default_renderer
 from chongming.scenarios.demo import demo_source
@@ -43,6 +44,8 @@ from chongming.scenarios.serialization import (
 
 TRUTH_FORMAT_VERSION = "truth-jsonl-v2"
 TRUTH_STATIC_FILE = "truth-static.json"
+VIDEO_FORMAT_VERSION = "video-h264-v1"
+_FFMPEG_ENV = "CHONGMING_FFMPEG"
 
 
 def _json(value: Any) -> str:
@@ -56,6 +59,102 @@ def _digest(path: Path) -> str:
 
 def _json_digest(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _ffmpeg_executable() -> str:
+    configured = os.environ.get(_FFMPEG_ENV)
+    if configured:
+        return configured
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    raise RuntimeError(
+        "FFmpeg executable not found; set CHONGMING_FFMPEG or enter the Nix environment"
+    )
+
+
+class _VideoEncoder:
+    """Encode one RGB stream through the pinned FFmpeg runtime."""
+
+    def __init__(self, path: Path, *, width: int, height: int, fps: float) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self._process = subprocess.Popen(
+            [
+                _ffmpeg_executable(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s:v",
+                f"{width}x{height}",
+                "-r",
+                f"{fps:.12g}",
+                "-i",
+                "-",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "slow",
+                "-crf",
+                "8",
+                "-pix_fmt",
+                "yuv444p",
+                "-movflags",
+                "+faststart",
+                str(path),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        self._frame_bytes = width * height * 3
+
+    def write(self, pixels: bytes | memoryview) -> None:
+        if len(pixels) != self._frame_bytes:
+            raise ValueError("video frame size does not match encoder dimensions")
+        assert self._process.stdin is not None
+        try:
+            self._process.stdin.write(pixels)
+        except BrokenPipeError as error:
+            detail = self._process.stderr.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"FFmpeg video encoding failed: {detail or error}") from error
+
+    def close(self) -> None:
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+            self._process.stdin = None
+        stderr = self._process.stderr.read() if self._process.stderr is not None else b""
+        if self._process.stderr is not None:
+            self._process.stderr.close()
+            self._process.stderr = None
+        return_code = self._process.wait()
+        if return_code != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"FFmpeg video encoding failed: {detail or return_code}")
+
+
+def _packed_rgb(image: Any) -> bytes:
+    if image.pixel_format.value != "rgb8":
+        raise ValueError(f"video recording requires RGB8 pixels, got {image.pixel_format}")
+    row_bytes = image.width_px * 3
+    pixels = memoryview(image.pixels)
+    if image.row_stride_bytes == row_bytes:
+        return pixels.tobytes()
+    if image.row_stride_bytes < row_bytes or len(pixels) < image.row_stride_bytes * image.height_px:
+        raise ValueError("image row stride is smaller than its declared width")
+    return b"".join(
+        pixels[row * image.row_stride_bytes : row * image.row_stride_bytes + row_bytes]
+        for row in range(image.height_px)
+    )
 
 
 def read_truth_records(directory: Path) -> list[dict[str, Any]]:
@@ -148,12 +247,16 @@ def _provenance() -> dict[str, Any]:
 
 
 class SceneEvidenceWriter:
-    """Streaming evidence with one record per step and no accumulated pixels."""
+    """Streaming evidence with one high-quality H.264 stream per camera."""
 
     def __init__(self, directory: Path, spec: ScenarioSpec) -> None:
         self.spec = spec
         directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory
+        self.streams: Counter[str] = Counter()
+        self._truth_static_digest: str | None = None
+        self._video_encoders: dict[str, _VideoEncoder] = {}
+        self._video_manifest: dict[str, dict[str, Any]] = {}
         self._handles = {}
         try:
             for name in ("online", "truth", "timing"):
@@ -161,8 +264,6 @@ class SceneEvidenceWriter:
         except BaseException:
             self.close()
             raise
-        self.streams: Counter[str] = Counter()
-        self._truth_static_digest: str | None = None
 
     def document(self, name: str, value: Any) -> None:
         with (self.directory / name).open("x", encoding="utf-8") as handle:
@@ -202,17 +303,36 @@ class SceneEvidenceWriter:
             )
             stream = f"camera-{camera_index:03d}"
             self.streams[stream] += 1
-            relative = Path("video") / stream / f"{self.streams[stream]:08d}.png"
-            path = self.directory / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            Image.frombytes(
-                "RGB",
-                (frame.image.width_px, frame.image.height_px),
-                frame.image.pixels,
-                "raw",
-                "RGB",
-                frame.image.row_stride_bytes,
-            ).save(path)
+            camera = self.spec.scene_definition.cameras[camera_index]
+            fps = 1_000_000_000 / camera.exposure.frame_period_ns
+            encoder = self._video_encoders.get(stream)
+            if encoder is None:
+                relative = Path("video") / f"{stream}.mp4"
+                path = self.directory / relative
+                encoder = _VideoEncoder(
+                    path,
+                    width=frame.image.width_px,
+                    height=frame.image.height_px,
+                    fps=fps,
+                )
+                self._video_encoders[stream] = encoder
+                self._video_manifest[stream] = {
+                    "path": str(relative),
+                    "width_px": frame.image.width_px,
+                    "height_px": frame.image.height_px,
+                    "pixel_format": frame.image.pixel_format,
+                    "codec": "libx264",
+                    "container": "mp4",
+                    "fps": fps,
+                    "quality": "crf-8-yuv444p",
+                }
+            elif (encoder.width, encoder.height) != (
+                frame.image.width_px,
+                frame.image.height_px,
+            ):
+                raise ValueError(f"camera stream dimensions changed for {stream}")
+            encoder.write(_packed_rgb(frame.image))
+            relative = Path(self._video_manifest[stream]["path"])
             frame_records.append(
                 {
                     "station_id": frame.station_id,
@@ -225,7 +345,7 @@ class SceneEvidenceWriter:
                     "height_px": frame.image.height_px,
                     "pixel_format": frame.image.pixel_format,
                     "path": str(relative),
-                    "sha256": _digest(path),
+                    "frame_index": self.streams[stream] - 1,
                 }
             )
         self._handles["online"].write(
@@ -257,8 +377,28 @@ class SceneEvidenceWriter:
         return evidence_ms
 
     def close(self) -> None:
+        errors: list[BaseException] = []
+        for encoder in self._video_encoders.values():
+            try:
+                encoder.close()
+            except Exception as error:  # noqa: BLE001 - finalize every stream before reporting failure
+                errors.append(error)
+        for stream, metadata in self._video_manifest.items():
+            path = self.directory / metadata["path"]
+            metadata["sha256"] = _digest(path)
+            metadata["frame_count"] = self.streams[stream]
+        if self._video_manifest:
+            try:
+                self.document(
+                    "video.json",
+                    {"format": VIDEO_FORMAT_VERSION, "streams": self._video_manifest},
+                )
+            except Exception as error:  # noqa: BLE001 - preserve evidence cleanup errors
+                errors.append(error)
         for handle in self._handles.values():
             handle.close()
+        if errors:
+            raise RuntimeError("video evidence finalization failed") from errors[0]
 
 
 def run_scene(
@@ -318,7 +458,7 @@ def run_scene(
                 },
                 "stream_mapping": [
                     {
-                        "path": f"video/camera-{i:03d}",
+                        "path": f"video/camera-{i:03d}.mp4",
                         "station_id": c.station_id,
                         "camera_role": c.camera_role,
                         "camera_id": c.metadata.camera_id,
