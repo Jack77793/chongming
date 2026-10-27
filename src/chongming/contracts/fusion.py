@@ -88,6 +88,7 @@ class StationStreamHealth(StrEnum):
     ACTIVE = "active"
     IDLE = "idle"
     OFFLINE = "offline"
+    RECOVERING = "recovering"
     ENDED = "ended"
 
 
@@ -137,6 +138,8 @@ class AssociationConflictReason(StrEnum):
     COMPETING_TARGET_HYPOTHESES = "competing_target_hypotheses"
     INSUFFICIENT_INDEPENDENT_STATIONS = "insufficient_independent_stations"
     TEMPORAL_GATE_FAILED = "temporal_gate_failed"
+    MOTION_ALIGNMENT_UNAVAILABLE = "motion_alignment_unavailable"
+    PREDICTION_GATE_FAILED = "prediction_gate_failed"
     SPATIAL_GATE_FAILED = "spatial_gate_failed"
     DEGENERATE_GEOMETRY = "degenerate_geometry"
     CANDIDATE_SEARCH_TRUNCATED = "candidate_search_truncated"
@@ -281,6 +284,9 @@ class GeometryPolicy:
 
     The angle limit applies to the strongest acute pair; the normal-matrix
     condition and maximum per-ray residual assess the complete support group.
+    maximum_unaligned_span_ns bounds exposure midpoint differences, not arrival
+    jitter or exposure duration. TRACK_PREDICTION keeps this narrow unguided path
+    for new targets; an unknown speed never becomes a zero-velocity assumption.
     """
 
     minimum_independent_stations: int
@@ -291,6 +297,7 @@ class GeometryPolicy:
     robust_loss_scale_m: float
     motion_alignment_model: MotionAlignmentModel
     conservative_speed_bound_mps: float | None
+    maximum_unaligned_span_ns: int
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -384,7 +391,11 @@ class StationEventTimeProgress:
 
 @dataclass(frozen=True, kw_only=True)
 class StationProgress:
-    """Retain maximum exposure when ENDED; None remains valid for a zero-frame stream."""
+    """Retain maximum exposure when ENDED; None is valid for zero-frame streams.
+
+    RECOVERING means fresh delivery is still behind the first open window. Such
+    a stream rejoins the watermark only after supplying current usable progress.
+    """
 
     station_id: StationId
     station_session_id: SessionId | None
@@ -458,6 +469,7 @@ class SpatialCandidate:
     window: WindowKey
     method: CandidateMethod
     origin: CandidateOrigin
+    prior_track_id: TrackId | None
     coarse_position_enu_m: Vec3 | None
     region_min_enu_m: Vec3 | None
     region_max_enu_m: Vec3 | None
@@ -482,13 +494,18 @@ class CandidateBatch:
 
 @dataclass(frozen=True, kw_only=True)
 class TrackPrediction:
-    """A gating prior; it cannot replace current ray evidence or unguided search."""
+    """A gating prior, valid before valid_until_ns, never a current station vote.
+
+    Read-only extrapolation may be requested beyond validity; such a prediction
+    cannot guide candidates or alignment in a consumed window.
+    """
 
     center_session_id: SessionId
     track_id: TrackId
     clock_domain_id: str
     world_frame_id: WorldFrameId
     reference_time_ns: int
+    valid_until_ns: int
     position_enu_m: Vec3
     velocity_enu_mps: Vec3
     conditional_state_covariance_enu: Matrix6x6 | None
@@ -502,6 +519,8 @@ class AssociatedRayGroup:
     are scoped by window (which includes the center session); truth IDs are absent.
     Without a motion prior, reference time is the midpoint of the earliest/latest
     supporting exposure midpoints, not an assumed position at the window center.
+    Velocity-aligned groups use the earliest supporting midpoint, avoiding an
+    extrapolated measurement later than all current evidence.
     """
 
     hypothesis_id: str
@@ -512,6 +531,7 @@ class AssociatedRayGroup:
     supporting_ray_event_ids: tuple[EventId, ...]
     supporting_station_ids: tuple[StationId, ...]
     prior_track_id: TrackId | None
+    motion_alignment_model: MotionAlignmentModel
     score: float
     score_definition: ScoreDefinition
 

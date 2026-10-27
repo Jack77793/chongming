@@ -46,6 +46,7 @@ class _Observation:
     measurement: m.FusionMeasurement
     position: Array
     covariance: Array
+    model: Array
     ref: m.MeasurementRef
 
 
@@ -131,6 +132,13 @@ class CenterTrackingModule(ModuleShell):
                         clock_domain_id=self.clock_domain_id,
                         world_frame_id=self.world_frame_id,
                         reference_time_ns=reference_time_ns,
+                        valid_until_ns=track.last_measurement.reference_time_ns
+                        + min(
+                            self.policy.delete_after_ns,
+                            self.policy.confirmation_max_gap_ns + 1
+                            if track.lifecycle is m.TrackLifecycle.TENTATIVE
+                            else self.policy.delete_after_ns,
+                        ),
                         position_enu_m=_vec3(state[:3]),
                         velocity_enu_mps=_vec3(state[3:]),
                         conditional_state_covariance_enu=_matrix6(covariance),
@@ -211,8 +219,10 @@ class CenterTrackingModule(ModuleShell):
         self, track: _Track, observation: _Observation
     ) -> tuple[Array, Array, Array, Array, float]:
         state, prior = self._predict(track, observation.measurement.reference_time_ns)
-        innovation = observation.position - state[:3]
-        residual_covariance = prior[:3, :3] + observation.covariance
+        innovation = observation.position - observation.model @ state
+        residual_covariance = (
+            observation.model @ prior @ observation.model.T + observation.covariance
+        )
         values, vectors = np.linalg.eigh((residual_covariance + residual_covariance.T) / 2)
         tolerance = 96 * np.finfo(np.float64).eps * float(np.max(np.abs(values)))
         if float(values.min()) < -tolerance:
@@ -235,6 +245,9 @@ class CenterTrackingModule(ModuleShell):
 
     def _cost(self, track: _Track, observation: _Observation) -> float | None:
         time_ns = observation.measurement.reference_time_ns
+        motion = observation.measurement.motion_alignment
+        if motion is not None and (motion.prior_track_id != track.track_id or track.state is None):
+            return None
         if self._expired(track, time_ns) or time_ns <= track.last_measurement.reference_time_ns:
             return None
         if track.state is None:
@@ -264,12 +277,22 @@ class CenterTrackingModule(ModuleShell):
             )
         else:
             state, prior, innovation, inverse, _ = self._innovation(track, observation)
-            gain = prior[:, :3] @ inverse
+            gain = prior @ observation.model.T @ inverse
             track.state = state + gain @ innovation
-            correction = np.eye(6)
-            correction[:, :3] -= gain
-            posterior = correction @ prior @ correction.T + gain @ covariance @ gain.T
-            track.covariance = (posterior + posterior.T) / 2
+            correction = np.eye(6) - gain @ observation.model
+            # Multiply square roots before forming the Joseph covariance. Exact
+            # aligned observations can annihilate a singular prior; C P C.T
+            # otherwise loses the remaining digits through cancellation.
+            prior_root = covariance_factor(_matrix6(prior), 6, "tracking prior covariance")
+            noise_root = covariance_factor(
+                cast(
+                    m.Matrix3x3, tuple(tuple(float(value) for value in row) for row in covariance)
+                ),
+                3,
+                "independent measurement covariance",
+            )
+            roots = np.hstack((correction @ prior_root, gain @ noise_root))
+            track.covariance = roots @ roots.T
         recovered = track.lifecycle is m.TrackLifecycle.COASTING
         track.count += 1
         track.last_measurement = measurement
@@ -326,14 +349,28 @@ class CenterTrackingModule(ModuleShell):
             factor = covariance_factor(
                 measurement.conditional_position_covariance_enu_m2, 3, "measurement covariance (m2)"
             )
-            observations.append(
-                _Observation(
-                    measurement,
-                    position,
-                    factor @ factor.T,
-                    ref,
+            model = np.hstack((np.eye(3), np.zeros((3, 3))))
+            motion = measurement.motion_alignment
+            if motion is not None:
+                projection = np.asarray(motion.velocity_projection_s, dtype=np.float64)
+                velocity = np.asarray(motion.velocity_enu_mps, dtype=np.float64)
+                if (
+                    projection.shape != (3, 3)
+                    or velocity.shape != (3,)
+                    or not np.isfinite(projection).all()
+                    or not np.isfinite(velocity).all()
+                ):
+                    raise ValueError("invalid motion alignment observation")
+                # Recover the raw linear observation; the velocity prior is shared
+                # with this filter, not fresh independent measurement noise.
+                position = position + projection @ velocity
+                model[:, 3:] = projection
+                factor = covariance_factor(
+                    motion.independent_position_covariance_enu_m2,
+                    3,
+                    "independent aligned measurement covariance (m2)",
                 )
-            )
+            observations.append(_Observation(measurement, position, factor @ factor.T, model, ref))
             refs.add(ref)
             ray_ids.update(measurement.supporting_ray_event_ids)
         tracks = tuple(self._tracks.values())
@@ -389,7 +426,11 @@ class CenterTrackingModule(ModuleShell):
             assigned_tracks.add(track_index)
             assigned_observations.add(observation_index)
         for index, observation in enumerate(observations):
-            if index not in assigned_observations and index not in blocked:
+            if (
+                index not in assigned_observations
+                and index not in blocked
+                and observation.measurement.motion_alignment is None
+            ):
                 track = _Track(
                     track_id=m.TrackId(f"track-{self._next_id}"),
                     last_measurement=observation.measurement,

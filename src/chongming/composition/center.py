@@ -70,10 +70,10 @@ def reference_policy(
             awaiting_first_event_timeout_ns=10**9,
             idle_after_ns=10**9,
             offline_after_ns=3 * 10**9,
-            exclude_idle_stations=False,
-            exclude_offline_stations=False,
+            exclude_idle_stations=True,
+            exclude_offline_stations=True,
             watermark_strategy=f.WatermarkStrategy.ACTIVE_STATION_MINIMUM,
-            no_active_station_policy=f.EmptyActiveStationPolicy.HOLD,
+            no_active_station_policy=f.EmptyActiveStationPolicy.ADVANCE_WITH_MAPPED_EVENT_CLOCK,
         ),
         candidates=f.CandidatePolicy(
             search=search,
@@ -98,8 +98,9 @@ def reference_policy(
             maximum_residual_m=1,
             robust_loss_definition="least_squares",
             robust_loss_scale_m=1,
-            motion_alignment_model=f.MotionAlignmentModel.NARROW_WINDOW_WITHOUT_PRIOR,
+            motion_alignment_model=f.MotionAlignmentModel.TRACK_PREDICTION,
             conservative_speed_bound_mps=None,
+            maximum_unaligned_span_ns=1_000_000,
         ),
         tracking=f.TrackingPolicy(
             confirmation_measurement_count=2,
@@ -147,10 +148,12 @@ def declare_center(
     windows = EventWindowModule(
         center_session_id=center_session_id, policy=policy.windows, clock=clock, stations=stations
     )
-    voxels = VoxelCandidateModule(policy=policy.candidates)
+    voxels = VoxelCandidateModule(policy=policy.candidates, motion_policy=policy.geometry)
     direct = DirectGeometryCandidateModule(search=policy.candidates.search)
     candidates = CandidateGenerationModule(policy=policy.candidates, voxel=voxels, direct=direct)
-    association = CrossStationAssociationModule(policy=policy.association)
+    association = CrossStationAssociationModule(
+        policy=policy.association, motion_policy=policy.geometry
+    )
     weights = CalibrationWeightingModule(rules=policy.admission.calibration_usage_rules)
     geometry = GeometryRefinementModule(
         center_session_id=center_session_id,

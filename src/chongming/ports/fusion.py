@@ -178,6 +178,9 @@ class GeometryRefiner(Protocol):
 
         Use original rays, not voxel centers or averaged pairwise midpoints. Report
         covariance conditional on the registered installation/calibration solutions.
+        Motion-aligned groups require predictions at their supporting reference
+        epoch; the returned dependence on the velocity prior is not independent
+        position evidence for a second filter update.
         """
         ...
 

@@ -18,10 +18,15 @@ from chongming.modules.fusion_geometry import (
     _event_id,
     _exposure_span,
     _line_fit,
-    _midpoint,
     _reference_time,
 )
 from chongming.modules.fusion_matching import ExclusiveChoice, exclusive_components
+from chongming.modules.fusion_motion import (
+    alignment_reference,
+    midpoint_span,
+    validate_policy,
+    validate_predictions,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -34,8 +39,10 @@ class CrossStationAssociationModule(ModuleShell):
 
     business_implemented = True
     policy: f.AssociationPolicy
+    motion_policy: f.GeometryPolicy
 
     def __post_init__(self) -> None:
+        validate_policy(self.motion_policy)
         if (
             self.policy.minimum_independent_stations < 2
             or self.policy.temporal_gate_ns < 0
@@ -58,23 +65,14 @@ class CrossStationAssociationModule(ModuleShell):
     ) -> f.AssociationBatch:
         if candidates.window != window.key:
             raise ValueError("candidate and observation windows differ")
-        for prediction in predictions:
-            if (
-                prediction.center_session_id != window.key.center_session_id
-                or prediction.clock_domain_id != window.key.capture_clock_domain_id
-                or prediction.world_frame_id != candidates.search.world_frame_id
-                or not np.isfinite((prediction.position_enu_m, prediction.velocity_enu_mps)).all()
-            ):
-                raise ValueError("prediction session, frame, clock or position mismatch")
-        if len({prediction.track_id for prediction in predictions}) != len(predictions):
-            raise ValueError("duplicate track prediction")
+        validate_predictions(window, candidates.search.world_frame_id, predictions)
         rays = {_event_id(ray): ray for ray in window.rays}
         conflicts: list[f.AssociationConflict] = []
         groups: list[f.AssociatedRayGroup] = []
         choices: list[ExclusiveChoice] = []
         choice_groups: list[int] = []
         choice_priors: list[m.TrackId | None] = []
-        examined: set[tuple[m.EventId, ...]] = set()
+        examined: set[tuple[tuple[m.EventId, ...], m.TrackId | None]] = set()
         truncated = "candidate_limit_reached" in candidates.reason_codes
         if truncated:
             conflicts.append(
@@ -118,57 +116,126 @@ class CrossStationAssociationModule(ModuleShell):
                     for ids in product(
                         *(sorted(set(item.alternative_ray_event_ids)) for item in stations)
                     ):
-                        if ids in examined:
-                            continue
-                        if (
-                            len(examined) >= self.policy.maximum_hypotheses
-                            or len(choices) >= self.policy.maximum_hypotheses
-                        ):
-                            truncated = True
-                            break
-                        examined.add(ids)
                         chosen = tuple(rays[event_id] for event_id in ids)
-                        group = f.AssociatedRayGroup(
-                            hypothesis_id="rays/" + hashlib.sha256(repr(ids).encode()).hexdigest(),
-                            candidate_id=candidate.candidate_id,
-                            window=window.key,
-                            reference_time_ns=_reference_time(chosen),
-                            support_exposure_span_ns=_exposure_span(chosen),
-                            supporting_ray_event_ids=ids,
-                            supporting_station_ids=tuple(event_id[0] for event_id in ids),
-                            prior_track_id=None,
-                            score=float(count),
-                            score_definition=_STATION_SCORE,
-                        )
-                        failure, fitted, residual = self._gate(chosen, candidates.search)
-                        if failure is not None:
-                            conflicts.append(
-                                self._conflict(window, (group.hypothesis_id,), ids, (failure,))
+                        spread = midpoint_span(chosen)
+                        modes: list[f.TrackPrediction | None] = []
+                        if candidate.origin is f.CandidateOrigin.UNGUIDED_SEARCH:
+                            modes.append(None)
+                        if (
+                            spread
+                            and self.motion_policy.motion_alignment_model
+                            is f.MotionAlignmentModel.TRACK_PREDICTION
+                        ):
+                            modes.extend(
+                                item
+                                for item in sorted(predictions, key=lambda item: item.track_id)
+                                if item.conditional_state_covariance_enu is not None
+                                and window.key.start_ns
+                                <= item.reference_time_ns
+                                < window.key.end_ns
+                                and item.valid_until_ns > alignment_reference(chosen)
+                                and (
+                                    candidate.prior_track_id is None
+                                    or candidate.prior_track_id == item.track_id
+                                )
                             )
-                            continue
-                        group_index = len(groups)
-                        groups.append(group)
-                        # All valid groups have an unguided choice, even inside an
-                        # existing track gate. A prior can never consume a ray alone.
-                        choices.append(
-                            ExclusiveChoice(frozenset(ids), (count * (count - 1) // 2, 0), residual)
-                        )
-                        choice_groups.append(group_index)
-                        choice_priors.append(None)
-                        if fitted is not None:
-                            for prediction in sorted(predictions, key=lambda item: item.track_id):
-                                dt = (group.reference_time_ns - prediction.reference_time_ns) / 1e9
-                                position = np.asarray(prediction.position_enu_m) + dt * np.asarray(
-                                    prediction.velocity_enu_mps
+                        for prior in modes:
+                            key = (ids, None if prior is None else prior.track_id)
+                            if key in examined:
+                                continue
+                            if (
+                                len(examined) >= self.policy.maximum_hypotheses
+                                or len(choices) >= self.policy.maximum_hypotheses
+                            ):
+                                truncated = True
+                                break
+                            examined.add(key)
+                            reference = (
+                                _reference_time(chosen)
+                                if prior is None
+                                else alignment_reference(chosen)
+                            )
+                            group = f.AssociatedRayGroup(
+                                hypothesis_id="rays/"
+                                + hashlib.sha256(repr(key).encode()).hexdigest(),
+                                candidate_id=candidate.candidate_id,
+                                window=window.key,
+                                reference_time_ns=reference,
+                                support_exposure_span_ns=_exposure_span(chosen),
+                                supporting_ray_event_ids=ids,
+                                supporting_station_ids=tuple(event_id[0] for event_id in ids),
+                                prior_track_id=None if prior is None else prior.track_id,
+                                motion_alignment_model=f.MotionAlignmentModel.NARROW_WINDOW_WITHOUT_PRIOR
+                                if prior is None
+                                else f.MotionAlignmentModel.TRACK_PREDICTION,
+                                score=float(count),
+                                score_definition=_STATION_SCORE,
+                            )
+                            failure: f.AssociationConflictReason | None
+                            if (
+                                prior is None
+                                and spread > self.motion_policy.maximum_unaligned_span_ns
+                            ):
+                                failure, fitted, residual = (
+                                    (
+                                        f.AssociationConflictReason.TEMPORAL_GATE_FAILED
+                                        if spread > self.policy.temporal_gate_ns
+                                        else f.AssociationConflictReason.MOTION_ALIGNMENT_UNAVAILABLE
+                                    ),
+                                    None,
+                                    0.0,
+                                )
+                            else:
+                                failure, fitted, residual = self._gate(
+                                    chosen,
+                                    candidates.search,
+                                    reference,
+                                    None if prior is None else prior.velocity_enu_mps,
+                                )
+                            if failure is not None:
+                                conflicts.append(
+                                    self._conflict(window, (group.hypothesis_id,), ids, (failure,))
+                                )
+                                continue
+                            assert fitted is not None
+                            hints = (
+                                (prior,)
+                                if prior is not None
+                                else tuple(sorted(predictions, key=lambda item: item.track_id))
+                                if not spread
+                                else ()
+                            )
+                            group_index = len(groups)
+                            initial_choices = len(choices)
+                            groups.append(group)
+                            if prior is None:
+                                choices.append(
+                                    ExclusiveChoice(
+                                        frozenset(ids), (count * (count - 1) // 2, 0), residual
+                                    )
+                                )
+                                choice_groups.append(group_index)
+                                choice_priors.append(None)
+                            for hint in hints:
+                                assert hint is not None
+                                dt = (reference - hint.reference_time_ns) / 1e9
+                                position = np.asarray(hint.position_enu_m) + dt * np.asarray(
+                                    hint.velocity_enu_mps
                                 )
                                 distance = float(np.linalg.norm(fitted - position))
-                                if distance <= self.policy.prediction_spatial_gate_m:
+                                if (
+                                    distance <= self.policy.prediction_spatial_gate_m
+                                    and hint.valid_until_ns > reference
+                                    and window.key.start_ns
+                                    <= hint.reference_time_ns
+                                    < window.key.end_ns
+                                ):
                                     if len(choices) >= self.policy.maximum_hypotheses:
                                         truncated = True
                                         break
                                     choices.append(
                                         ExclusiveChoice(
-                                            frozenset((*ids, ("track", prediction.track_id))),
+                                            frozenset((*ids, ("track", hint.track_id))),
                                             (count * (count - 1) // 2, 1),
                                             residual
                                             + (distance / self.policy.prediction_spatial_gate_m)
@@ -176,7 +243,20 @@ class CrossStationAssociationModule(ModuleShell):
                                         )
                                     )
                                     choice_groups.append(group_index)
-                                    choice_priors.append(prediction.track_id)
+                                    choice_priors.append(hint.track_id)
+                            if prior is not None and len(choices) == initial_choices:
+                                conflicts.append(
+                                    self._conflict(
+                                        window,
+                                        (group.hypothesis_id,),
+                                        ids,
+                                        (f.AssociationConflictReason.PREDICTION_GATE_FAILED,),
+                                    )
+                                )
+                            if truncated:
+                                break
+                        if truncated:
+                            break
                     if truncated:
                         break
                 if truncated:
@@ -217,8 +297,8 @@ class CrossStationAssociationModule(ModuleShell):
                         for choice in solution
                         if choice_groups[choice] == index
                     }
-                    prior = next(iter(priors)) if len(priors) == 1 else None
-                    selected.append(replace(groups[index], prior_track_id=prior))
+                    prior_id = next(iter(priors)) if len(priors) == 1 else None
+                    selected.append(replace(groups[index], prior_track_id=prior_id))
                 possible = (
                     set()
                     if component.truncated
@@ -292,15 +372,18 @@ class CrossStationAssociationModule(ModuleShell):
         )
 
     def _gate(
-        self, rays: tuple[f.AdmittedRay, ...], search: m.VoxelSearchSpec
+        self,
+        rays: tuple[f.AdmittedRay, ...],
+        search: m.VoxelSearchSpec,
+        reference_ns: int,
+        velocity: m.Vec3 | None,
     ) -> tuple[f.AssociationConflictReason | None, NDArray[np.float64] | None, float]:
-        if (
-            max(_midpoint(ray) for ray in rays) - min(_midpoint(ray) for ray in rays)
-            > self.policy.temporal_gate_ns
-        ):
+        if midpoint_span(rays) > self.policy.temporal_gate_ns:
             return f.AssociationConflictReason.TEMPORAL_GATE_FAILED, None, 0.0
         try:
-            fitted, residuals, depths, rank, singular = _line_fit(rays)
+            fitted, residuals, depths, rank, singular = _line_fit(
+                rays, reference_ns=reference_ns, velocity=velocity
+            )
         except np.linalg.LinAlgError:
             return f.AssociationConflictReason.SPATIAL_GATE_FAILED, None, 0.0
         if rank < 3:

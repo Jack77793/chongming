@@ -66,9 +66,12 @@ class CleanFusionTests(unittest.TestCase):
             step_enu_m=(1.0, 1.0, 1.0),
         )
         self.candidate_policy = replace(self.policy.candidates, search=self.search)
-        self.voxels = VoxelCandidateModule(policy=self.candidate_policy)
+        self.voxels = VoxelCandidateModule(
+            policy=self.candidate_policy, motion_policy=self.policy.geometry
+        )
         self.associator = CrossStationAssociationModule(
-            policy=replace(self.policy.association, temporal_gate_ns=20)
+            policy=replace(self.policy.association, temporal_gate_ns=20),
+            motion_policy=self.policy.geometry,
         )
         self.geometry = GeometryRefinementModule(
             center_session_id=self.center,
@@ -190,6 +193,7 @@ class CleanFusionTests(unittest.TestCase):
             supporting_ray_event_ids=tuple(event_id(ray) for ray in rays),
             supporting_station_ids=tuple(ray.event.envelope.station_id for ray in rays),
             prior_track_id=None,
+            motion_alignment_model=f.MotionAlignmentModel.NARROW_WINDOW_WITHOUT_PRIOR,
             score=float(len(rays)),
             score_definition=self.template.event.detection_score_definition,
         )
@@ -210,9 +214,10 @@ class CleanFusionTests(unittest.TestCase):
     ) -> tuple[f.SealedObservationWindow, f.AssociationBatch]:
         window = self.window(rays)
         associator = CrossStationAssociationModule(
+            motion_policy=self.policy.geometry,
             policy=replace(self.associator.policy, spatial_gate_m=1e-6)
             if policy is None
-            else policy
+            else policy,
         )
         return window, associator.associate(
             window, self.voxels.propose(window, predictions), predictions
@@ -283,6 +288,7 @@ class CleanFusionTests(unittest.TestCase):
                 clock_domain_id=window.key.capture_clock_domain_id,
                 world_frame_id=self.search.world_frame_id,
                 reference_time_ns=TIME,
+                valid_until_ns=10**18,
                 position_enu_m=target,
                 velocity_enu_mps=(0.0, 0.0, 0.0),
                 conditional_state_covariance_enu=None,
@@ -389,6 +395,7 @@ class CleanFusionTests(unittest.TestCase):
                 clock_domain_id=window.key.capture_clock_domain_id,
                 world_frame_id=self.search.world_frame_id,
                 reference_time_ns=TIME,
+                valid_until_ns=10**18,
                 position_enu_m=TARGET,
                 velocity_enu_mps=(0.0, 0.0, 0.0),
                 conditional_state_covariance_enu=None,
@@ -434,6 +441,7 @@ class CleanFusionTests(unittest.TestCase):
             clock_domain_id=window.key.capture_clock_domain_id,
             world_frame_id=self.search.world_frame_id,
             reference_time_ns=TIME,
+            valid_until_ns=10**18,
             position_enu_m=TARGET,
             velocity_enu_mps=(0.0, 0.0, 0.0),
             conditional_state_covariance_enu=None,
@@ -451,7 +459,7 @@ class CleanFusionTests(unittest.TestCase):
             replace(self.associator.policy, prediction_spatial_gate_m=0),
         ):
             with self.assertRaisesRegex(ValueError, "association policy"):
-                CrossStationAssociationModule(policy=policy)
+                CrossStationAssociationModule(policy=policy, motion_policy=self.policy.geometry)
 
     def test_forward_traversal_supercovers_boundaries_and_clips_range(self) -> None:
         search = replace(self.search, min_enu_m=(0.0, 0.0, 0.0), max_enu_m=(2.0, 2.0, 2.0))
@@ -547,7 +555,8 @@ class CleanFusionTests(unittest.TestCase):
             self.voxels.propose(empty, ()).status, f.CandidateBatchStatus.INSUFFICIENT_STATIONS
         )
         strict = VoxelCandidateModule(
-            policy=replace(self.candidate_policy, minimum_candidate_score=4)
+            policy=replace(self.candidate_policy, minimum_candidate_score=4),
+            motion_policy=self.policy.geometry,
         )
         self.assertFalse(strict.propose(self.window(self.rays()), ()).candidates)
 
@@ -560,7 +569,9 @@ class CleanFusionTests(unittest.TestCase):
                         self.candidate_policy,
                         search=replace(self.search, step_enu_m=(step, step, step)),
                     )
-                    candidates = VoxelCandidateModule(policy=policy).propose(window, ())
+                    candidates = VoxelCandidateModule(
+                        policy=policy, motion_policy=self.policy.geometry
+                    ).propose(window, ())
                     association = self.associator.associate(window, candidates, ())
                     self.assertIs(
                         association.status, f.AssociationBatchStatus.ASSOCIATIONS_SELECTED
@@ -602,6 +613,7 @@ class CleanFusionTests(unittest.TestCase):
             clock_domain_id=window.key.capture_clock_domain_id,
             world_frame_id=self.search.world_frame_id,
             reference_time_ns=TIME,
+            valid_until_ns=10**18,
             position_enu_m=(1000.0, 1000.0, 1000.0),
             velocity_enu_mps=(0.0, 0.0, 0.0),
             conditional_state_covariance_enu=None,
@@ -682,7 +694,8 @@ class CleanFusionTests(unittest.TestCase):
         complete = self.voxels.propose(window, ())
         self.assertGreater(len(complete.candidates), 1)
         capped = VoxelCandidateModule(
-            policy=replace(self.candidate_policy, maximum_candidates=1)
+            policy=replace(self.candidate_policy, maximum_candidates=1),
+            motion_policy=self.policy.geometry,
         ).propose(window, ())
         self.assertEqual(len(capped.candidates), 1)
         self.assertEqual(capped.candidates, complete.candidates[:1])
@@ -767,7 +780,10 @@ class CleanFusionTests(unittest.TestCase):
                     max_enu_m=(1.0, 1.0, 1.0),
                     forward_range_m=forward,
                 )
-                voxels = VoxelCandidateModule(policy=replace(self.candidate_policy, search=search))
+                voxels = VoxelCandidateModule(
+                    policy=replace(self.candidate_policy, search=search),
+                    motion_policy=self.policy.geometry,
+                )
                 window = self.window(
                     (
                         self.ray("a", (0.0, 0.0, 0.5), target=target),
@@ -918,7 +934,7 @@ class CleanFusionTests(unittest.TestCase):
         self.assertEqual(result.reasons, (f.GeometryReason.INVALID_SUPPORT_GROUP,))
         self.assertIsNone(result.measurement.position_enu_m)
 
-    def test_clean_solver_does_not_claim_weighted_or_motion_aligned_success(self) -> None:
+    def test_clean_solver_does_not_claim_weighted_or_speed_bound_success(self) -> None:
         first, second = self.rays()[:2]
         cases = (
             (
@@ -957,7 +973,8 @@ class CleanFusionTests(unittest.TestCase):
         for policy in (
             replace(self.geometry.policy, robust_loss_definition="huber"),
             replace(
-                self.geometry.policy, motion_alignment_model=f.MotionAlignmentModel.TRACK_PREDICTION
+                self.geometry.policy,
+                motion_alignment_model=f.MotionAlignmentModel.CONSERVATIVE_SPEED_BOUND,
             ),
         ):
             with self.assertRaises(NotImplementedError):
@@ -992,7 +1009,7 @@ class CleanFusionTests(unittest.TestCase):
             ),
         ):
             with self.subTest(policy=policy), self.assertRaises(ValueError):
-                VoxelCandidateModule(policy=policy)
+                VoxelCandidateModule(policy=policy, motion_policy=self.policy.geometry)
         with self.assertRaises(ValueError):
             replace(self.associator, policy=replace(self.associator.policy, temporal_gate_ns=-1))
         with self.assertRaises(ValueError):

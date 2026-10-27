@@ -68,6 +68,9 @@ class FusionIngressTests(unittest.TestCase):
             awaiting_first_event_timeout_ns=20,
             idle_after_ns=40,
             offline_after_ns=80,
+            exclude_idle_stations=False,
+            exclude_offline_stations=False,
+            no_active_station_policy=f.EmptyActiveStationPolicy.HOLD,
         )
 
     def time(self, offset: int) -> m.ProcessingTime:
@@ -752,6 +755,86 @@ class FusionIngressTests(unittest.TestCase):
         recovered = windows.offer(self.admit(self.ray(station=1, offset=35), 46))
         self.assertEqual(len(recovered.sealed_windows), 2)
         self.assertEqual(recovered.watermark.event_time_ns, BASE + 35)
+
+    def test_recovered_old_frames_do_not_stall_other_stations_or_rewrite_sealed_windows(
+        self,
+    ) -> None:
+        windows = self.windows(
+            replace(
+                self.window_policy,
+                allowed_lateness_ns=0,
+                exclude_idle_stations=True,
+                exclude_offline_stations=True,
+                idle_after_ns=10,
+                offline_after_ns=30,
+            )
+        )
+        windows.start_module("center/windows", self.time(0))
+        windows.report_progress(self.progress(0, 0, 0))
+        windows.report_progress(self.progress(1, 0, 0))
+        first = windows.report_progress(self.progress(1, 15, 15))
+        self.assertEqual([window.key.start_ns for window in first.sealed_windows], [BASE])
+        sealed = windows.report_progress(self.progress(1, 35, 35))
+        self.assertEqual(
+            [window.key.start_ns for window in sealed.sealed_windows], [BASE + 10, BASE + 20]
+        )
+        preserved = tuple(sealed.sealed_windows)
+        late = windows.offer(self.admit(self.ray(station=0, offset=5, sequence=3), 36))
+        self.assertIs(late.receipts[0].disposition, f.WindowDisposition.LATE_AFTER_SEAL)
+        recovered = next(
+            item
+            for item in late.watermark.station_progress
+            if item.station_id == self.configs[0].station_id
+        )
+        self.assertIs(recovered.health, f.StationStreamHealth.RECOVERING)
+        self.assertFalse(recovered.participates_in_watermark)
+        next_update = windows.report_progress(self.progress(1, 45, 45))
+        self.assertEqual(next_update.watermark.event_time_ns, BASE + 45)
+        self.assertEqual(
+            [window.key.start_ns for window in next_update.sealed_windows], [BASE + 30]
+        )
+        # Catching the first open window is sufficient; no need to catch the
+        # fractional watermark itself before accepting useful current evidence.
+        rejoined = windows.offer(self.admit(self.ray(station=0, offset=42, sequence=4), 46))
+        self.assertIs(rejoined.receipts[0].disposition, f.WindowDisposition.BUFFERED)
+        current = next(
+            item
+            for item in rejoined.watermark.station_progress
+            if item.station_id == self.configs[0].station_id
+        )
+        self.assertIs(current.health, f.StationStreamHealth.ACTIVE)
+        self.assertTrue(current.participates_in_watermark)
+        self.assertFalse(windows.report_progress(self.progress(1, 55, 55)).sealed_windows)
+        final = windows.report_progress(self.progress(0, 55, 56))
+        self.assertEqual([window.key.start_ns for window in final.sealed_windows], [BASE + 40])
+        self.assertEqual(len(final.sealed_windows[0].rays), 1)
+        self.assertEqual(tuple(sealed.sealed_windows), preserved)
+        self.assertTrue(all(not window.rays for window in preserved))
+
+    def test_lagging_recovery_does_not_rejoin_merely_by_becoming_idle(self) -> None:
+        windows = self.windows(
+            replace(
+                self.window_policy,
+                watermark_strategy=f.WatermarkStrategy.EVENT_CLOCK_DEADLINE,
+                allowed_lateness_ns=0,
+                idle_after_ns=10,
+                offline_after_ns=30,
+            )
+        )
+        windows.report_progress(self.progress(0, 0, 0))
+        windows.report_progress(self.progress(1, 0, 0))
+        windows.advance(self.time(35))
+        late = windows.offer(self.admit(self.ray(station=0, offset=5, sequence=3), 36))
+        self.assertIs(late.receipts[0].disposition, f.WindowDisposition.LATE_AFTER_SEAL)
+        idle = windows.advance(self.time(50))
+        station = next(
+            item
+            for item in idle.watermark.station_progress
+            if item.station_id == self.configs[0].station_id
+        )
+        self.assertIs(station.health, f.StationStreamHealth.IDLE)
+        self.assertFalse(station.participates_in_watermark)
+        self.assertFalse(windows.policy.exclude_idle_stations)
 
     def test_deadlines_include_mapping_uncertainty_and_stop_at_finite_end(self) -> None:
         self.clock = replace(

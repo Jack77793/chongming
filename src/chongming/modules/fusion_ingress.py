@@ -838,8 +838,17 @@ class EventWindowModule(ModuleShell):
                     if elapsed >= self.policy.idle_after_ns
                     else f.StationStreamHealth.ACTIVE
                 )
+            behind_seal = (
+                self._sealed
+                and stream.maximum_exposure_ns is not None
+                and stream.maximum_exposure_ns < self._next_start_ns
+            )
+            if health is f.StationStreamHealth.ACTIVE and behind_seal:
+                health = f.StationStreamHealth.RECOVERING
+                reasons = ("awaiting_open_window_catchup",)
             participates = not (
-                health is f.StationStreamHealth.ENDED
+                behind_seal
+                or health in (f.StationStreamHealth.ENDED, f.StationStreamHealth.RECOVERING)
                 or (health is f.StationStreamHealth.IDLE and self.policy.exclude_idle_stations)
                 or (
                     health is f.StationStreamHealth.OFFLINE and self.policy.exclude_offline_stations

@@ -328,6 +328,7 @@ def architecture_specs(
             robust_loss_scale_m=1.0,
             motion_alignment_model=fusion.MotionAlignmentModel.NARROW_WINDOW_WITHOUT_PRIOR,
             conservative_speed_bound_mps=None,
+            maximum_unaligned_span_ns=1_000_000,
         ),
         tracking=fusion.TrackingPolicy(
             confirmation_measurement_count=2,

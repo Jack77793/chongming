@@ -59,6 +59,7 @@ class TrackingTests(unittest.TestCase):
             status=m.FusionStatus.LOCATED,
             position_enu_m=(1 + time / SECOND, 2.0, 3.0) if position is None else position,
             conditional_position_covariance_enu_m2=covariance,
+            motion_alignment=None,
             supporting_ray_event_ids=(
                 (m.StationId("a"), m.SessionId("a"), sequence),
                 (m.StationId("b"), m.SessionId("b"), sequence),
@@ -178,6 +179,77 @@ class TrackingTests(unittest.TestCase):
         assert accepted.position_enu_m is not None and accepted.velocity_enu_mps is not None
         self.assertEqual(accepted.position_enu_m[0], 4.0)
         self.assertEqual(accepted.velocity_enu_mps[0], 1.0)
+
+    def test_motion_aligned_observation_uses_shared_prior_model_not_independent_position_noise(
+        self,
+    ) -> None:
+        self.update(self.measurement(0))
+        self.update(self.measurement(SECOND))
+        (predicted,) = self.tracker.predict("clock", 2 * SECOND)
+        prior = np.asarray(predicted.conditional_state_covariance_enu)
+        state = np.asarray((*predicted.position_enu_m, *predicted.velocity_enu_mps))
+        projection = np.diag((0.25, -0.1, 0.05))
+        model = np.hstack((np.eye(3), projection))
+        innovation = np.asarray((0.25, -0.1, 0.2))
+        used_velocity: m.Vec3 = (3.0, 0.0, 0.0)
+        position = model @ state + innovation - projection @ np.asarray(used_velocity)
+        total = np.eye(3) + projection @ prior[3:, 3:] @ projection.T
+        evidence = m.MotionAlignmentEvidence(
+            prior_track_id=predicted.track_id,
+            velocity_enu_mps=used_velocity,
+            velocity_projection_s=((0.25, 0.0, 0.0), (0.0, -0.1, 0.0), (0.0, 0.0, 0.05)),
+            independent_position_covariance_enu_m2=IDENTITY,
+        )
+        measurement = replace(
+            self.measurement(
+                2 * SECOND,
+                position=(float(position[0]), float(position[1]), float(position[2])),
+                covariance=cast(
+                    m.Matrix3x3, tuple(tuple(float(value) for value in row) for row in total)
+                ),
+            ),
+            motion_alignment=evidence,
+        )
+        gain = prior @ model.T @ np.linalg.inv(model @ prior @ model.T + np.eye(3))
+        expected = state + gain @ innovation
+        correction = np.eye(6) - gain @ model
+        expected_covariance = correction @ prior @ correction.T + gain @ gain.T
+        (event,) = self.update(measurement)
+        self.assertEqual(event.track_id, predicted.track_id)
+        assert event.position_enu_m is not None and event.velocity_enu_mps is not None
+        np.testing.assert_allclose(
+            np.asarray((*event.position_enu_m, *event.velocity_enu_mps)),
+            expected,
+            rtol=0,
+            atol=1e-13,
+        )
+        np.testing.assert_allclose(
+            np.asarray(event.conditional_state_covariance), expected_covariance, rtol=0, atol=1e-13
+        )
+        naive_gain = prior[:, :3] @ np.linalg.inv(prior[:3, :3] + total)
+        self.assertGreater(float(np.linalg.norm(gain - naive_gain)), 0.01)
+
+    def test_aligned_measurement_never_initializes_an_unrelated_new_target(self) -> None:
+        evidence = m.MotionAlignmentEvidence(
+            prior_track_id=m.TrackId("missing-prior"),
+            velocity_enu_mps=(1.0, 0.0, 0.0),
+            velocity_projection_s=IDENTITY,
+            independent_position_covariance_enu_m2=ZERO,
+        )
+        self.assertFalse(self.update(replace(self.measurement(0), motion_alignment=evidence)))
+        self.assertFalse(self.tracker.predict("clock", SECOND))
+        (seed,) = self.update(self.measurement(SECOND))
+        self.assertEqual(seed.track_id, m.TrackId("track-1"))
+        self.assertIn("position_seed", seed.reason_codes)
+
+    def test_prediction_expiry_is_metadata_not_a_mutating_future_read(self) -> None:
+        self.update(self.measurement(0))
+        self.update(self.measurement(SECOND))
+        (future,) = self.tracker.predict("clock", 10 * SECOND)
+        self.assertEqual(future.valid_until_ns, 4 * SECOND)
+        (current,) = self.tracker.predict("clock", 2 * SECOND)
+        self.assertEqual(current.track_id, future.track_id)
+        self.assertLess(current.reference_time_ns, current.valid_until_ns)
 
     def test_coasting_recovery_deletion_and_new_session_local_id(self) -> None:
         (first,) = self.update(self.measurement(0, covariance=ZERO))

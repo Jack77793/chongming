@@ -19,6 +19,7 @@ from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.contracts import scene as s
 from chongming.contracts.development import (
+    CenterAlgorithmResult,
     CenterInputStep,
     CenterRegistration,
 )
@@ -193,6 +194,23 @@ class ReferenceFusionTests(unittest.TestCase):
             algorithm.process(self.steps()[0])
 
     def test_open_windows_prevent_wall_clock_ticks_from_advancing_tracks(self) -> None:
+        # Explicit HOLD policy: station timeout must not seal an open window.
+        policy = replace(
+            self.registration.policy,
+            windows=replace(
+                self.registration.policy.windows,
+                exclude_idle_stations=False,
+                exclude_offline_stations=False,
+                no_active_station_policy=f.EmptyActiveStationPolicy.HOLD,
+            ),
+        )
+        self.center, _ = declare_center(
+            center_session_id=m.SessionId(self.registration.center_session_id),
+            policy=policy,
+            clock_mapping=self.registration.clock_mapping,
+        )
+        self.adapter = FusionEngineAdapter(self.center.fusion)
+        self.adapter.start(replace(self.registration, policy=policy))
         steps = self.steps()
         first = self.adapter.process(steps[0])
         self.assertFalse(first.measurements)
@@ -579,6 +597,292 @@ class ReferenceFusionTests(unittest.TestCase):
         self.assertTrue(
             all(
                 position[0] * owners[track_id] > 0 for track_id, position in final_positions.items()
+            )
+        )
+
+    def test_asynchronous_station_joins_motion_fit_independently_of_delivery_order(self) -> None:
+        document = self.multi_document()
+        document["duration_s"] = 1.2
+        document["targets"] = document["targets"][:1]
+        spec = compile_authoring(document)
+        cameras = tuple(
+            replace(
+                camera,
+                metadata=replace(camera.metadata, nominal_frame_rate_hz=29.0),
+                exposure=replace(
+                    camera.exposure, first_exposure_start_ns=10_000_000, frame_period_ns=10**9 // 29
+                ),
+            )
+            if camera.station_id == "upper" and camera.camera_role is m.CameraRole.MAIN
+            else camera
+            for camera in spec.scene_definition.cameras
+        )
+        spec = replace(spec, scene_definition=replace(spec.scene_definition, cameras=cameras))
+        run = development_run(spec, Path("unused-asynchronous-source-output"))
+        registration = replace(
+            self.registration, stations=spec.station_configs, policy=run.fusion_policy
+        )
+        steps = self.steps(spec)
+        upper_windows = {
+            (
+                received.event.capture_time.exposure_start_ns
+                + received.event.capture_time.exposure_end_ns
+            )
+            // 2
+            // run.fusion_policy.windows.width_ns
+            for step in steps
+            for received in step.events
+            if isinstance(received.event, m.RayEvent)
+            and received.event.envelope.station_id == "upper"
+        }
+        signatures = []
+        for delay in (0, 25_000_000):
+            with self.subTest(transport_delay_ns=delay):
+                scheduled = [
+                    (
+                        step.time.time_ns
+                        + (
+                            delay
+                            if any(
+                                isinstance(received.event, m.RayEvent)
+                                and received.event.envelope.station_id == "upper"
+                                for received in step.events
+                            )
+                            else 0
+                        ),
+                        step,
+                    )
+                    for step in steps
+                    if not step.stream_ended
+                ]
+                scheduled.sort(key=lambda item: item[0])
+                scheduled.append((max(steps[-1].time.time_ns, scheduled[-1][0] + 1), steps[-1]))
+                algorithm = create_algorithm()
+                algorithm.start(registration)
+                results = []
+                try:
+                    for number, (arrival, step) in enumerate(scheduled):
+                        now = replace(step.time, time_ns=arrival)
+                        delivered = replace(
+                            step,
+                            step_no=number,
+                            time=now,
+                            events=tuple(
+                                replace(received, arrival_time=now) for received in step.events
+                            ),
+                            progress=tuple(
+                                replace(progress, received_at=now) for progress in step.progress
+                            ),
+                        )
+                        results.append(algorithm.process(delivered))
+                finally:
+                    algorithm.close()
+                measurements = [
+                    measurement for result in results for measurement in result.measurements
+                ]
+                self.assertEqual(len(measurements), 36)
+                self.assertTrue(
+                    all(
+                        measurement.status is m.FusionStatus.LOCATED for measurement in measurements
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        len(measurement.supporting_station_ids) == 2
+                        and measurement.motion_alignment is None
+                        for measurement in measurements[:2]
+                    )
+                )
+                self.assertEqual(
+                    [len(measurement.supporting_station_ids) for measurement in measurements],
+                    [3 if index >= 2 and index in upper_windows else 2 for index in range(36)],
+                )
+                self.assertEqual(
+                    [measurement.motion_alignment is not None for measurement in measurements],
+                    [index >= 2 and index in upper_windows for index in range(36)],
+                )
+                for measurement in measurements:
+                    np.testing.assert_allclose(
+                        np.asarray(measurement.position_enu_m),
+                        np.asarray((-15 + measurement.reference_time_ns / 1e9, 62, 20)),
+                        rtol=0,
+                        atol=1e-9,
+                    )
+                tracks = [track for result in results for track in result.tracks]
+                self.assertEqual(len({track.track_id for track in tracks}), 1)
+                for track in tracks:
+                    if track.lifecycle is m.TrackLifecycle.CONFIRMED:
+                        np.testing.assert_allclose(
+                            np.asarray(track.velocity_enu_mps),
+                            np.asarray((1.0, 0.0, 0.0)),
+                            rtol=0,
+                            atol=1e-8,
+                        )
+                signatures.append([asdict(measurement) for measurement in measurements])
+        self.assertEqual(signatures[0], signatures[1])
+
+    def test_station_silence_missing_detections_and_recovery_keep_one_track(self) -> None:
+        document = self.multi_document()
+        document["duration_s"] = 0.6
+        document["targets"] = document["targets"][:1]
+        spec = compile_authoring(document)
+        run = development_run(spec, Path("unused-station-recovery-output"))
+        width = run.fusion_policy.windows.width_ns
+        policy = replace(
+            run.fusion_policy,
+            windows=replace(
+                run.fusion_policy.windows, idle_after_ns=2 * width, offline_after_ns=4 * width
+            ),
+            tracking=replace(
+                run.fusion_policy.tracking, coast_after_ns=3 * width, delete_after_ns=8 * width
+            ),
+        )
+        algorithm = create_algorithm()
+        algorithm.start(replace(self.registration, stations=spec.station_configs, policy=policy))
+        results: list[CenterAlgorithmResult] = []
+        old: m.ReceivedEvent | None = None
+        late_result = None
+        snapshots = []
+        try:
+            for step in self.steps(spec):
+                if old is not None and late_result is None and step.time.time_ns >= 300_000_000:
+                    snapshots = [
+                        asdict(measurement)
+                        for result in results
+                        for measurement in result.measurements
+                    ]
+                    now = replace(step.time, time_ns=step.time.time_ns - 1)
+                    late_result = algorithm.process(
+                        CenterInputStep(
+                            step_no=step.step_no,
+                            time=now,
+                            solutions=(),
+                            events=(replace(old, arrival_time=now),),
+                            progress=(),
+                            stream_ended=False,
+                        )
+                    )
+                    self.assertFalse(late_result.measurements)
+                    self.assertTrue(
+                        any(
+                            receipt.disposition is f.WindowDisposition.LATE_AFTER_SEAL
+                            for batch in late_result.batches
+                            for receipt in batch.window_update.receipts
+                        )
+                    )
+                    self.assertTrue(
+                        any(
+                            progress.health is f.StationStreamHealth.RECOVERING
+                            for batch in late_result.batches
+                            for progress in batch.window_update.watermark.station_progress
+                        )
+                    )
+                    self.assertEqual(
+                        snapshots,
+                        [
+                            asdict(measurement)
+                            for result in results
+                            for measurement in result.measurements
+                        ],
+                    )
+                silence = 100_000_000 <= step.time.time_ns < 300_000_000
+                missing = 100_000_000 <= step.time.time_ns < 200_000_000
+                if silence and old is None:
+                    old = next(
+                        (
+                            received
+                            for received in step.events
+                            if isinstance(received.event, m.RayEvent)
+                            and received.event.envelope.station_id == "east"
+                        ),
+                        None,
+                    )
+                delivered = replace(
+                    step,
+                    events=tuple(
+                        received
+                        for received in step.events
+                        if not (silence and received.event.envelope.station_id == "east")
+                        and not (
+                            missing
+                            and isinstance(received.event, m.RayEvent)
+                            and received.event.envelope.station_id == "upper"
+                        )
+                    ),
+                    progress=tuple(
+                        progress
+                        for progress in step.progress
+                        if not (silence and progress.station_id == "east")
+                    ),
+                )
+                results.append(algorithm.process(delivered))
+        finally:
+            algorithm.close()
+        self.assertIsNotNone(late_result)
+        tracks = [track for result in results for track in result.tracks]
+        self.assertEqual(len({track.track_id for track in tracks}), 1)
+        self.assertTrue(any(track.lifecycle is m.TrackLifecycle.COASTING for track in tracks))
+        self.assertTrue(any("track_recovered" in track.reason_codes for track in tracks))
+        self.assertFalse(any(track.lifecycle is m.TrackLifecycle.DELETED for track in tracks))
+        self.assertTrue(
+            any(
+                len(measurement.supporting_station_ids) == 2
+                for result in results
+                for measurement in result.measurements
+            )
+        )
+        self.assertEqual(
+            len(
+                [measurement for result in results for measurement in result.measurements][
+                    -1
+                ].supporting_station_ids
+            ),
+            3,
+        )
+        self.assertTrue(
+            any(
+                progress.health is f.StationStreamHealth.OFFLINE
+                for result in results
+                for batch in result.batches
+                for progress in batch.window_update.watermark.station_progress
+            )
+        )
+
+    def test_all_station_silence_expires_tracks_through_sealed_mapped_clock_windows(self) -> None:
+        steps = self.steps()
+        for step in steps[:3]:
+            self.adapter.process(step)
+        # Consume the buffered third exposure via a genuinely completed empty
+        # fourth batch before silence; do not discard already buffered rays.
+        self.adapter.process(replace(steps[3], events=(), solutions=()))
+        now = replace(steps[0].time, time_ns=4 * 10**9)
+        result = self.center.fusion.tick(now)
+        self.assertTrue(result.window_update.sealed_windows)
+        self.assertTrue(
+            all(
+                not window.rays and window.support_exposure_span_ns == 0
+                for window in result.window_update.sealed_windows
+            )
+        )
+        self.assertFalse(result.measurements)
+        self.assertTrue(
+            any(track.lifecycle is m.TrackLifecycle.COASTING for track in result.tracks)
+        )
+        self.assertEqual(
+            sum(track.lifecycle is m.TrackLifecycle.DELETED for track in result.tracks), 1
+        )
+        self.assertFalse(self.center.tracking.predict(now.clock_domain_id, now.time_ns))
+        old = next(
+            received for received in steps[3].events if isinstance(received.event, m.RayEvent)
+        )
+        late = self.center.fusion.process(
+            replace(old, arrival_time=replace(now, time_ns=now.time_ns + 1))
+        )
+        self.assertFalse(late.measurements)
+        self.assertTrue(
+            any(
+                receipt.disposition is f.WindowDisposition.LATE_AFTER_SEAL
+                for receipt in late.window_update.receipts
             )
         )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from chongming.contracts import fusion as f
 from chongming.contracts import model as m
@@ -92,7 +92,23 @@ class CenterFusionModule(ModuleShell):
             predictions = self.tracker.predict(clock, window.reference_time_ns)
             candidate_batch = self.candidates.generate(window, predictions)
             association_batch = self.association.associate(window, candidate_batch, predictions)
-            geometry_batch = self.geometry.refine(window, association_batch, predictions)
+            # Motion priors are queried at each group's actual support epoch,
+            # not at a nominal center later than all of its observations.
+            results: list[f.GeometryResult] = []
+            for group in association_batch.selected_groups:
+                group_predictions = self.tracker.predict(clock, group.reference_time_ns)
+                results.extend(
+                    self.geometry.refine(
+                        window,
+                        replace(association_batch, selected_groups=(group,)),
+                        group_predictions,
+                    ).results
+                )
+            geometry_batch = (
+                f.GeometryBatch(window=window.key, results=tuple(results))
+                if association_batch.selected_groups
+                else self.geometry.refine(window, association_batch, predictions)
+            )
             current = tuple(result.measurement for result in geometry_batch.results)
             located = [
                 measurement
