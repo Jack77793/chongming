@@ -32,6 +32,7 @@ from chongming.contracts.scene import (
     WorldObjectId,
 )
 from chongming.scenarios.assets import read_verified_json, resolve_external_asset
+from chongming.scenarios.uncertainty import covariance_factor
 
 FORMAT_VERSION = "scenario-json-v1"
 
@@ -464,6 +465,12 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         if getattr(reference, "image", None) is not None:
             raise ValueError("inline reference image is unsupported; use a surveyed reference")
     observations = spec.virtual_observations
+    covariance_factor(
+        observations.independent_angular_covariance_rad2, 2, "independent_angular_covariance_rad2"
+    )
+    covariance_factor(
+        observations.independent_origin_covariance_m2, 3, "independent_origin_covariance_m2"
+    )
     if (
         not 0 <= observations.detection_probability <= 1
         or observations.false_alarms_per_camera_hour < 0
@@ -471,6 +478,9 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         raise ValueError("invalid observation probability or false alarm rate")
     intervals: dict[Any, list[tuple[int, int]]] = {}
     for interval in observations.calibration_intervals:
+        covariance_factor(
+            interval.correction_covariance_rad2, 3, "calibration correction_covariance_rad2"
+        )
         if interval.station_id not in station_ids or interval.end_time_ns <= interval.start_time_ns:
             raise ValueError("invalid calibration interval")
         intervals.setdefault(interval.station_id, []).append(
