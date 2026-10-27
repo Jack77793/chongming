@@ -7,11 +7,12 @@ reconstructs ScenarioStep objects at high frame rates without rendering.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-
-from PIL import Image
 
 from chongming.contracts.model import (
     CameraFrame,
@@ -44,12 +45,20 @@ class RecordingReader:
         if not directory.is_dir():
             raise ValueError(f"recording directory does not exist: {directory}")
         self.directory = directory
+        self._decoders: dict[str, _VideoDecoder] = {}
         self._validate_structure()
         self._load_manifest()
+        self._load_video_manifest()
 
     def _validate_structure(self) -> None:
         """Ensure all required files exist."""
-        required = ["online.jsonl", "truth.jsonl", "truth-static.json", "timing.jsonl"]
+        required = [
+            "online.jsonl",
+            "truth.jsonl",
+            "truth-static.json",
+            "timing.jsonl",
+            "video.json",
+        ]
         for name in required:
             path = self.directory / name
             if not path.exists():
@@ -57,6 +66,35 @@ class RecordingReader:
         video_dir = self.directory / "video"
         if not video_dir.is_dir():
             raise ValueError("recording missing video directory")
+
+    def _load_video_manifest(self) -> None:
+        with (self.directory / "video.json").open("r", encoding="utf-8") as handle:
+            document = json.load(handle)
+        if document.get("format") != "video-h264-v1":
+            raise ValueError(f"unsupported video format: {document.get('format')!r}")
+        streams = document.get("streams")
+        if not isinstance(streams, dict) or not streams:
+            raise ValueError("video manifest must contain at least one stream")
+        self.video_streams: dict[str, dict[str, Any]] = {}
+        for stream, metadata in streams.items():
+            if not isinstance(metadata, dict):
+                raise TypeError(f"video metadata for {stream} must be an object")
+            relative = metadata.get("path")
+            width = metadata.get("width_px")
+            height = metadata.get("height_px")
+            if not isinstance(relative, str) or Path(relative).is_absolute():
+                raise ValueError(f"video path for {stream} must be relative")
+            if (
+                not isinstance(width, int)
+                or width <= 0
+                or not isinstance(height, int)
+                or height <= 0
+            ):
+                raise ValueError(f"invalid video dimensions for {stream}")
+            path = (self.directory / relative).resolve()
+            if self.directory.resolve() not in path.parents or not path.is_file():
+                raise ValueError(f"video file not found for {stream}: {relative}")
+            self.video_streams[stream] = {**metadata, "path": relative}
 
     def _load_manifest(self) -> None:
         """Load manifest if present, otherwise infer metadata from evidence."""
@@ -107,23 +145,104 @@ class RecordingReader:
                 timing = json.loads(timing_line)
                 yield online, truth, timing
 
-    def read_frame_image(self, relative_path: str) -> ImagePlane:
-        """Load a frame image from the recording."""
-        path = self.directory / relative_path
-        if not path.exists():
-            raise ValueError(f"frame image not found: {relative_path}")
-        image = Image.open(path)
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        width, height = image.size
-        pixels = image.tobytes()
+    def read_frame_image(
+        self, relative_path: str, *, frame_index: int, width: int, height: int
+    ) -> ImagePlane:
+        """Decode one sequential frame from its camera's H.264 stream."""
+        stream = next(
+            (
+                name
+                for name, metadata in self.video_streams.items()
+                if metadata["path"] == relative_path
+            ),
+            None,
+        )
+        if stream is None:
+            raise ValueError(f"frame references unknown video path: {relative_path}")
+        metadata = self.video_streams[stream]
+        if (metadata["width_px"], metadata["height_px"]) != (width, height):
+            raise ValueError(f"frame dimensions do not match video manifest for {stream}")
+        decoder = self._decoders.get(stream)
+        if decoder is None:
+            decoder = _VideoDecoder(
+                self.directory / relative_path,
+                width=width,
+                height=height,
+            )
+            self._decoders[stream] = decoder
+        pixels = decoder.read(frame_index)
         return ImagePlane(
-            width_px=width,
-            height_px=height,
+            width_px=metadata["width_px"],
+            height_px=metadata["height_px"],
             row_stride_bytes=width * 3,
-            pixel_format=PixelFormat.RGB8,
+            pixel_format=PixelFormat(metadata.get("pixel_format", PixelFormat.RGB8)),
             pixels=pixels,
         )
+
+    def close(self) -> None:
+        for decoder in self._decoders.values():
+            decoder.close()
+        self._decoders.clear()
+
+
+def _ffmpeg_executable() -> str:
+    configured = os.environ.get("CHONGMING_FFMPEG")
+    if configured:
+        return configured
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    raise RuntimeError(
+        "FFmpeg executable not found; set CHONGMING_FFMPEG or enter the Nix environment"
+    )
+
+
+class _VideoDecoder:
+    """Sequential RGB24 decoder for one recording stream."""
+
+    def __init__(self, path: Path, *, width: int, height: int) -> None:
+        self._frame_bytes = width * height * 3
+        self._next_frame = 0
+        self._process = subprocess.Popen(
+            [
+                _ffmpeg_executable(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def read(self, frame_index: int) -> bytes:
+        if frame_index < self._next_frame:
+            raise ValueError("video frame indexes must be monotonic within a stream")
+        assert self._process.stdout is not None
+        while self._next_frame <= frame_index:
+            pixels = self._process.stdout.read(self._frame_bytes)
+            if len(pixels) != self._frame_bytes:
+                stderr = self._process.stderr.read() if self._process.stderr is not None else b""
+                detail = stderr.decode("utf-8", errors="replace").strip()
+                raise ValueError(f"video ended before frame {frame_index}: {detail}")
+            self._next_frame += 1
+        return pixels
+
+    def close(self) -> None:
+        if self._process.stdout is not None:
+            self._process.stdout.close()
+        if self._process.stderr is not None:
+            self._process.stderr.close()
+        if self._process.poll() is None:
+            self._process.terminate()
+        self._process.wait()
 
 
 class RecordedScenarioSource:
@@ -162,114 +281,110 @@ class RecordedScenarioSource:
         """
         import time
 
+        from chongming.scenarios.serialization import _decode
+
         self._last_step_time = None
+        self.reader.close()
         static_world_objects = self._static_truth.get("world_objects")
         static_digest = self._static_truth.get("world_objects_sha256")
 
-        for online, truth, timing in self.reader.iter_steps():
-            # Reconstruct video output
-            frames = []
-            for frame_record in online.get("frames", []):
-                image = self.reader.read_frame_image(frame_record["path"])
-
-                # Filter out $type field from capture_time
-                capture_time_data = {
-                    k: v for k, v in frame_record["capture_time"].items()
-                    if k != "$type"
-                }
-
-                frames.append(
-                    CameraFrame(
-                        station_id=StationId(frame_record["station_id"]),
-                        station_session_id=SessionId(frame_record["session_id"]),
-                        camera_role=CameraRole(frame_record["camera_role"]),
-                        frame_id=FrameId(frame_record["frame_id"]),
-                        capture_time=CaptureTime(**capture_time_data),
-                        camera_config_ref=ConfigDigest(frame_record["camera_config_ref"]),
-                        image=image,
+        try:
+            for online, truth, timing in self.reader.iter_steps():
+                frames = []
+                for frame_record in online.get("frames", []):
+                    image = self.reader.read_frame_image(
+                        frame_record["path"],
+                        frame_index=frame_record["frame_index"],
+                        width=frame_record["width_px"],
+                        height=frame_record["height_px"],
                     )
+                    capture_time_data = {
+                        key: value
+                        for key, value in frame_record["capture_time"].items()
+                        if key != "$type"
+                    }
+                    frames.append(
+                        CameraFrame(
+                            station_id=StationId(frame_record["station_id"]),
+                            station_session_id=SessionId(frame_record["session_id"]),
+                            camera_role=CameraRole(frame_record["camera_role"]),
+                            frame_id=FrameId(frame_record["frame_id"]),
+                            capture_time=CaptureTime(**capture_time_data),
+                            camera_config_ref=ConfigDigest(frame_record["camera_config_ref"]),
+                            image=image,
+                        )
+                    )
+
+                sample_time_data = online["sample_time"]
+                sample_time = SimulationTime(
+                    clock_domain_id=sample_time_data["clock_domain_id"],
+                    time_ns=sample_time_data["time_ns"],
+                    step_no=sample_time_data["step_no"],
+                )
+                video = ScenarioVideoOutput(
+                    scenario_id=online.get("scenario_id", self.spec.scenario_id),
+                    sample_time=sample_time,
+                    frames=tuple(frames),
+                    rendered=online.get("rendered", True),
+                    render_skip_reason=online.get("render_skip_reason"),
+                    skipped_frame_ids=tuple(
+                        FrameId(fid) for fid in online.get("skipped_frame_ids", [])
+                    ),
+                )
+                packets = ScenarioPacketOutput(
+                    scenario_id=self.spec.scenario_id,
+                    sample_time=sample_time,
+                    calibration_states=(),
+                    calibration_solutions=(),
+                    calibration_events=(),
+                    rays=(),
+                    diagnostics=(),
                 )
 
-            sample_time_data = online["sample_time"]
-            sample_time = SimulationTime(
-                clock_domain_id=sample_time_data["clock_domain_id"],
-                time_ns=sample_time_data["time_ns"],
-                step_no=sample_time_data["step_no"],
-            )
+                logical_scene_data = truth["logical_scene"]
+                if static_digest != truth.get("logical_scene_static_ref"):
+                    raise ValueError("truth record static reference mismatch")
+                logical_scene_data["world_objects"] = static_world_objects
+                logical_scene = (
+                    _decode(logical_scene_data, LogicalSceneSnapshot)
+                    if logical_scene_data.get("$type") == "LogicalSceneSnapshot"
+                    else logical_scene_data
+                )
+                camera_frames = tuple(
+                    _decode(frame, CameraFrameTruth) for frame in truth.get("camera_frames", [])
+                )
+                truth_output = ScenarioTruthOutput(
+                    scenario_id=self.spec.scenario_id,
+                    sample_time=sample_time,
+                    logical_scene=logical_scene,
+                    camera_frames=camera_frames,
+                    online_correspondences=(),
+                    experiment_perturbations=truth["experiment_perturbations"],  # type: ignore[arg-type]
+                    timing=(
+                        ScenarioStepTiming(
+                            **{
+                                key: value
+                                for key, value in timing["stages"].items()
+                                if key != "$type"
+                            }
+                        )
+                        if isinstance(timing.get("stages"), dict)
+                        else None
+                    ),
+                )
 
-            video = ScenarioVideoOutput(
-                scenario_id=online.get("scenario_id", self.spec.scenario_id),
-                sample_time=sample_time,
-                frames=tuple(frames),
-                rendered=online.get("rendered", True),
-                render_skip_reason=online.get("render_skip_reason"),
-                skipped_frame_ids=tuple(FrameId(fid) for fid in online.get("skipped_frame_ids", [])),
-            )
+                if self.playback_fps is not None:
+                    current_time = time.perf_counter()
+                    if self._last_step_time is not None:
+                        target_interval = 1.0 / self.playback_fps
+                        sleep_time = target_interval - (current_time - self._last_step_time)
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+                    self._last_step_time = time.perf_counter()
 
-            # Reconstruct packet output (simplified - only what's needed for preview)
-            packets = ScenarioPacketOutput(
-                scenario_id=self.spec.scenario_id,
-                sample_time=sample_time,
-                calibration_states=(),
-                calibration_solutions=(),
-                calibration_events=(),
-                rays=(),
-                diagnostics=(),
-            )
-
-            # Reconstruct truth output by merging static world_objects back
-            logical_scene_data = truth["logical_scene"]
-            if static_digest != truth.get("logical_scene_static_ref"):
-                raise ValueError("truth record static reference mismatch")
-            # Restore world_objects into logical_scene
-            logical_scene_data["world_objects"] = static_world_objects
-
-            # Restore the per-camera truth needed by preview overlays and
-            # downstream evaluators. The logical scene remains a JSON mapping
-            # because playback does not need to rehydrate every scene subtype.
-            from chongming.scenarios.serialization import _decode
-
-            logical_scene = (
-                _decode(logical_scene_data, LogicalSceneSnapshot)
-                if logical_scene_data.get("$type") == "LogicalSceneSnapshot"
-                else logical_scene_data
-            )
-            camera_frames = tuple(
-                _decode(frame, CameraFrameTruth)
-                for frame in truth.get("camera_frames", [])
-            )
-            truth_output = ScenarioTruthOutput(
-                scenario_id=self.spec.scenario_id,
-                sample_time=sample_time,
-                logical_scene=logical_scene,
-                camera_frames=camera_frames,
-                online_correspondences=(),
-                experiment_perturbations=truth["experiment_perturbations"],  # type: ignore[arg-type]
-                timing=(
-                    ScenarioStepTiming(
-                        **{
-                            key: value
-                            for key, value in timing["stages"].items()
-                            if key != "$type"
-                        }
-                    )
-                    if isinstance(timing.get("stages"), dict)
-                    else None
-                ),
-            )
-
-            # Frame rate control: add delay to match target playback fps
-            if self.playback_fps is not None:
-                current_time = time.perf_counter()
-                if self._last_step_time is not None:
-                    target_interval = 1.0 / self.playback_fps
-                    elapsed = current_time - self._last_step_time
-                    sleep_time = target_interval - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                self._last_step_time = time.perf_counter()
-
-            yield ScenarioStep(video=video, packets=packets, truth=truth_output)
+                yield ScenarioStep(video=video, packets=packets, truth=truth_output)
+        finally:
+            self.reader.close()
 
 
 def load_recording_source(
