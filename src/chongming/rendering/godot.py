@@ -31,6 +31,7 @@ from numpy.typing import NDArray
 from chongming.contracts.scene import (
     BoxGeometry,
     CameraStateTruth,
+    ExternalAssetGeometry,
     GeometrySpec,
     GrassVisualSpec,
     KinematicState,
@@ -107,6 +108,8 @@ def _entity(
             [float(value) for value in vertex] for vertex in geometry.vertices_body_m
         ]
         payload["triangles"] = [list(triangle) for triangle in geometry.triangle_vertex_indices]
+    elif isinstance(geometry, ExternalAssetGeometry):
+        payload["asset_model"] = geometry.asset_identifier
     else:  # pragma: no cover - GeometrySpec is a closed union
         raise TypeError(f"unsupported geometry: {type(geometry).__name__}")
     return payload
@@ -279,9 +282,16 @@ def _vegetation_visual(item: Any, effects: Any) -> dict[str, Any] | None:
 
 
 def _geometry_type(geometry: GeometrySpec) -> int:
-    return (
-        0 if isinstance(geometry, SphereGeometry) else 1 if isinstance(geometry, BoxGeometry) else 2
-    )
+    if isinstance(geometry, SphereGeometry):
+        return 0
+    elif isinstance(geometry, BoxGeometry):
+        return 1
+    elif isinstance(geometry, TriangleMeshGeometry):
+        return 2
+    elif isinstance(geometry, ExternalAssetGeometry):
+        return 3
+    else:  # pragma: no cover
+        raise TypeError(f"unsupported geometry: {type(geometry).__name__}")
 
 
 def _request(

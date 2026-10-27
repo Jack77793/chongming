@@ -178,7 +178,14 @@ class TriangleMeshGeometry:
     triangle_vertex_indices: tuple[tuple[int, int, int], ...]
 
 
-GeometrySpec = SphereGeometry | BoxGeometry | CylinderGeometry | TriangleMeshGeometry
+@dataclass(frozen=True)
+class ExternalAssetGeometry:
+    """Reference to an external 3D model asset (e.g., .glb file)."""
+
+    asset_identifier: str
+
+
+GeometrySpec = SphereGeometry | BoxGeometry | CylinderGeometry | TriangleMeshGeometry | ExternalAssetGeometry
 
 
 class TreePart(StrEnum):
