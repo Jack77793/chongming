@@ -25,20 +25,22 @@ from chongming.modules.device import (
     Tracking2DModule,
 )
 from chongming.modules.fusion import (
-    AdmissionJournalModule,
-    CalibrationRegistryModule,
     CalibrationWeightingModule,
     CandidateGenerationModule,
     CenterFusionModule,
     CenterTrackingModule,
     CrossStationAssociationModule,
     DirectGeometryCandidateModule,
+    GeometryRefinementModule,
+    VoxelCandidateModule,
+)
+from chongming.modules.fusion_ingress import (
+    AdmissionJournalModule,
+    CalibrationRegistryModule,
     EventAdmissionModule,
     EventClockMappingModule,
     EventWindowModule,
-    GeometryRefinementModule,
     StationRegistryModule,
-    VoxelCandidateModule,
 )
 from chongming.modules.runtime import (
     EventTransportModule,
@@ -289,13 +291,14 @@ def declare_assembly(spec: ScenarioSpec, run: RunSpec) -> ArchitectureAssembly:
     stations = StationRegistryModule()
     calibrations = CalibrationRegistryModule(stations=stations)
     journal = AdmissionJournalModule()
+    clock_mapping = EventClockMappingModule(mapping=run.processing_to_capture_clock)
     admission = EventAdmissionModule(
         policy=fusion_policy.admission,
         stations=stations,
         calibrations=calibrations,
         journal=journal,
+        clock=clock_mapping,
     )
-    clock_mapping = EventClockMappingModule(mapping=run.processing_to_capture_clock)
     windows = EventWindowModule(
         center_session_id=run.center_session_id,
         policy=fusion_policy.windows,
@@ -352,10 +355,12 @@ def declare_assembly(spec: ScenarioSpec, run: RunSpec) -> ArchitectureAssembly:
     bind("center/stations", stations)
     bind("center/calibrations", calibrations, ("center/stations",))
     bind("center/journal", journal)
-    bind(
-        "center/admission", admission, ("center/stations", "center/calibrations", "center/journal")
-    )
     bind("center/clock-mapping", clock_mapping)
+    bind(
+        "center/admission",
+        admission,
+        ("center/stations", "center/calibrations", "center/journal", "center/clock-mapping"),
+    )
     bind("center/windows", windows, ("center/clock-mapping", "center/stations"))
     bind("center/voxels", voxels)
     bind("center/direct-candidates", direct)

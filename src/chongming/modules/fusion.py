@@ -1,4 +1,4 @@
-"""Constructor-wired center shells; every business operation is stage-3 work.
+"""Constructor-wired localization and tracking stages, pending implementation.
 
 Both candidate strategies and all pipeline stages are constructed at startup.
 Configuration selects how a stage processes evidence, not whether it exists.
@@ -9,18 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from chongming.contracts.fusion import (
-    AdmissionOutcome,
-    AdmissionPolicy,
-    AdmissionRecord,
     AdmittedRay,
     AssociationBatch,
     AssociationPolicy,
     CalibrationUsageRule,
     CandidateBatch,
     CandidatePolicy,
-    EventClockMappingSpec,
     EventClockReading,
-    EventWindowPolicy,
     FusionBatchResult,
     FusionPolicy,
     GeometryBatch,
@@ -31,29 +26,20 @@ from chongming.contracts.fusion import (
     StationEventTimeProgress,
     TrackingPolicy,
     TrackPrediction,
-    WindowUpdate,
 )
 from chongming.contracts.model import (
     CalibrationSolution,
-    CalibrationSolutionRef,
-    CalibrationState,
-    CalibrationStateEvent,
-    ConfigDigest,
-    EventId,
     FusionMeasurement,
     ProcessingTime,
     ReceivedEvent,
     SessionId,
     StationConfig,
-    StationEvent,
-    StationId,
     TrackEvent,
     VoxelSearchSpec,
     WorldFrameId,
 )
 from chongming.modules.base import ModuleShell
 from chongming.ports.fusion import (
-    AdmissionJournal,
     CalibrationRegistry,
     CandidateGenerator,
     CenterTracker,
@@ -68,88 +54,6 @@ from chongming.ports.fusion import (
 )
 
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
-
-
-@dataclass(frozen=True, kw_only=True)
-class StationRegistryModule(ModuleShell):
-    def register(self, config: StationConfig) -> RegistryWriteResult:
-        raise NotImplementedError(_TODO)
-
-    def lookup(self, station_id: StationId, digest: ConfigDigest) -> StationConfig | None:
-        raise NotImplementedError(_TODO)
-
-    def registered_stations(self) -> tuple[StationId, ...]:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class CalibrationRegistryModule(ModuleShell):
-    stations: StationRegistry
-
-    def register_solution(self, solution: CalibrationSolution) -> RegistryWriteResult:
-        raise NotImplementedError(_TODO)
-
-    def lookup_solution(self, ref: CalibrationSolutionRef) -> CalibrationSolution | None:
-        raise NotImplementedError(_TODO)
-
-    def record_state(self, event: CalibrationStateEvent) -> RegistryWriteResult:
-        raise NotImplementedError(_TODO)
-
-    def state_history(
-        self, station_id: StationId, station_session_id: SessionId
-    ) -> tuple[CalibrationState, ...]:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class AdmissionJournalModule(ModuleShell):
-    def first_event(self, event_id: EventId) -> StationEvent | None:
-        raise NotImplementedError(_TODO)
-
-    def record(self, record: AdmissionRecord) -> None:
-        raise NotImplementedError(_TODO)
-
-    def quarantined(self) -> tuple[AdmissionRecord, ...]:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class EventAdmissionModule(ModuleShell):
-    policy: AdmissionPolicy
-    stations: StationRegistry
-    calibrations: CalibrationRegistry
-    journal: AdmissionJournal
-
-    def admit(self, received: ReceivedEvent) -> AdmissionOutcome:
-        raise NotImplementedError(_TODO)
-
-    def reconsider_quarantined(self, now: ProcessingTime) -> tuple[AdmissionOutcome, ...]:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class EventClockMappingModule(ModuleShell):
-    mapping: EventClockMappingSpec
-
-    def map_processing_time(self, now: ProcessingTime) -> EventClockReading:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class EventWindowModule(ModuleShell):
-    center_session_id: SessionId
-    policy: EventWindowPolicy
-    clock: EventClockMapping
-    stations: StationRegistry
-
-    def offer(self, outcome: AdmissionOutcome) -> WindowUpdate:
-        raise NotImplementedError(_TODO)
-
-    def report_progress(self, progress: StationEventTimeProgress) -> WindowUpdate:
-        raise NotImplementedError(_TODO)
-
-    def advance(self, now: ProcessingTime) -> WindowUpdate:
-        raise NotImplementedError(_TODO)
 
 
 @dataclass(frozen=True, kw_only=True)

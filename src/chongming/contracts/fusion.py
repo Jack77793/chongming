@@ -59,6 +59,8 @@ class AdmissionReason(StrEnum):
     CALIBRATION_SOLUTION_UNKNOWN = "calibration_solution_unknown"
     CALIBRATION_SOLUTION_SCOPE_MISMATCH = "calibration_solution_scope_mismatch"
     CALIBRATION_CONFIGURATION_MISMATCH = "calibration_configuration_mismatch"
+    CALIBRATION_EVIDENCE_MISMATCH = "calibration_evidence_mismatch"
+    CALIBRATION_STATE_CONFLICT = "calibration_state_conflict"
     CALIBRATION_EXPOSURE_OUTSIDE_VALIDITY = "calibration_exposure_outside_validity"
     CALIBRATION_USAGE_QUARANTINED = "calibration_usage_quarantined"
     CALIBRATION_USAGE_REJECTED = "calibration_usage_rejected"

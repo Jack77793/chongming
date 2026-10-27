@@ -269,17 +269,6 @@ class ArchitectureStructureTests(unittest.TestCase):
                 "DeviceModule": {"process_main", "process_auxiliary", "tick"},
             },
             "fusion.py": {
-                "StationRegistryModule": {"register", "lookup", "registered_stations"},
-                "CalibrationRegistryModule": {
-                    "register_solution",
-                    "lookup_solution",
-                    "record_state",
-                    "state_history",
-                },
-                "AdmissionJournalModule": {"first_event", "record", "quarantined"},
-                "EventAdmissionModule": {"admit", "reconsider_quarantined"},
-                "EventClockMappingModule": {"map_processing_time"},
-                "EventWindowModule": {"offer", "report_progress", "advance"},
                 "VoxelCandidateModule": {"propose"},
                 "DirectGeometryCandidateModule": {"propose"},
                 "CandidateGenerationModule": {"generate"},
