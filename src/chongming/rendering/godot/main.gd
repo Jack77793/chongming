@@ -10,7 +10,7 @@
 ##   godot --headless --script main.gd -- --scenario path.json --output ./results/ --mode finite
 ##   godot --headless --script main.gd -- --scenario path.json --mode check
 
-extends Node
+extends SceneTree
 
 const SceneController = preload("res://scene_controller.gd")
 
@@ -33,21 +33,18 @@ var worker: Node = null
 var viewport: SubViewport = null
 
 
-func _ready() -> void:
-	# Disable default rendering loop
-	get_tree().auto_accept_quit = false
-
+func _init() -> void:
 	if not _parse_args():
 		print_rich("[color=red]Error:[/color] Invalid command-line arguments")
 		print_usage()
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	# Validate required arguments
 	if args.scenario.is_empty():
 		print_rich("[color=red]Error:[/color] --scenario is required")
 		print_usage()
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	# Load scenario
@@ -55,23 +52,21 @@ func _ready() -> void:
 	var load_error: Error = controller.load_scenario(args.scenario)
 	if load_error != OK:
 		print_rich("[color=red]Error:[/color] Failed to load scenario: %s" % controller.get_error())
-		get_tree().quit(1)
+		quit(1)
 		return
 
-	# Initialize rendering if needed for finite mode
-	if args.mode == "finite" and not args.no_video:
-		_setup_rendering()
+
 
 	# Execute requested mode
 	match args.mode:
 		"check":
 			_mode_check()
 		"finite":
-			await _mode_finite()
+			_mode_finite()
 		_:
 			print_rich("[color=red]Error:[/color] Unknown mode: %s" % args.mode)
 			print_usage()
-			get_tree().quit(1)
+			quit(1)
 
 
 func _parse_args() -> bool:
@@ -145,50 +140,53 @@ func _mode_check() -> void:
 	print("  FPS: %.1f" % (1.0 / controller.frame_period_s))
 	print("  Total steps: %d" % controller.get_total_steps())
 
-	get_tree().quit(0)
+	quit(0)
 
 
 ## Mode: finite - run complete scenario
 func _mode_finite() -> void:
 	if args.output.is_empty():
 		print_rich("[color=red]Error:[/color] --output is required for finite mode")
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	# Create output directory
 	var dir := DirAccess.open(".")
 	if dir == null:
 		print_rich("[color=red]Error:[/color] Failed to access filesystem")
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	if dir.dir_exists(args.output):
 		print_rich("[color=red]Error:[/color] Output directory already exists: %s" % args.output)
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	var mk_error := dir.make_dir_recursive(args.output)
 	if mk_error != OK:
 		print_rich("[color=red]Error:[/color] Failed to create output directory: %s" % args.output)
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	print("Running scenario: %s" % controller.scenario.get("scenario_id", "unknown"))
 	print("Output directory: %s" % args.output)
 	print("Total steps: %d" % controller.get_total_steps())
+	if not args.no_video:
+		print("[color=yellow]Warning:[/color] Video rendering not implemented in phase 1. Use --no-video.")
+		args.no_video = true
 
 	# Open output files
 	var truth_file := FileAccess.open(args.output.path_join("truth.jsonl"), FileAccess.WRITE)
 	if truth_file == null:
 		print_rich("[color=red]Error:[/color] Failed to create truth.jsonl")
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	var timing_file := FileAccess.open(args.output.path_join("timing.jsonl"), FileAccess.WRITE)
 	if timing_file == null:
 		truth_file.close()
 		print_rich("[color=red]Error:[/color] Failed to create timing.jsonl")
-		get_tree().quit(1)
+		quit(1)
 		return
 
 	# Run simulation
@@ -200,14 +198,8 @@ func _mode_finite() -> void:
 		var step_start := Time.get_ticks_usec()
 		var snapshot: Dictionary = controller.step()
 
-		# Render frame if video is enabled and render interval matches
-		var should_render := not args.no_video and (step_count % args.render_every == 0)
+		# Video rendering will be added in Phase 2
 		var frame_path := ""
-
-		if should_render:
-			frame_path = await _render_frame(snapshot, step_count)
-			if not frame_path.is_empty():
-				frame_files.append(frame_path)
 
 		var step_end := Time.get_ticks_usec()
 
@@ -263,7 +255,7 @@ func _mode_finite() -> void:
 	print_rich("[color=green]✓[/color] Completed %d steps in %.3f seconds" % [step_count, total_time / 1e6])
 	print("Results written to: %s" % args.output)
 
-	get_tree().quit(0)
+	quit(0)
 
 
 ## Setup rendering infrastructure

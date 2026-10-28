@@ -51,7 +51,7 @@ func load_scenario(json_path: String) -> Error:
 		return FAILED
 
 	# Validate format
-	var format_version: String = data.get("format", "")
+	var format_version := str(data.get("format", ""))
 	if format_version != "scenario-authoring-v2":
 		_error_message = "Unsupported scenario format: %s (expected scenario-authoring-v2)" % format_version
 		return FAILED
@@ -60,7 +60,7 @@ func load_scenario(json_path: String) -> Error:
 	scenario = data
 	random_seed = int(data.get("random_seed", 42))
 	duration_s = float(data.get("duration_s", 10.0))
-	var fps := float(data.get("fps", 30.0))
+	var fps: float = float(data.get("fps", 30.0))
 	if fps <= 0.0:
 		_error_message = "FPS must be positive"
 		return FAILED
