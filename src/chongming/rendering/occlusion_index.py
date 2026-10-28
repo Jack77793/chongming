@@ -12,6 +12,7 @@ from chongming.contracts.scene import (
     SphereGeometry,
     TriangleMeshGeometry,
 )
+from chongming.rendering.geometry import resolve_geometry
 
 Bounds = tuple[Vec3M, Vec3M]
 
@@ -38,6 +39,8 @@ def entity_bounds(entity: object) -> Bounds | None:
     geometry = getattr(entity, "geometry", None)
     if pose is None:
         return None
+    if geometry is not None:
+        geometry = resolve_geometry(geometry)
     if isinstance(geometry, SphereGeometry):
         minimum: Vec3M = (geometry.radius_m * -1.0,) * 3
         maximum: Vec3M = (geometry.radius_m,) * 3

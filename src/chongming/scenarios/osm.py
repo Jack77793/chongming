@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, replace
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -651,12 +652,16 @@ def building_objects(imported: s.OSMImport) -> tuple[s.WorldObjectSpec, ...]:
     )
 
 
+# Editing recompiles the scenario on every change, and validation regenerates the
+# same geometry to check it against the canonical asset. Inputs are frozen.
+@lru_cache(maxsize=2)
 def landscape_objects(imported: s.OSMImport) -> tuple[s.WorldObjectSpec, ...]:
     from chongming.scenarios.osm_features import feature_objects
 
     return building_objects(imported) + feature_objects(imported)
 
 
+@lru_cache(maxsize=2)
 def landscape_vegetation(
     imported: s.OSMImport, vegetation: s.OSMVegetationConfig | None = None
 ) -> tuple[s.VegetationSpec, ...]:

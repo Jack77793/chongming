@@ -240,8 +240,6 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         raise ValueError("clock time scale and absolute epoch are inconsistent")
     if not scene.cameras:
         raise ValueError("scene must define at least one camera")
-    if spec.imaging.exposure_samples <= 0 or spec.imaging.color_space != "srgb":
-        raise ValueError("imaging requires positive exposure_samples and srgb")
     from chongming.scenarios.behaviors import validate_behavior
 
     for target in scene.flying_objects:
@@ -480,16 +478,11 @@ def validate_scenario_spec(spec: ScenarioSpec) -> None:
         ordered = sorted(entries)
         if any(b[0] < a[1] for a, b in pairwise(ordered)):
             raise ValueError("overlapping calibration intervals")
-    artifacts = spec.imaging.sensor_artifacts
-    if (
-        not 0 <= artifacts.intensity_min < artifacts.intensity_max <= 1
-        or artifacts.sensor_noise_std_intensity < 0
-    ):
-        raise ValueError("invalid sensor intensity/noise range")
-    terrain = scene.terrain
+    from chongming.contracts.scene import BoxGeometry, SphereGeometry, TriangleMeshGeometry
+
+    terrain = spec.scene_definition.terrain
     if terrain.maximum_relief_m < 0:
         raise ValueError("terrain relief cannot be negative")
-    from chongming.contracts.scene import BoxGeometry, SphereGeometry, TriangleMeshGeometry
 
     geometries = (
         [o.geometry for o in scene.world_objects]
@@ -590,6 +583,13 @@ def validate_supported_features(spec: ScenarioSpec) -> None:
         or a.bloom_strength is not None
     ):
         raise ValueError("configured advanced sensor effects are not implemented")
+    if (
+        spec.imaging.exposure_samples != 1
+        or a.intensity_min != 0.0
+        or a.intensity_max != 1.0
+        or a.sensor_noise_std_intensity != 0.0
+    ):
+        raise ValueError("exposure sampling and artifacts are not configurable in Godot renderer")
     if any(
         c.exposure.shutter_model.value != "global" or c.exposure.rolling_readout_ns not in (None, 0)
         for c in spec.scene_definition.cameras

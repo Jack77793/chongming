@@ -657,6 +657,14 @@ class ExperimentPerturbations:
 
 @dataclass(frozen=True)
 class ImagingSpec:
+    """Camera response model.
+
+    ``color_space`` is always "srgb". ``exposure_samples`` must be 1 (multi-sampling
+    is no longer supported; exposure is handled by Godot shader auto-exposure).
+    ``sensor_artifacts`` configures output format; intensity range, noise, and advanced
+    exposure features are unsupported and rejected by scenario validation.
+    """
+
     color_space: str
     exposure_samples: int
     sensor_artifacts: SensorArtifactSpec

@@ -26,9 +26,6 @@ from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from numpy.typing import NDArray
-
 from chongming.contracts.scene import (
     BoxGeometry,
     CameraStateTruth,
@@ -43,6 +40,7 @@ from chongming.contracts.scene import (
     TreeVisualSpec,
     TriangleMeshGeometry,
 )
+from chongming.rendering.geometry import asset_mesh
 
 _REQUEST_HEADER = struct.Struct("<I")
 _RESPONSE_HEADER = struct.Struct("<QQ")
@@ -117,13 +115,17 @@ def _entity(
         payload["parameters"] = [float(value) for value in geometry.half_extents_body_m]
     elif isinstance(geometry, CylinderGeometry):
         payload["parameters"] = [float(geometry.radius_m), float(geometry.height_m)]
-    elif isinstance(geometry, TriangleMeshGeometry):
+    elif isinstance(geometry, TriangleMeshGeometry | ExternalAssetGeometry):
+        # Bundled models are sent as the same body-frame mesh Python uses for truth.
+        mesh = (
+            asset_mesh(geometry.asset_identifier)
+            if isinstance(geometry, ExternalAssetGeometry)
+            else geometry
+        )
         payload["vertices"] = [
-            [float(value) for value in vertex] for vertex in geometry.vertices_body_m
+            [float(value) for value in vertex] for vertex in mesh.vertices_body_m
         ]
-        payload["triangles"] = [list(triangle) for triangle in geometry.triangle_vertex_indices]
-    elif isinstance(geometry, ExternalAssetGeometry):
-        payload["asset_model"] = geometry.asset_identifier
+        payload["triangles"] = [list(triangle) for triangle in mesh.triangle_vertex_indices]
     else:  # pragma: no cover - GeometrySpec is a closed union
         raise TypeError(f"unsupported geometry: {type(geometry).__name__}")
     return payload
@@ -415,6 +417,8 @@ def projected_footprints(
             ]
         elif isinstance(item.geometry, TriangleMeshGeometry):
             local = list(item.geometry.vertices_body_m)
+        elif isinstance(item.geometry, ExternalAssetGeometry):
+            local = list(asset_mesh(item.geometry.asset_identifier).vertices_body_m)
         else:
             raise TypeError(f"unsupported aircraft geometry: {type(item.geometry).__name__}")
         projected: list[tuple[float, float]] = []
@@ -453,37 +457,6 @@ def projected_footprints(
             if width > 0 and height > 0:
                 result[str(item.truth_object_id)] = (width, height)
     return result
-
-
-def srgb_to_linear(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Decode camera RGB for energy-domain exposure integration and noise."""
-    return np.where(values <= 0.04045, values / 12.92, ((values + 0.055) / 1.055) ** 2.4)
-
-
-def quantize_rgb8(
-    intensity: NDArray[np.float64],
-    intensity_min: float,
-    intensity_max: float,
-    noise_std: float,
-    seed: int,
-    stream: str,
-) -> bytes:
-    if intensity_max <= intensity_min:
-        raise ValueError("intensity_max must be greater than intensity_min")
-    if noise_std < 0:
-        raise ValueError("sensor noise standard deviation cannot be negative")
-    values = intensity
-    if noise_std:
-        digest = __import__("hashlib").blake2b(f"{seed}:{stream}".encode(), digest_size=16).digest()
-        values = values + np.random.Generator(
-            np.random.PCG64(int.from_bytes(digest, "big"))
-        ).normal(0.0, noise_std, values.shape)
-    linear = np.clip((values - intensity_min) / (intensity_max - intensity_min), 0.0, 1.0)
-    encoded = np.where(linear <= 0.0031308, 12.92 * linear, 1.055 * linear ** (1 / 2.4) - 0.055)
-    return np.asarray(
-        np.rint(encoded * 255.0),
-        dtype=np.uint8,
-    ).tobytes()
 
 
 def _read_exact(sock: socket.socket, count: int) -> bytes:

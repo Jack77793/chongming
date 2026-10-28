@@ -21,11 +21,7 @@
   "targets": [
     {
       "id": "crossing-target",
-      "geometry": { "type": "sphere", "radius_m": 1.5 },
-      "appearance": {
-        "linear_rgb": [0.9, 0.03, 0.02],
-        "diffuse_reflectance": 0.9
-      },
+      "geometry": { "type": "aircraft", "model": "f86" },
       "motion": {
         "type": "constant_velocity",
         "position_enu_m": [-20, -80, 40],

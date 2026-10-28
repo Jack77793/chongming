@@ -721,7 +721,7 @@ func _sync_entities(entities: Array) -> void:
 			if not tree_visual.is_empty():
 				signature += "|tree|" + JSON.stringify(tree_visual)
 		else:
-			signature = JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null), entity.get("asset_model", null)])
+			signature = JSON.stringify([entity.type, entity.parameters, entity.vertices, entity.triangles, entity.visual, entity.color, entity.reflectance, entity.get("surface", null), entity.get("surface_detail", 0.0), entity.get("category", null)])
 			if not tree_visual.is_empty():
 				signature += "|tree|" + JSON.stringify(tree_visual)
 		if signature != _signatures[index]:
@@ -904,58 +904,7 @@ func _sync_resources(definitions: Array) -> void:
 		_resources[token] = definition.duplicate(true)
 
 
-func _load_asset_mesh(model_name: String) -> Mesh:
-	# Map model names to asset file paths (relative to project root).
-	var asset_path := ""
-	if model_name == "f86":
-		asset_path = "res://assets/aircraft/f86triangled.glb"
-	elif model_name == "la11":
-		asset_path = "res://assets/aircraft/la11triangled.glb"
-	else:
-		push_error("Unknown asset model: %s" % model_name)
-		return SphereMesh.new()  # Fallback to a simple sphere
-
-	var gltf_document := GLTFDocument.new()
-	var gltf_state := GLTFState.new()
-	var error := gltf_document.append_from_file(asset_path, gltf_state)
-	if error != OK:
-		push_error("Failed to load asset model from %s: error %d" % [asset_path, error])
-		return SphereMesh.new()
-
-	var scene_root := gltf_document.generate_scene(gltf_state)
-	if scene_root == null:
-		push_error("Failed to generate scene from asset model %s" % asset_path)
-		return SphereMesh.new()
-
-	# Extract the first MeshInstance3D from the loaded scene
-	var mesh_instance := _find_first_mesh_instance(scene_root)
-	if mesh_instance == null:
-		push_error("No MeshInstance3D found in asset model %s" % asset_path)
-		scene_root.queue_free()
-		return SphereMesh.new()
-
-	var mesh := mesh_instance.mesh
-	scene_root.queue_free()
-	return mesh
-
-
-func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
-	if node is MeshInstance3D:
-		return node as MeshInstance3D
-	for child in node.get_children():
-		var result := _find_first_mesh_instance(child)
-		if result != null:
-			return result
-	return null
-
-
 func _mesh(entity: Dictionary) -> Mesh:
-	# If the entity specifies an external asset model, load it from the GLB file
-	# instead of building geometry from triangles/vertices.
-	var asset_model_name: Variant = entity.get("asset_model", null)
-	if asset_model_name != null:
-		return _load_asset_mesh(str(asset_model_name))
-
 	var parameters: Array = entity.parameters
 	if int(entity.type) == 0:
 		var mesh := SphereMesh.new()

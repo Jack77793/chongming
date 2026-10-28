@@ -169,19 +169,12 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
 - **`sphere`**：球体，需 `radius_m`（正半径，米）
 - **`box`**：长方体，需 `half_extents_m`（`[x, y, z]` 半宽，米，各维度正值）
 - **`cylinder`**：圆柱体，需 `radius_m`（正半径，米）和 `half_height_m`（正半高，米）。圆柱轴沿上（+Z）方向
-- **`aircraft`**：飞行器模型，从外部资产加载。需在目标定义中指定 `geometry.type = "aircraft"` 和 `geometry.asset`：
+- **`aircraft`**：飞行器。省略 `model` 时使用内置简化网格；`model` 取 `f86` 或 `la11` 时使用仓库内置的 glb 模型（`src/chongming/rendering/godot/assets/aircraft/`）：
 
   ```json
   {
     "id": "aircraft-1",
-    "display_name": "飞行器1",
-    "geometry": {
-      "type": "aircraft",
-      "asset": {
-        "uri": "assets/cessna172.glb",
-        "content_sha256": "abc123..."
-      }
-    },
+    "geometry": { "type": "aircraft", "model": "f86" },
     "motion": {
       "type": "constant_velocity",
       "position_enu_m": [-30, -60, 40],
@@ -190,7 +183,7 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
   }
   ```
 
-  资产为 glTF/GLB 格式，需通过 `content_sha256` 验证（计算方式：`sha256sum assets/cessna172.glb`）。模型坐标系为 Godot 右手系（+X 右，+Y 上，+Z 后），朝向前方（-Z）。
+  `rendering/geometry.py` 读取 glb 网格，应用网格节点的旋转、缩放和平移，并转换到机体系（x 右、y 机头、z 上，与内置网格一致）后，同一份顶点同时用于 Python 求交、包围盒、投影和 Godot 渲染；Godot 不再自行加载 glb。Godot 以目标的 `appearance` 覆盖 glb 自带材质，贴图不显示。
 
 外部 Godot 场景通常没有可供 Python 复算的完整几何模型，可将 `occlusion_mode` 设为 `unknown`。运行不会因无法判断遮挡而失败；系统仍记录相机姿态、目标状态和图像，并按目标中心是否在视场内生成候选。该模式的结果只适合在同一固定录像上比较不同系统版本或模型的相对排名，不能解释为排除了遮挡影响的准确率，也不适合直接与 `known` 场景的绝对分数比较。
 
