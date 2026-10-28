@@ -2,6 +2,7 @@
 """
 验证飞机模型加载功能
 """
+
 import json
 
 from chongming.contracts.scene import ExternalAssetGeometry

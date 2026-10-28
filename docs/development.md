@@ -45,10 +45,11 @@ for scenario in scenarios/*.json; do
 done
 ```
 
-完整测试需要图形环境：
+完整测试需要图形环境和 Nix shell（提供 Godot）：
 
 ```sh
-uv run --frozen python -m unittest discover -s tests -v
+# 必须在 Nix shell 中运行以提供 CHONGMING_GODOT
+nix develop --command uv run --frozen python -m unittest discover -s tests -v
 ```
 
 无桌面 Linux 可从源码根目录执行：
@@ -59,6 +60,27 @@ nix develop .#software --command xvfb-run -a uv run --frozen python \
 ```
 
 检查失败时区分本轮引入的问题与原有问题，并报告原因及未验证项。不要通过放宽超时、弱化断言或返回假结果使检查通过。
+
+### PR 前检查清单
+
+提交 Pull Request 前必须完成：
+
+1. **全部测试**：`nix develop --command uv run --frozen python -m unittest discover -s tests -v`
+2. **类型检查**：`uv run --frozen mypy src tests`
+3. **代码规范**：`ruff check src tests scripts`
+4. **格式化**：`nix fmt`
+5. **场景验证**：所有 `scenarios/*.json` 通过 `--check`
+
+### 外部依赖本地化
+
+所有外部依赖资产（地形、模型、纹理等）必须本地化管理，包括：
+
+- 通过 Git LFS 或 Nix flake 管理大文件
+- 在代码中使用相对路径或资产哈希引用
+- 配置文件中记录资产来源和许可信息
+- 确保 CI 和离线环境可访问
+
+是否将资产加入 `.gitignore` 由维护者决定，但本地化管理是强制要求。
 
 统一格式化入口为 `nix fmt`，由 `treefmt.toml` 调度 nixfmt、Ruff 和 Prettier：
 

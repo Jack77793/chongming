@@ -31,6 +31,7 @@ from numpy.typing import NDArray
 from chongming.contracts.scene import (
     BoxGeometry,
     CameraStateTruth,
+    CylinderGeometry,
     ExternalAssetGeometry,
     GeometrySpec,
     GrassVisualSpec,
@@ -103,6 +104,8 @@ def _entity(
         payload["parameters"] = [float(geometry.radius_m)]
     elif isinstance(geometry, BoxGeometry):
         payload["parameters"] = [float(value) for value in geometry.half_extents_body_m]
+    elif isinstance(geometry, CylinderGeometry):
+        payload["parameters"] = [float(geometry.radius_m), float(geometry.height_m)]
     elif isinstance(geometry, TriangleMeshGeometry):
         payload["vertices"] = [
             [float(value) for value in vertex] for vertex in geometry.vertices_body_m
@@ -290,6 +293,8 @@ def _geometry_type(geometry: GeometrySpec) -> int:
         return 2
     elif isinstance(geometry, ExternalAssetGeometry):
         return 3
+    elif isinstance(geometry, CylinderGeometry):
+        return 4
     else:  # pragma: no cover
         raise TypeError(f"unsupported geometry: {type(geometry).__name__}")
 
@@ -565,8 +570,7 @@ class GodotRenderer:
             if import_result.returncode != 0:
                 detail = import_result.stdout.strip()
                 raise RuntimeError(
-                    "Godot could not import the external project"
-                    f": {detail or 'unknown error'}"
+                    f"Godot could not import the external project: {detail or 'unknown error'}"
                 )
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))

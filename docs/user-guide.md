@@ -89,12 +89,12 @@ uv run --frozen chongming-scene --scenario scenarios/empty.json --output results
 | `authoring.json`               | 输入的可编辑场景，输入为 authoring 格式时保存                                 |
 | `scenario.json`                | 有限导出的编译场景，用于诊断                                                  |
 | `manifest.json`                | 运行范围、配置、会话、渲染策略及来源记录；通过 `scenario_path` 和摘要引用场景 |
-| `online.jsonl`                 | 普通帧元数据、事件及像素跳过记录              |
-| `truth-static.json`            | 运行期间不变的特权场景对象快照，仅供评估      |
-| `truth.jsonl`                  | 逐步真实状态及事件到目标的对应；静态对象通过摘要引用，仅供评估 |
-| `timing.jsonl`、`summary.json` | 逐步耗时、计数、结束或失败状态                |
-| `video/camera-*.mp4`           | 按流编号保存的高质量 H.264 视频，不以用户 ID 构造路径 |
-| `video.json`                   | 视频编码、尺寸、帧率、帧数和文件摘要              |
+| `online.jsonl`                 | 普通帧元数据、事件及像素跳过记录                                              |
+| `truth-static.json`            | 运行期间不变的特权场景对象快照，仅供评估                                      |
+| `truth.jsonl`                  | 逐步真实状态及事件到目标的对应；静态对象通过摘要引用，仅供评估                |
+| `timing.jsonl`、`summary.json` | 逐步耗时、计数、结束或失败状态                                                |
+| `video/camera-*.mp4`           | 按流编号保存的高质量 H.264 视频，不以用户 ID 构造路径                         |
+| `video.json`                   | 视频编码、尺寸、帧率、帧数和文件摘要                                          |
 
 中心工具另保存 `center-registration.json`、`center-input.jsonl` 和 `center-output.jsonl`。完整 manifest 与真值是审计资料，不是中心算法输入。失败时保留已写证据，不自动清理输出目录。
 
@@ -147,18 +147,48 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
 | `duration_s`、`fps`                                   | 正时长，默认 24 秒；采样率默认 30 Hz，每站支持 1 至 60 Hz                                                                |
 | `stations[]`                                          | 1 至 4 站，唯一 `id`、`position_enu_m`；可选 `main_yaw_deg`、`main_elevation_deg`、`auxiliary_yaw_deg`、`fps`、`start_s` |
 | `targets[]`                                           | 唯一 ID、`geometry`、`motion`；`[]` 表示无目标                                                                           |
-| `geometry`                                            | `sphere` + `radius_m`、`box` + `half_extents_m`，或 `aircraft`                                                           |
+| `geometry`                                            | `sphere` + `radius_m`、`box` + `half_extents_m`、`cylinder` + `radius_m` + `half_height_m`，或 `aircraft`（见下文）      |
 | `motion`                                              | `constant_velocity` + 位置/速度，或 `orbit` + 中心/半径/周期，可选相位及垂直振幅                                         |
 | `world_objects[]`                                     | 静态物体；`[]` 清空内置地物，仍保留各站 A4 标志物                                                                        |
 | `terrain`                                             | `flat` 或 `heightfield`；网格使用原点、间距、内嵌高度或外部资产                                                          |
 | `vegetation[]`、`wind`                                | 植被类型及尺寸、平均风和湍流；`[]` 清空植被，`null` 关闭风                                                               |
 | `search`                                              | `min_enu_m`、`max_enu_m`、`step_enu_m`；搜索盒外目标仍可产生射线                                                         |
 | `environment`、`camera_jitter`、`clouds`、`rendering` | 可选摄影、抖动、云及渲染效果                                                                                             |
-| `occlusion_mode`                                       | `known`（默认，按规范化几何计算遮挡）或 `unknown`（不判定遮挡，仅按目标是否在视场内生成候选）                         |
+| `occlusion_mode`                                      | `known`（默认，按规范化几何计算遮挡）或 `unknown`（不判定遮挡，仅按目标是否在视场内生成候选）                            |
 | `camera_position_offset_enu_m`                        | 对真实主辅光心共同施加位移，不修改在线安装配置，用于视差评估                                                             |
 | `osm`                                                 | 本地 `asset` 引用与可选 `vegetation` 策略                                                                                |
 
 省略地物、目标、植被或风字段时可能保留演示默认值；空场景应显式使用空数组及 `wind: null`。主相机为 1920×1080、对角 FOV 60°；辅助相机为 640×480、水平 FOV 2.6°，标称水平朝向 10 m 外与站点 ID 绑定的横向 A4 棋盘。方位角 0° 向北，正向东；显式抖动可使瞬时辅助姿态偏离水平。输出为无 alpha 的 sRGB RGB8。
+
+#### 几何类型
+
+支持的几何类型：
+
+- **`sphere`**：球体，需 `radius_m`（正半径，米）
+- **`box`**：长方体，需 `half_extents_m`（`[x, y, z]` 半宽，米，各维度正值）
+- **`cylinder`**：圆柱体，需 `radius_m`（正半径，米）和 `half_height_m`（正半高，米）。圆柱轴沿上（+Z）方向
+- **`aircraft`**：飞行器模型，从外部资产加载。需在目标定义中指定 `geometry.type = "aircraft"` 和 `geometry.asset`：
+
+  ```json
+  {
+    "id": "aircraft-1",
+    "display_name": "飞行器1",
+    "geometry": {
+      "type": "aircraft",
+      "asset": {
+        "uri": "assets/cessna172.glb",
+        "content_sha256": "abc123..."
+      }
+    },
+    "motion": {
+      "type": "constant_velocity",
+      "position_enu_m": [-30, -60, 40],
+      "velocity_enu_mps": [0, 10, -1]
+    }
+  }
+  ```
+
+  资产为 glTF/GLB 格式，需通过 `content_sha256` 验证（计算方式：`sha256sum assets/cessna172.glb`）。模型坐标系为 Godot 右手系（+X 右，+Y 上，+Z 后），朝向前方（-Z）。
 
 外部 Godot 场景通常没有可供 Python 复算的完整几何模型，可将 `occlusion_mode` 设为 `unknown`。运行不会因无法判断遮挡而失败；系统仍记录相机姿态、目标状态和图像，并按目标中心是否在视场内生成候选。该模式的结果只适合在同一固定录像上比较不同系统版本或模型的相对排名，不能解释为排除了遮挡影响的准确率，也不适合直接与 `known` 场景的绝对分数比较。
 

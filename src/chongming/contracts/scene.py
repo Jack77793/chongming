@@ -185,7 +185,9 @@ class ExternalAssetGeometry:
     asset_identifier: str
 
 
-GeometrySpec = SphereGeometry | BoxGeometry | CylinderGeometry | TriangleMeshGeometry | ExternalAssetGeometry
+GeometrySpec = (
+    SphereGeometry | BoxGeometry | CylinderGeometry | TriangleMeshGeometry | ExternalAssetGeometry
+)
 
 
 class TreePart(StrEnum):

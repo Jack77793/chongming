@@ -4,9 +4,7 @@
   "random_seed": 42,
   "duration_s": 8,
   "fps": 30,
-  "stations": [
-    { "id": "main", "position_enu_m": [0, -30, 5] }
-  ],
+  "stations": [{ "id": "main", "position_enu_m": [0, -30, 5] }],
   "targets": [
     {
       "id": "default-aircraft",

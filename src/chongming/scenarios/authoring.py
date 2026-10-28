@@ -80,7 +80,9 @@ def _geometry(value: dict[str, Any]) -> s.GeometrySpec:
     _fields(
         value,
         {"type"}
-        | {"sphere": {"radius_m"}, "box": {"half_extents_m"}, "aircraft": {"model"}}.get(kind, set()),
+        | {"sphere": {"radius_m"}, "box": {"half_extents_m"}, "aircraft": {"model"}}.get(
+            kind, set()
+        ),
         "geometry",
     )
     if kind == "sphere":
