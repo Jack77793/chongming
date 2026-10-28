@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-from chongming.scenarios.playback import load_recording_source
+from chongming.scenarios.playback import RecordingReader, load_recording_source
 
 
 def create_minimal_recording(directory: Path, frame_count: int = 10) -> None:
@@ -187,6 +187,21 @@ class TestPlaybackFrameRate(unittest.TestCase):
     def tearDown(self) -> None:
         """Clean up temporary directory."""
         self.temp_dir.cleanup()
+
+    def test_static_truth_requires_a_json_object(self) -> None:
+        reader = RecordingReader(self.recording_path)
+        self.addCleanup(reader.close)
+        static_path = self.recording_path / "truth-static.json"
+        self.assertEqual(
+            reader.read_static_truth(),
+            {"world_objects": [], "world_objects_sha256": "static-hash-placeholder"},
+        )
+        invalid_values: tuple[object, ...] = (None, [], "invalid", 1, True)
+        for value in invalid_values:
+            with self.subTest(value=value):
+                static_path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(TypeError, "static truth JSON root must be an object"):
+                    reader.read_static_truth()
 
     def test_playback_with_fps_limit(self) -> None:
         """Test that playback respects FPS limit."""

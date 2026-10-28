@@ -124,7 +124,10 @@ class RecordingReader:
         """Read the static truth scene geometry."""
         static_path = self.directory / "truth-static.json"
         with static_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+            document = json.load(handle)
+        if not isinstance(document, dict):
+            raise TypeError("static truth JSON root must be an object")
+        return document
 
     def iter_steps(self) -> Iterator[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
         """Yield (online, truth, timing) record triples in temporal order."""
@@ -359,7 +362,7 @@ class RecordedScenarioSource:
                     logical_scene=logical_scene,
                     camera_frames=camera_frames,
                     online_correspondences=(),
-                    experiment_perturbations=truth["experiment_perturbations"],  # type: ignore[arg-type]
+                    experiment_perturbations=truth["experiment_perturbations"],
                     timing=(
                         ScenarioStepTiming(
                             **{

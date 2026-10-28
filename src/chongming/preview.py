@@ -28,7 +28,7 @@ from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image
@@ -44,12 +44,12 @@ from chongming.contracts.scene import (
     TreeVisualSpec,
 )
 from chongming.joint_calibration import JointCalibrationRunner
+from chongming.ports.scene import ScenarioSource
 from chongming.rendering.godot import close_default_renderer, default_renderer
 from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
 from chongming.scenarios.serialization import load_scenario
-from chongming.scenarios.source import ScenarioSource
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,12 @@ def preview_payload(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str
     return {**_preview_metadata(step, sequence, loop_no), "video": _video_payload(step, None)}
 
 
+class _ScenarioSourceFactory(Protocol):
+    def __call__(
+        self, spec: ScenarioSpec, *, render_every: int, video_enabled: bool
+    ) -> ScenarioSource: ...
+
+
 class PreviewRuntime:
     """Bounded latest-frame buffer and one simulation worker, shared by all viewers."""
 
@@ -185,10 +191,10 @@ class PreviewRuntime:
         authoring_document: dict[str, Any] | None = None,
         authoring_path: Path | None = None,
         landscape_asset: Path | None = None,
-        source_factory: Callable[[ScenarioSpec, int, bool], ScenarioSource] | None = None,
+        source_factory: _ScenarioSourceFactory | None = None,
     ) -> None:
         self.spec = spec
-        self._source_factory = source_factory or demo_source
+        self._source_factory: _ScenarioSourceFactory = source_factory or demo_source
         self._authoring_document = copy.deepcopy(authoring_document) if authoring_document else None
         self._authoring_path = authoring_path.resolve() if authoring_path is not None else None
         self._landscape_asset = landscape_asset.resolve() if landscape_asset is not None else None
