@@ -31,6 +31,16 @@
 
 主检测、辅助校准和中心融合通过独立端口接收输入，不以其他算法先取得成功结果为启动条件。视频停运时保留模块生命周期，图像算法处于无输入状态，不伪造检测或校准成功。
 
+### 交互边界
+
+目标状态（[Issue #25](https://github.com/Mikhail-YellowBegonia/chongming/issues/25) 路线 B，实施中）：预览与场景编辑时，用户只与 Godot 窗口交互。预览窗口（`rendering/godot/ui.gd`）已可用，Web 工作台在移除前并存，见[用户指南](user-guide.md#预览与编辑)。
+
+- Python 持有场景编译、运动模型、实验时钟、真值与录制。Godot 只负责渲染、显示和输入，不计算运动，也不持有场景状态。
+- 请求只由 Python 发起，暂停时也按固定节拍发送。Godot 把用户输入放入队列，在下一次回复时带回。
+- 播放状态、编辑草稿和校验结果由 `PreviewRuntime` 持有，每次请求都附带最新状态，Godot 不另存副本。
+- 运行信息、警告和错误（含 Python 异常栈）集中显示在 Godot 面板，不能只输出到终端。
+- 调试时由 Python 直接打开的临时图像窗口（如 CV 管线中间画面）不属于正式交互。
+
 ## 坐标、时间与标识
 
 ### 坐标与观测
@@ -103,6 +113,10 @@ Python 维护几何状态、投影与已知场景的简化遮挡，Godot 维护�
 `OcclusionIndex` 使用保守包围盒筛选静态世界与植被候选，再执行精确代理求交；动态目标不改变静态地景索引。Godot 按稳定资源令牌复用网格与材质，Python 不逐帧传输植被顶点。
 
 Godot 随场景模块启动，通过本地 socket 接收不可变快照并返回 RGB8。自动渲染循环关闭，传感器只按请求绘制；视频关闭后停止像素请求，编辑自由视角另按显示节拍绘制。曝光采样在线性能量空间积分及加入传感器噪声，最终编码为 sRGB。
+
+同一 socket 上的 `ui` 请求推送界面状态与最终传感器 RGB8：长度前缀 JSON 声明 `state.version`、图像清单与 `binary_length`，其后为按清单顺序拼接的原始像素。Godot 回复 `accepted`（收到的版本与图像键）及期间排队的用户命令，Python 核对 `accepted` 与所发一致。
+
+首个 `ui` 请求把最小化的渲染窗口切换为预览窗口并开启渲染循环；传感器像素仍只按请求绘制到独立 SubViewport，界面绘制不改变传感器输出。自由视角 SubViewport 嵌入窗口标签页，分辨率跟随标签页尺寸。`preview.py` 的 `GodotUiSession` 在主线程以 20 Hz 交换：每次推送播放状态、所选站点、编辑状态及最近 200 条 `chongming` 日志（含异常栈）；帧元数据与所选站点的 RGB8 只在帧序号或站点变化时发送，Godot 保留上一帧显示。所选站点与编辑令牌由会话持有，Godot 命令不携带令牌。命令为 `quit`、`control`、`seek`、`select_station`、`freeview` 及 `edit_begin`、`edit_update`、`edit_create`、`edit_delete`、`edit_landscape`、`edit_commit`、`edit_cancel`。参数、状态或文件错误导致的命令失败记为警告并显示在信息面板；其他异常或 Godot 断开时终止会话并关闭运行时。
 
 包内 Web/Godot 资源通过 `importlib.resources` 定位，不搜索调用者工作目录。Godot 使用独立可写临时目录，资源可从只读安装位置访问；退出和启动失败路径释放进程、socket 与临时资源。
 

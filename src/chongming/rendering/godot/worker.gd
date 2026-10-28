@@ -7,10 +7,18 @@ const OpticsShader = preload("res://optics.gdshader")
 const TerrainShader = preload("res://terrain.gdshader")
 const BuildingShader = preload("res://building.gdshader")
 const GroundcoverShader = preload("res://groundcover.gdshader")
+const PreviewUi = preload("res://ui.gd")
 var _server := TCPServer.new()
 var _peer: StreamPeerTCP
 var _buffer := PackedByteArray()
 var _expected_payload := -1
+var _pending_request: Dictionary = {}
+# Display copies only: Python owns the state and resends it on every UI request.
+var _ui_state: Dictionary = {}
+var _ui_textures: Dictionary = {}
+var _ui_commands: Array[Dictionary] = []
+# Built on the first UI request; sensor-only clients keep the minimized window.
+var _ui: Control
 var _port := 0
 var _token := ""
 var _external_scene_path := ""
@@ -175,13 +183,18 @@ func _process(_delta: float) -> void:
 	if _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		get_tree().quit()
 		return
+	# Drain everything readable this tick: UI requests carry whole sensor
+	# images, and one socket read per frame would cap throughput at the
+	# kernel buffer size times the process rate.
 	var available := _peer.get_available_bytes()
-	if available > 0:
+	while available > 0:
 		var packet := _peer.get_data(available)
 		if packet[0] != OK:
 			get_tree().quit(2)
 			return
 		_buffer.append_array(packet[1])
+		_peer.poll()
+		available = _peer.get_available_bytes()
 	if not _busy:
 		_process_packets()
 
@@ -201,22 +214,47 @@ func _parse_arguments() -> void:
 
 
 func _process_packets() -> void:
-	if _expected_payload < 0:
-		if _buffer.size() < 4:
+	if _pending_request.is_empty():
+		if _expected_payload < 0:
+			if _buffer.size() < 4:
+				return
+			_expected_payload = _buffer.decode_u32(0)
+			_buffer = _buffer.slice(4)
+			if _expected_payload < 2 or _expected_payload > 256 * 1024 * 1024:
+				get_tree().quit(2)
+				return
+		if _buffer.size() < _expected_payload:
 			return
-		_expected_payload = _buffer.decode_u32(0)
-		_buffer = _buffer.slice(4)
-		if _expected_payload < 2 or _expected_payload > 256 * 1024 * 1024:
+		var payload := _buffer.slice(0, _expected_payload)
+		_buffer = _buffer.slice(_expected_payload)
+		_expected_payload = -1
+		var parsed = JSON.parse_string(payload.get_string_from_utf8())
+		if not parsed is Dictionary:
 			get_tree().quit(2)
 			return
-	if _buffer.size() < _expected_payload:
-		return
-	var payload := _buffer.slice(0, _expected_payload)
-	_buffer = _buffer.slice(_expected_payload)
-	_expected_payload = -1
-	var request = JSON.parse_string(payload.get_string_from_utf8())
-	if not request is Dictionary:
+		_pending_request = parsed
+	# Only UI requests carry a raw trailer; render/editor requests end at the JSON.
+	var binary_length := int(_pending_request.get("binary_length", 0))
+	if binary_length < 0 or binary_length > 256 * 1024 * 1024:
 		get_tree().quit(2)
+		return
+	if _buffer.size() < binary_length:
+		return
+	var request := _pending_request
+	_pending_request = {}
+	if str(request.get("mode", "")) == "ui":
+		var trailer := _buffer.slice(0, binary_length)
+		_buffer = _buffer.slice(binary_length)
+		var reply := _ui_exchange(request, trailer)
+		if reply.is_empty():
+			get_tree().quit(2)
+			return
+		var header := PackedByteArray()
+		header.resize(16)
+		header.encode_u64(0, reply.size())
+		header.encode_u64(8, 0)
+		_peer.put_data(header)
+		_peer.put_data(reply)
 		return
 	_busy = true
 	var started := Time.get_ticks_usec()
@@ -228,6 +266,68 @@ func _process_packets() -> void:
 	_peer.put_data(response)
 	_peer.put_data(pixels)
 	_busy = false
+
+
+## Store the pushed UI state and images; answer with the queued user commands.
+## Returns an empty buffer for a malformed request.
+func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteArray:
+	var state = request.get("state")
+	var images = request.get("images")
+	if not state is Dictionary or not images is Array:
+		return PackedByteArray()
+	var keys: Array[String] = []
+	for entry_value in images:
+		if not entry_value is Dictionary:
+			return PackedByteArray()
+		var entry: Dictionary = entry_value
+		var key := str(entry.get("key", ""))
+		var width := int(entry.get("width", 0))
+		var height := int(entry.get("height", 0))
+		var offset := int(entry.get("offset", -1))
+		var length := int(entry.get("length", -1))
+		if key.is_empty() or width <= 0 or height <= 0 or length != width * height * 3 \
+				or offset < 0 or offset + length > trailer.size():
+			return PackedByteArray()
+		var image := Image.create_from_data(width, height, false, Image.FORMAT_RGB8,
+			trailer.slice(offset, offset + length))
+		var texture: ImageTexture = _ui_textures.get(key)
+		if texture != null and texture.get_size() == Vector2(width, height):
+			texture.update(image)
+		else:
+			_ui_textures[key] = ImageTexture.create_from_image(image)
+		keys.append(key)
+	_ui_state = state
+	if _ui == null:
+		_open_ui()
+	_ui.show_state(state, _ui_textures)
+	var reply := {
+		"accepted": {"version": state.get("version"), "images": keys},
+		"commands": _ui_commands,
+	}
+	_ui_commands = []
+	return JSON.stringify(reply).to_utf8_buffer()
+
+
+func _open_ui() -> void:
+	_ui = PreviewUi.new()
+	_ui.worker = self
+	add_child(_ui)
+	_ui.build(_editor_display, _editor_fps)
+	# Match the freeview resolution to its tab instead of stretching 1024x640.
+	_editor_display.resized.connect(func() -> void:
+		_free_viewport.size = Vector2i(_editor_display.size.max(Vector2.ONE))
+		_redraw_freeview())
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, false)
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, false)
+	DisplayServer.window_set_title("Chongming 预览")
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	DisplayServer.window_set_size(Vector2i(1440, 900))
+	RenderingServer.render_loop_enabled = true
+
+
+## Queue a user command for Python's next UI request.
+func ui_emit(command: Dictionary) -> void:
+	_ui_commands.append(command)
 
 
 func _render(request: Dictionary) -> PackedByteArray:
@@ -343,7 +443,7 @@ func _render(request: Dictionary) -> PackedByteArray:
 			if not was_editor_active:
 				_display_editor(true, editor_realtime)
 			else:
-				RenderingServer.render_loop_enabled = editor_realtime
+				RenderingServer.render_loop_enabled = editor_realtime or _ui != null
 			_sky_material.set_shader_parameter("camera_horizontal", Vector2(_free_camera.position.x, _free_camera.position.z))
 			_sky_material.set_shader_parameter("camera_altitude", _free_camera.position.y)
 			await get_tree().process_frame
@@ -398,6 +498,11 @@ func _render(request: Dictionary) -> PackedByteArray:
 func _display_editor(enabled: bool, realtime: bool) -> void:
 	_editor_display.visible = enabled
 	_editor_fps.visible = enabled
+	_looking = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if _ui != null:
+		# The preview window stays open and drawing; freeview is one of its tabs.
+		return
 	RenderingServer.render_loop_enabled = enabled and realtime
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, not enabled)
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, not enabled)
@@ -406,12 +511,13 @@ func _display_editor(enabled: bool, realtime: bool) -> void:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 	else:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
-	_looking = false
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST and _editor_active and not _editor_realtime:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST and _ui != null:
+		# Python ends the session; Godot exits when the socket closes.
+		ui_emit({"type": "quit"})
+	elif what == NOTIFICATION_WM_CLOSE_REQUEST and _editor_active and not _editor_realtime:
 		# Closing the viewer must leave the renderer and experiment alive.
 		_editor_closed = true
 		_editor_active = false
@@ -425,14 +531,21 @@ func _redraw_freeview() -> void:
 		_sky_material.set_shader_parameter("camera_horizontal", Vector2(_free_camera.position.x, _free_camera.position.z))
 		_sky_material.set_shader_parameter("camera_altitude", _free_camera.position.y)
 		_free_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-		RenderingServer.force_draw(true)
+		if _ui == null:
+			RenderingServer.force_draw(true)
 
 
 func _input(event: InputEvent) -> void:
 	if not _editor_active:
 		return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+		if event.pressed and _ui != null and not (_editor_display.is_visible_in_tree()
+				and _editor_display.get_global_rect().has_point(event.position)):
+			return
 		_looking = event.pressed
+		if _looking:
+			# WASD must steer the camera, not type into a focused text field.
+			get_viewport().gui_release_focus()
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _looking else Input.MOUSE_MODE_VISIBLE
 	elif event is InputEventMouseMotion and _looking:
 		_free_yaw -= event.relative.x * 0.0025

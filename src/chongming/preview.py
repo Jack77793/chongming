@@ -13,6 +13,7 @@ import base64
 import copy
 import hashlib
 import io
+import itertools
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ import threading
 import time
 import webbrowser
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -33,7 +34,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image
 
-from chongming.contracts.model import CameraFrame
+from chongming.contracts.model import CameraFrame, PixelFormat
 from chongming.contracts.scene import (
     CameraFrameTruth,
     GrassVisualSpec,
@@ -44,7 +45,8 @@ from chongming.contracts.scene import (
     TreeVisualSpec,
 )
 from chongming.joint_calibration import JointCalibrationRunner
-from chongming.rendering.godot import close_default_renderer, default_renderer
+from chongming.modules.scene import ScenarioModule
+from chongming.rendering.godot import UiImage, close_default_renderer, default_renderer
 from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
@@ -173,6 +175,69 @@ def preview_payload(step: ScenarioStep, sequence: int, loop_no: int) -> dict[str
     return {**_preview_metadata(step, sequence, loop_no), "video": _video_payload(step, None)}
 
 
+def ui_images(step: ScenarioStep, station_id: str) -> tuple[UiImage, ...]:
+    """The selected station's ordinary sensor planes as tightly packed RGB8."""
+    images = []
+    for frame in step.video.frames:
+        if frame.station_id != station_id:
+            continue
+        plane = frame.image
+        if plane.pixel_format is not PixelFormat.RGB8:
+            raise ValueError(f"UI display supports RGB8 frames, got {plane.pixel_format.value}")
+        row = plane.width_px * 3
+        if (
+            plane.row_stride_bytes < row
+            or len(plane.pixels) < plane.row_stride_bytes * (plane.height_px - 1) + row
+        ):
+            raise ValueError(f"frame {frame.frame_id} has an invalid row stride")
+        view = memoryview(plane.pixels)
+        if plane.row_stride_bytes == row:
+            pixels = bytes(view[: row * plane.height_px])
+        else:
+            pixels = b"".join(
+                view[y * plane.row_stride_bytes : y * plane.row_stride_bytes + row]
+                for y in range(plane.height_px)
+            )
+        images.append(
+            UiImage(
+                f"{frame.station_id}/{frame.camera_role.value}",
+                plane.width_px,
+                plane.height_px,
+                pixels,
+            )
+        )
+    return tuple(images)
+
+
+class _UiLogBuffer(logging.Handler):
+    """Bounded record history for the Godot info panel, including tracebacks."""
+
+    def __init__(self, capacity: int = 200) -> None:
+        super().__init__(logging.INFO)
+        self._records: deque[dict[str, Any]] = deque(maxlen=capacity)
+        self._sequence = 0
+        self._formatter = logging.Formatter()
+        self._records_lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        entry = {
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "time": record.created,
+            "traceback": self._formatter.formatException(record.exc_info)
+            if record.exc_info
+            else None,
+        }
+        with self._records_lock:
+            self._sequence += 1
+            self._records.append({"seq": self._sequence, **entry})
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._records_lock:
+            return list(self._records)
+
+
 class PreviewRuntime:
     """Bounded latest-frame buffer and one simulation worker, shared by all viewers."""
 
@@ -220,6 +285,8 @@ class PreviewRuntime:
         self._paused = False
         self._pending_steps = 0
         self._reset_version = 0
+        self._seeking = False
+        self._seek_target_ns: int | None = None
         self._published: dict[str, Any] | None = None
         self._published_step: ScenarioStep | None = None
         self._latest_step: ScenarioStep | None = None
@@ -284,11 +351,81 @@ class PreviewRuntime:
                 self._paused = True
                 self._pending_steps = min(self._pending_steps + 1, 10)
             elif action == "restart":
+                # Restart supersedes a seek. One not yet picked up by the producer
+                # is dropped here; a running fast-forward sees the new version,
+                # stops and clears the flag itself.
+                if self._seek_target_ns is not None:
+                    self._seek_target_ns = None
+                    self._seeking = False
                 self._reset_version += 1
                 self._pending_steps = 0
             else:
                 raise ValueError("unknown preview control")
             self._condition.notify_all()
+
+    def seek(self, time_s: float) -> None:
+        """Restart the logic layer and fast-forward to time_s on the timeline.
+
+        Steps before the target run without video; display resumes at the first
+        rendered exposure at or after it. One seek runs at a time: requests during
+        a seek or an edit are rejected rather than queued.
+        """
+        if isinstance(time_s, bool) or not isinstance(time_s, int | float):
+            raise TypeError("seek time must be a number of seconds")
+        with self._condition:
+            if self._editing:
+                raise ValueError("experiment controls are locked during editing")
+            if self._seeking:
+                raise ValueError("a seek is already in progress")
+            timeline = self.spec.timeline
+            duration_s = (timeline.end_time_ns - timeline.start_time_ns) / 1e9
+            if not math.isfinite(time_s) or not 0 <= time_s <= duration_s:
+                raise ValueError(f"seek time must be within [0, {duration_s:g}] s")
+            self._seeking = True
+            self._seek_target_ns = min(
+                timeline.start_time_ns + round(time_s * 1e9), timeline.end_time_ns
+            )
+            self._reset_version += 1
+            # A paused seek still publishes the frame it lands on.
+            self._pending_steps = 1 if self._paused else 0
+            self._condition.notify_all()
+
+    def _fast_forward(
+        self,
+        source: ScenarioSource | ScenarioModule,
+        steps: Iterator[ScenarioStep],
+        target_ns: int,
+        version: int,
+    ) -> Iterator[ScenarioStep]:
+        """Consume steps before target_ns; return the iterator positioned at the target."""
+        began = time.perf_counter()
+        skipped = 0
+        landed: ScenarioStep | None = None
+        try:
+            for step in steps:
+                with self._condition:
+                    if self._stopped or self._reset_version != version:
+                        # Restart or close superseded the seek; the reset branch rebuilds.
+                        return steps
+                landed = step
+                if step.video.sample_time.time_ns >= target_ns:
+                    break
+                skipped += 1
+        finally:
+            if isinstance(source, ScenarioModule):
+                source.video_enabled = self.video_enabled
+            with self._condition:
+                self._seeking = False
+                self._condition.notify_all()
+        logger.info(
+            "Seek reached %.3f s after %d logic steps in %.1f s",
+            (target_ns - self.spec.timeline.start_time_ns) / 1e9,
+            skipped,
+            time.perf_counter() - began,
+        )
+        # The landing step was generated without video; a rendering source yields
+        # the next scheduled exposure, a video-disabled preview publishes it as is.
+        return itertools.chain((landed,), steps) if landed is not None else steps
 
     def editor_status(self) -> dict[str, Any]:
         with self._condition:
@@ -311,6 +448,8 @@ class PreviewRuntime:
                 raise ValueError("editor requires an authoring JSON scenario")
             if self._editing:
                 raise ValueError("another editor session already holds the lock")
+            if self._seeking:
+                raise ValueError("cannot begin editing during a seek")
             was_paused = self._paused
             self._paused_before_edit = was_paused
             self._freeview_before_edit = self._freeview_enabled
@@ -624,6 +763,29 @@ class PreviewRuntime:
             result["snapshot"] = {**payload, **encoded, "preview_station_id": station_id}
         return result
 
+    def ui_view(self) -> tuple[dict[str, Any], dict[str, Any] | None, ScenarioStep | None]:
+        """Playback status plus the latest published payload and step, without encoding."""
+        with self._condition:
+            timeline = self.spec.timeline
+            status = {
+                "state": "failed" if self._error else "paused" if self._paused else "playing",
+                "error": self._error,
+                "stations": list(self._station_ids),
+                "profile": self.spec.scene_definition.cameras[0].metadata.profile_id,
+                "render_clock_fps": self.render_clock.render_fps,
+                "logical_step_count": self._logical_step_count,
+                "rendered_step_count": self._rendered_step_count,
+                "skipped_step_count": self._skipped_step_count,
+                "generation_stats_ms": self._timing_stats(self._generation_samples_ms),
+                "calibration_stats_ms": self._timing_stats(self._calibration_samples_ms),
+                "seeking": self._seeking,
+                "duration_s": (timeline.end_time_ns - timeline.start_time_ns) / 1e9,
+                "time_s": (self._published["time_ns"] - timeline.start_time_ns) / 1e9
+                if self._published is not None
+                else None,
+            }
+            return status, self._published, self._published_step
+
     @staticmethod
     def _timing_stats(values: deque[float]) -> dict[str, Any]:
         samples = sorted(values)
@@ -660,6 +822,7 @@ class PreviewRuntime:
                     self._condition.wait_for(ready)
                     if self._stopped:
                         return
+                    seek_target_ns = None
                     if self._reset_version != reset_version:
                         reset_version = self._reset_version
                         source = self._source_factory(
@@ -671,8 +834,18 @@ class PreviewRuntime:
                         loop_no += 1
                         latest_frames.clear()
                         latest_truths.clear()
+                        seek_target_ns, self._seek_target_ns = self._seek_target_ns, None
                         # Restart publishes frame zero even while paused.
                     self._producing = True
+                if seek_target_ns is not None:
+                    if isinstance(source, ScenarioModule):
+                        source.video_enabled = False
+                    steps = self._fast_forward(source, steps, seek_target_ns, reset_version)
+                    with self._condition:
+                        if self._stopped or self._reset_version != reset_version:
+                            self._producing = False
+                            self._condition.notify_all()
+                            continue
                 began = time.perf_counter()
                 try:
                     step = next(steps)
@@ -789,6 +962,130 @@ class PreviewRuntime:
                 self._producing = False
                 self._error = f"{type(error).__name__}: {error}"
                 self._condition.notify_all()
+
+
+class GodotUiSession:
+    """Drive the Godot window: push runtime state, dispatch the commands it returns.
+
+    Python is the only requester and owns every piece of state, including the
+    selected station and the edit token. Godot sends commands without tokens.
+    Expected command failures are logged for the info panel; anything else
+    propagates so the caller shuts the runtime down.
+    """
+
+    def __init__(
+        self,
+        runtime: PreviewRuntime,
+        exchange: Callable[[dict[str, Any], tuple[UiImage, ...]], list[dict[str, Any]]],
+        *,
+        rate_hz: float = 20.0,
+    ) -> None:
+        if not 0 < rate_hz <= 120:
+            raise ValueError("UI rate must be greater than 0 and at most 120 Hz")
+        self.runtime = runtime
+        self._exchange = exchange
+        self._period_s = 1.0 / rate_hz
+        self._version = 0
+        self._station_id = runtime.ui_view()[0]["stations"][0]
+        self._edit_token: str | None = None
+        self._sent_frame: tuple[int, str] | None = None
+        self._log = _UiLogBuffer()
+        self._running = True
+
+    def tick(self) -> bool:
+        """Run one exchange. Returns False once the user asked to quit."""
+        status, payload, step = self.runtime.ui_view()
+        sequence = payload["sequence"] if payload is not None else None
+        frame: dict[str, Any] | None = None
+        images: tuple[UiImage, ...] = ()
+        if payload is not None and step is not None and sequence is not None:
+            current = (sequence, self._station_id)
+            # Frames are immutable per sequence; Godot keeps showing the last one.
+            if current != self._sent_frame:
+                frame = payload
+                images = ui_images(step, self._station_id)
+                self._sent_frame = current
+        self._version += 1
+        state = {
+            "version": self._version,
+            "playback": status,
+            "station": self._station_id,
+            "frame_sequence": sequence,
+            "frame": frame,
+            "editor": self.runtime.editor_status(),
+            "log": self._log.snapshot(),
+        }
+        for command in self._exchange(state, images):
+            self._dispatch(command)
+        return self._running
+
+    def _dispatch(self, command: dict[str, Any]) -> None:
+        kind = command["type"]
+        try:
+            if kind == "quit":
+                self._running = False
+            elif kind == "control":
+                self.runtime.control(str(command["action"]))
+            elif kind == "seek":
+                self.runtime.seek(command["time_s"])
+            elif kind == "select_station":
+                station_id = str(command["station"])
+                if station_id not in self.runtime.ui_view()[0]["stations"]:
+                    raise ValueError(f"unknown station: {station_id}")
+                self._station_id = station_id
+            elif kind == "freeview":
+                if not isinstance(command.get("enabled"), bool):
+                    raise TypeError("freeview requires a boolean enabled field")
+                self.runtime.set_freeview(command["enabled"])
+            elif kind == "edit_begin":
+                self._edit_token = self.runtime.begin_edit()["token"]
+            elif kind == "edit_update":
+                self.runtime.edit_update(
+                    str(command["kind"]),
+                    str(command["id"]),
+                    command["patch"],
+                    token=self._edit_token,
+                )
+            elif kind == "edit_create":
+                self.runtime.edit_create(
+                    str(command["kind"]), str(command["id"]), token=self._edit_token
+                )
+            elif kind == "edit_delete":
+                self.runtime.edit_delete(
+                    str(command["kind"]), str(command["id"]), token=self._edit_token
+                )
+            elif kind == "edit_landscape":
+                self.runtime.edit_landscape(str(command["landscape_id"]), token=self._edit_token)
+            elif kind == "edit_commit":
+                self.runtime.commit_edit(token=self._edit_token)
+                self._edit_token = None
+            elif kind == "edit_cancel":
+                self.runtime.cancel_edit(token=self._edit_token)
+                self._edit_token = None
+            else:
+                raise ValueError(f"unknown UI command: {kind}")
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError):
+            logger.warning("UI command %s failed", kind, exc_info=True)
+
+    def run(self) -> None:
+        """Exchange at a fixed wall-clock rate until the user quits."""
+        package = logging.getLogger("chongming")
+        previous_level = package.level
+        package.addHandler(self._log)
+        # INFO reaches the panel; the terminal keeps its WARNING-only fallback.
+        package.setLevel(logging.INFO)
+        try:
+            deadline = time.monotonic()
+            while self.tick():
+                deadline += self._period_s
+                delay = deadline - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    deadline = time.monotonic()
+        finally:
+            package.removeHandler(self._log)
+            package.setLevel(previous_level)
 
 
 def preview_server(runtime: PreviewRuntime, port: int) -> ThreadingHTTPServer:
@@ -1049,11 +1346,16 @@ def main() -> None:
     )
     if not args.no_browser:
         webbrowser.open(url)
+    # The HTTP workbench remains until the Godot window replaces it (Issue #25 B5).
+    http = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+    http.start()
+    session = GodotUiSession(runtime, default_renderer().ui_exchange)
     try:
-        server.serve_forever(poll_interval=0.2)
+        session.run()
     except KeyboardInterrupt:
         pass
     finally:
+        server.shutdown()
         server.server_close()
         runtime.close()
         close_default_renderer()
