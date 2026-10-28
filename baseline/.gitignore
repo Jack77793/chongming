@@ -1,0 +1,4 @@
+# Baseline output files (except README.md)
+*
+!.gitignore
+!README.md
