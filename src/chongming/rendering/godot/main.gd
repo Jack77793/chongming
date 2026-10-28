@@ -268,46 +268,21 @@ func _mode_finite() -> void:
 
 ## Setup rendering infrastructure
 func _setup_rendering() -> void:
-	# Create a viewport for rendering
-	viewport = SubViewport.new()
-	viewport.size = Vector2i(640, 480)  # Default size, will be overridden per frame
-	viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	viewport.transparent_bg = false
-	add_child(viewport)
-
-	# Load and instantiate worker scene
-	var worker_script := load("res://worker.gd")
-	if worker_script == null:
-		push_error("Failed to load worker.gd")
-		get_tree().quit(2)
-		return
-
-	worker = Node.new()
-	worker.set_script(worker_script)
-	add_child(worker)
-
-	print("Rendering infrastructure initialized")
+	# Load worker scene - worker.gd is not a simple script, skip for Phase 1
+	# Phase 1: Focus on scene controller and truth.jsonl output
+	# Phase 2: Integrate full rendering with worker.gd
+	print("Rendering setup deferred to Phase 2")
+	# For now, set worker to null to skip PNG generation
+	worker = null
+	viewport = null
 
 
 ## Render a single frame and save as PNG
+## Phase 1: Placeholder - rendering deferred to Phase 2
 func _render_frame(snapshot: Dictionary, frame_number: int) -> String:
-	if viewport == null or worker == null:
-		return ""
-
-	# TODO: Build render request from snapshot
-	# For now, this is a placeholder - full integration requires:
-	# 1. Convert snapshot to render request format
-	# 2. Call worker's render method
-	# 3. Capture viewport texture
-	# 4. Save as PNG
-
-	# Placeholder: create empty frame file
-	var frame_filename := "%06d.png" % frame_number
-	var frame_path := args.output.path_join(frame_filename)
-
-	# For now, just return the path without actual rendering
-	# Full implementation will happen in phase 1.3
-	return frame_filename
+	# Phase 1: Skip PNG generation, focus on truth.jsonl correctness
+	# Phase 2 will integrate: worker.gd + PNG frames + ffmpeg video pipeline
+	return ""
 
 
 ## Build truth record from snapshot
