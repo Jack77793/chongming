@@ -26,6 +26,12 @@ var args := {
 ## Scene controller
 var controller = null
 
+## Worker node for rendering
+var worker: Node = null
+
+## Output viewport for capturing frames
+var viewport: SubViewport = null
+
 
 func _ready() -> void:
 	# Disable default rendering loop
@@ -52,12 +58,16 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# Initialize rendering if needed for finite mode
+	if args.mode == "finite" and not args.no_video:
+		_setup_rendering()
+
 	# Execute requested mode
 	match args.mode:
 		"check":
 			_mode_check()
 		"finite":
-			_mode_finite()
+			await _mode_finite()
 		_:
 			print_rich("[color=red]Error:[/color] Unknown mode: %s" % args.mode)
 			print_usage()
@@ -184,15 +194,26 @@ func _mode_finite() -> void:
 	# Run simulation
 	var start_time := Time.get_ticks_usec()
 	var step_count := 0
+	var frame_files: Array[String] = []
 
 	while not controller.is_finished():
 		var step_start := Time.get_ticks_usec()
 		var snapshot: Dictionary = controller.step()
+
+		# Render frame if video is enabled and render interval matches
+		var should_render := not args.no_video and (step_count % args.render_every == 0)
+		var frame_path := ""
+
+		if should_render:
+			frame_path = await _render_frame(snapshot, step_count)
+			if not frame_path.is_empty():
+				frame_files.append(frame_path)
+
 		var step_end := Time.get_ticks_usec()
 
-		# Write truth data
-		var truth_json := JSON.stringify(snapshot)
-		truth_file.store_line(truth_json)
+		# Build truth record
+		var truth := _build_truth_record(snapshot, frame_path)
+		truth_file.store_line(JSON.stringify(truth))
 
 		# Write timing data
 		var timing := {
@@ -225,6 +246,7 @@ func _mode_finite() -> void:
 		"total_time_us": total_time,
 		"no_video": args.no_video,
 		"render_every": args.render_every,
+		"frame_files": frame_files,
 	}
 
 	var manifest_file := FileAccess.open(args.output.path_join("manifest.json"), FileAccess.WRITE)
@@ -242,3 +264,71 @@ func _mode_finite() -> void:
 	print("Results written to: %s" % args.output)
 
 	get_tree().quit(0)
+
+
+## Setup rendering infrastructure
+func _setup_rendering() -> void:
+	# Create a viewport for rendering
+	viewport = SubViewport.new()
+	viewport.size = Vector2i(640, 480)  # Default size, will be overridden per frame
+	viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	viewport.transparent_bg = false
+	add_child(viewport)
+
+	# Load and instantiate worker scene
+	var worker_script := load("res://worker.gd")
+	if worker_script == null:
+		push_error("Failed to load worker.gd")
+		get_tree().quit(2)
+		return
+
+	worker = Node.new()
+	worker.set_script(worker_script)
+	add_child(worker)
+
+	print("Rendering infrastructure initialized")
+
+
+## Render a single frame and save as PNG
+func _render_frame(snapshot: Dictionary, frame_number: int) -> String:
+	if viewport == null or worker == null:
+		return ""
+
+	# TODO: Build render request from snapshot
+	# For now, this is a placeholder - full integration requires:
+	# 1. Convert snapshot to render request format
+	# 2. Call worker's render method
+	# 3. Capture viewport texture
+	# 4. Save as PNG
+
+	# Placeholder: create empty frame file
+	var frame_filename := "%06d.png" % frame_number
+	var frame_path := args.output.path_join(frame_filename)
+
+	# For now, just return the path without actual rendering
+	# Full implementation will happen in phase 1.3
+	return frame_filename
+
+
+## Build truth record from snapshot
+func _build_truth_record(snapshot: Dictionary, frame_path: String) -> Dictionary:
+	var truth := {
+		"scenario_id": snapshot.get("scenario_id", "unknown"),
+		"time_s": snapshot.get("time_s", 0.0),
+		"time_ns": snapshot.get("time_ns", 0),
+		"step": snapshot.get("step", 0),
+		"frame_period_s": snapshot.get("frame_period_s", 0.0),
+		"logical_scene": {
+			"stations": snapshot.get("stations", []),
+			"targets": snapshot.get("targets", []),
+			"world_objects": [],  # Will be populated when we have geometry
+		},
+		"rays": [],  # Will be populated with raycasting results
+		"camera_frames": [],  # Will be populated with camera frame data
+	}
+
+	# Add frame reference if rendered
+	if not frame_path.is_empty():
+		truth["frame_path"] = frame_path
+
+	return truth
