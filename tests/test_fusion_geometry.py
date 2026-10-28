@@ -66,12 +66,16 @@ class CleanFusionTests(unittest.TestCase):
             step_enu_m=(1.0, 1.0, 1.0),
         )
         self.candidate_policy = replace(self.policy.candidates, search=self.search)
+        self.weights = CalibrationWeightingModule(
+            rules=self.policy.admission.calibration_usage_rules
+        )
         self.voxels = VoxelCandidateModule(
-            policy=self.candidate_policy, motion_policy=self.policy.geometry
+            policy=self.candidate_policy, motion_policy=self.policy.geometry, weights=self.weights
         )
         self.associator = CrossStationAssociationModule(
             policy=replace(self.policy.association, temporal_gate_ns=20),
             motion_policy=self.policy.geometry,
+            weights=self.weights,
         )
         self.geometry = GeometryRefinementModule(
             center_session_id=self.center,
@@ -215,6 +219,7 @@ class CleanFusionTests(unittest.TestCase):
         window = self.window(rays)
         associator = CrossStationAssociationModule(
             motion_policy=self.policy.geometry,
+            weights=self.weights,
             policy=replace(self.associator.policy, spatial_gate_m=1e-6)
             if policy is None
             else policy,
@@ -459,7 +464,9 @@ class CleanFusionTests(unittest.TestCase):
             replace(self.associator.policy, prediction_spatial_gate_m=0),
         ):
             with self.assertRaisesRegex(ValueError, "association policy"):
-                CrossStationAssociationModule(policy=policy, motion_policy=self.policy.geometry)
+                CrossStationAssociationModule(
+                    policy=policy, motion_policy=self.policy.geometry, weights=self.weights
+                )
 
     def test_forward_traversal_supercovers_boundaries_and_clips_range(self) -> None:
         search = replace(self.search, min_enu_m=(0.0, 0.0, 0.0), max_enu_m=(2.0, 2.0, 2.0))
@@ -557,6 +564,7 @@ class CleanFusionTests(unittest.TestCase):
         strict = VoxelCandidateModule(
             policy=replace(self.candidate_policy, minimum_candidate_score=4),
             motion_policy=self.policy.geometry,
+            weights=self.weights,
         )
         self.assertFalse(strict.propose(self.window(self.rays()), ()).candidates)
 
@@ -570,7 +578,7 @@ class CleanFusionTests(unittest.TestCase):
                         search=replace(self.search, step_enu_m=(step, step, step)),
                     )
                     candidates = VoxelCandidateModule(
-                        policy=policy, motion_policy=self.policy.geometry
+                        policy=policy, motion_policy=self.policy.geometry, weights=self.weights
                     ).propose(window, ())
                     association = self.associator.associate(window, candidates, ())
                     self.assertIs(
@@ -696,6 +704,7 @@ class CleanFusionTests(unittest.TestCase):
         capped = VoxelCandidateModule(
             policy=replace(self.candidate_policy, maximum_candidates=1),
             motion_policy=self.policy.geometry,
+            weights=self.weights,
         ).propose(window, ())
         self.assertEqual(len(capped.candidates), 1)
         self.assertEqual(capped.candidates, complete.candidates[:1])
@@ -783,6 +792,7 @@ class CleanFusionTests(unittest.TestCase):
                 voxels = VoxelCandidateModule(
                     policy=replace(self.candidate_policy, search=search),
                     motion_policy=self.policy.geometry,
+                    weights=self.weights,
                 )
                 window = self.window(
                     (
@@ -826,11 +836,30 @@ class CleanFusionTests(unittest.TestCase):
             )
 
     def test_continuous_fit_is_joint_not_an_average_of_pair_intersections(self) -> None:
-        rays = (
+        rays: tuple[f.AdmittedRay, ...] = (
             self.ray("a", (0.0, 0.0, 0.0), direction=(1.0, 0.0, 0.0)),
             self.ray("b", (1.0, -1.0, 1.0), direction=(0.0, 1.0, 0.0)),
             self.ray("c", (2.0, 0.0, -1.0), direction=(0.0, 0.0, 1.0)),
             self.ray("d", (0.0, 2.0, 0.0), direction=(1.0, 0.0, 0.0)),
+        )
+        # Skew observations need declared independent noise. Exact zero noise
+        # would instead make these mutually inconsistent equality constraints.
+        rays = tuple(
+            replace(
+                ray,
+                event=replace(
+                    ray.event,
+                    uncertainty=replace(
+                        ray.event.uncertainty,
+                        independent_origin_covariance_m2=(
+                            (1.0, 0.0, 0.0),
+                            (0.0, 1.0, 0.0),
+                            (0.0, 0.0, 1.0),
+                        ),
+                    ),
+                ),
+            )
+            for ray in rays
         )
         window = self.window(rays)
         geometry = replace(
@@ -934,24 +963,15 @@ class CleanFusionTests(unittest.TestCase):
         self.assertEqual(result.reasons, (f.GeometryReason.INVALID_SUPPORT_GROUP,))
         self.assertIsNone(result.measurement.position_enu_m)
 
-    def test_clean_solver_does_not_claim_weighted_or_speed_bound_success(self) -> None:
+    def test_unknown_uncertainty_and_speed_bound_models_do_not_claim_success(self) -> None:
         first, second = self.rays()[:2]
         cases = (
-            (
-                replace(
-                    first, event=replace(first.event, calibration_usage=m.CalibrationUsage.FROZEN)
-                ),
-                f.GeometryReason.UNSUPPORTED_CALIBRATION_USAGE,
-            ),
             (
                 replace(
                     first,
                     event=replace(
                         first.event,
-                        uncertainty=replace(
-                            first.event.uncertainty,
-                            independent_angular_covariance_rad2=((1e-12, 0.0), (0.0, 0.0)),
-                        ),
+                        uncertainty=replace(first.event.uncertainty, model="unknown_uncertainty"),
                     ),
                 ),
                 f.GeometryReason.UNSUPPORTED_UNCERTAINTY_MODEL,
@@ -971,7 +991,7 @@ class CleanFusionTests(unittest.TestCase):
         ).results
         self.assertEqual(result.reasons, (f.GeometryReason.REFERENCE_TIME_ALIGNMENT_UNAVAILABLE,))
         for policy in (
-            replace(self.geometry.policy, robust_loss_definition="huber"),
+            replace(self.geometry.policy, robust_loss_definition="unknown_loss"),
             replace(
                 self.geometry.policy,
                 motion_alignment_model=f.MotionAlignmentModel.CONSERVATIVE_SPEED_BOUND,
@@ -1009,7 +1029,9 @@ class CleanFusionTests(unittest.TestCase):
             ),
         ):
             with self.subTest(policy=policy), self.assertRaises(ValueError):
-                VoxelCandidateModule(policy=policy, motion_policy=self.policy.geometry)
+                VoxelCandidateModule(
+                    policy=policy, motion_policy=self.policy.geometry, weights=self.weights
+                )
         with self.assertRaises(ValueError):
             replace(self.associator, policy=replace(self.associator.policy, temporal_gate_ns=-1))
         with self.assertRaises(ValueError):

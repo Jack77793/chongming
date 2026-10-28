@@ -721,6 +721,150 @@ class ReferenceFusionTests(unittest.TestCase):
                 signatures.append([asdict(measurement) for measurement in measurements])
         self.assertEqual(signatures[0], signatures[1])
 
+    def noisy_spec(self) -> s.ScenarioSpec:
+        document = self.multi_document()
+        document["duration_s"] = 0.5
+        document["targets"] = document["targets"][:1]
+        document["camera_jitter"] = {
+            "angular_amplitude_deg": [0.005, 0.005, 0.005],
+            "frequency_hz": 7.0,
+            "roles": ["main"],
+        }
+        spec = compile_authoring(document)
+        intervals = tuple(
+            phase
+            for interval in spec.virtual_observations.calibration_intervals
+            for phase in (
+                replace(interval, end_time_ns=200_000_000),
+                replace(interval, start_time_ns=200_000_000, health=m.CalibrationHealth.STALE),
+            )
+        )
+        spec = replace(
+            spec,
+            virtual_observations=replace(
+                spec.virtual_observations,
+                independent_angular_covariance_rad2=((1e-8, 2e-9), (2e-9, 2e-8)),
+                independent_origin_covariance_m2=(
+                    (1e-4, 0.0, 0.0),
+                    (0.0, 1e-4, 0.0),
+                    (0.0, 0.0, 1e-4),
+                ),
+                calibration_intervals=intervals,
+            ),
+        )
+        return spec
+
+    def test_noisy_source_tracks_through_frozen_and_stale_calibration(self) -> None:
+        spec = self.noisy_spec()
+        run = development_run(spec, Path("unused-noisy-source-output"))
+        registration = replace(
+            self.registration,
+            stations=spec.station_configs,
+            policy=replace(
+                run.fusion_policy,
+                geometry=replace(run.fusion_policy.geometry, robust_loss_definition="huber"),
+            ),
+        )
+        algorithm = create_algorithm()
+        algorithm.start(registration)
+        try:
+            results = [algorithm.process(step) for step in self.steps(spec)]
+        finally:
+            algorithm.close()
+        measurements = [measurement for result in results for measurement in result.measurements]
+        self.assertEqual(len(measurements), 15)
+        self.assertTrue(
+            all(measurement.status is m.FusionStatus.LOCATED for measurement in measurements)
+        )
+        for measurement in measurements:
+            expected = np.asarray((-15 + measurement.reference_time_ns / 1e9, 62, 20))
+            self.assertLess(
+                float(np.linalg.norm(np.asarray(measurement.position_enu_m) - expected)), 0.3
+            )
+            covariance = np.asarray(measurement.conditional_position_covariance_enu_m2)
+            self.assertGreater(float(np.linalg.eigvalsh(covariance).min()), 0)
+        geometry = [
+            item
+            for result in results
+            for batch in result.batches
+            for group in batch.geometry
+            for item in group.results
+        ]
+        self.assertTrue(all(item.solver_converged for item in geometry))
+        self.assertTrue(
+            any(
+                any("frozen" in weight.reason_codes[0] for weight in item.ray_weights)
+                for item in geometry
+            )
+        )
+        self.assertTrue(
+            any(
+                any("stale" in weight.reason_codes[0] for weight in item.ray_weights)
+                for item in geometry
+            )
+        )
+        self.assertTrue(all(len(item.shared_calibration_solution_refs) == 3 for item in geometry))
+        tracks = [track for result in results for track in result.tracks]
+        self.assertEqual(len({track.track_id for track in tracks}), 1)
+        self.assertTrue(any(track.lifecycle is m.TrackLifecycle.CONFIRMED for track in tracks))
+        encoded = json.dumps([asdict(result) for result in results], allow_nan=False)
+        self.assertNotIn("truth_object_id", encoded)
+        self.assertNotIn("experiment_perturbations", encoded)
+        self.assertNotIn("moving-sphere", encoded)
+
+    def test_noisy_asynchronous_source_keeps_the_velocity_dependence_in_tracking(self) -> None:
+        spec = self.noisy_spec()
+        cameras = tuple(
+            replace(
+                camera,
+                metadata=replace(camera.metadata, nominal_frame_rate_hz=29.0),
+                exposure=replace(
+                    camera.exposure, first_exposure_start_ns=10_000_000, frame_period_ns=10**9 // 29
+                ),
+            )
+            if camera.station_id == "upper" and camera.camera_role is m.CameraRole.MAIN
+            else camera
+            for camera in spec.scene_definition.cameras
+        )
+        spec = replace(spec, scene_definition=replace(spec.scene_definition, cameras=cameras))
+        run = development_run(spec, Path("unused-noisy-asynchronous-output"))
+        algorithm = create_algorithm()
+        algorithm.start(
+            replace(self.registration, stations=spec.station_configs, policy=run.fusion_policy)
+        )
+        try:
+            results = [algorithm.process(step) for step in self.steps(spec)]
+        finally:
+            algorithm.close()
+        measurements = [measurement for result in results for measurement in result.measurements]
+        self.assertEqual(len(measurements), 15)
+        self.assertTrue(
+            all(measurement.status is m.FusionStatus.LOCATED for measurement in measurements)
+        )
+        aligned = [
+            measurement for measurement in measurements if measurement.motion_alignment is not None
+        ]
+        self.assertTrue(aligned)
+        self.assertTrue(
+            all(len(measurement.supporting_station_ids) == 3 for measurement in aligned)
+        )
+        for measurement in aligned:
+            motion = measurement.motion_alignment
+            assert motion is not None
+            covariance = np.asarray(measurement.conditional_position_covariance_enu_m2)
+            independent = np.asarray(motion.independent_position_covariance_enu_m2)
+            self.assertGreater(float(np.linalg.eigvalsh(independent).min()), 0)
+            self.assertGreaterEqual(
+                float(np.linalg.eigvalsh(covariance - independent).min()), -1e-14
+            )
+            expected = np.asarray((-15 + measurement.reference_time_ns / 1e9, 62, 20))
+            self.assertLess(
+                float(np.linalg.norm(np.asarray(measurement.position_enu_m) - expected)), 0.3
+            )
+        tracks = [track for result in results for track in result.tracks]
+        self.assertEqual(len({track.track_id for track in tracks}), 1)
+        self.assertIs(tracks[-1].lifecycle, m.TrackLifecycle.CONFIRMED)
+
     def test_station_silence_missing_detections_and_recovery_keep_one_track(self) -> None:
         document = self.multi_document()
         document["duration_s"] = 0.6

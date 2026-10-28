@@ -1,4 +1,4 @@
-"""Clean-ray voxel candidates and continuous localization."""
+"""Uncertainty-expanded voxel candidates and continuous ray localization."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import numpy.typing as npt
 from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.modules.base import ModuleShell
+from chongming.modules.fusion_estimation import RayFit, fit_rays
 from chongming.modules.fusion_motion import (
     alignment_reference,
     matrix3,
@@ -20,13 +21,18 @@ from chongming.modules.fusion_motion import (
     origins_at,
     validate_policy,
     validate_predictions,
-    velocity_projection,
 )
 from chongming.ports import fusion as ports
 from chongming.uncertainty import covariance_factor
 
 Array = npt.NDArray[np.float64]
 Voxel = tuple[int, int, int]
+
+
+class _VoxelLimitReached(Exception):
+    """Internal budget signal; incomplete searches must not assert uniqueness."""
+
+
 _STATION_SCORE = m.ScoreDefinition(
     definition_id="independent_station_count_v1",
     kind=m.ScoreKind.RANKING,
@@ -53,7 +59,11 @@ def _exposure_span(rays: tuple[f.AdmittedRay, ...]) -> int:
 
 
 def _ray_voxels(
-    ray: f.AdmittedRay, search: m.VoxelSearchSpec, *, aligned_origin: Array | None = None
+    ray: f.AdmittedRay,
+    search: m.VoxelSearchSpec,
+    *,
+    aligned_origin: Array | None = None,
+    maximum_cells: int | None = None,
 ) -> set[Voxel]:
     """Traverse the clipped forward segment, including cells touched on faces/edges.
 
@@ -87,6 +97,7 @@ def _ray_voxels(
         return set()
     counts = tuple(math.ceil(float((upper[axis] - lower[axis]) / step[axis])) for axis in range(3))
     crossings = {near, far}
+    examined_planes = 0
     for axis in range(3):
         if direction[axis] == 0:
             continue
@@ -99,9 +110,14 @@ def _ray_voxels(
         first = max(1, math.ceil((ends[0] - float(lower[axis])) / float(step[axis])))
         last = min(counts[axis] - 1, math.floor((ends[1] - float(lower[axis])) / float(step[axis])))
         for plane in range(first, last + 1):
+            examined_planes += 1
+            if maximum_cells is not None and examined_planes > maximum_cells:
+                raise _VoxelLimitReached
             distance = float((lower[axis] + plane * step[axis] - origin[axis]) / direction[axis])
             if near <= distance <= far:
                 crossings.add(distance)
+                if maximum_cells is not None and len(crossings) > maximum_cells:
+                    raise _VoxelLimitReached
     ordered = sorted(crossings)
     samples = [
         *ordered,
@@ -122,7 +138,109 @@ def _ray_voxels(
             )
             choices.append(tuple(index for index in indices if 0 <= index < counts[axis]))
         cells.update((x, y, z) for x, y, z in product(*choices))
+        if maximum_cells is not None and len(cells) > maximum_cells:
+            raise _VoxelLimitReached
     return cells
+
+
+def _uncertain_voxels(
+    ray: f.AdmittedRay,
+    search: m.VoxelSearchSpec,
+    policy: f.CandidatePolicy,
+    weight_scale: float,
+    *,
+    aligned_origin: Array | None,
+) -> tuple[set[Voxel], bool]:
+    """Conservative k-sigma tube using a range bound over the configured box.
+
+    This is a candidate envelope, not a probability or independent station vote.
+    The grid is extended on the same lattice before dilation so central rays
+    outside the search box can still support uncertain intersections inside it.
+    """
+    uncertainty = ray.event.uncertainty
+    angular = covariance_factor(
+        uncertainty.independent_angular_covariance_rad2, 2, "ray angular covariance"
+    )
+    origin_root = covariance_factor(
+        uncertainty.independent_origin_covariance_m2, 3, "ray origin covariance"
+    )
+    origin = np.asarray(ray.event.ray_origin_enu_m) if aligned_origin is None else aligned_origin
+    lower, upper, step = (
+        np.asarray(value) for value in (search.min_enu_m, search.max_enu_m, search.step_enu_m)
+    )
+    distance = float(np.linalg.norm(np.maximum(np.abs(lower - origin), np.abs(upper - origin))))
+    radius = policy.uncertainty_sigma * math.sqrt(
+        (
+            float(np.linalg.norm(origin_root, ord=2)) ** 2
+            + distance**2 * float(np.linalg.norm(angular, ord=2)) ** 2
+        )
+        / weight_scale
+    )
+    if radius == 0:
+        return _ray_voxels(ray, search, aligned_origin=aligned_origin), False
+    counts = tuple(math.ceil(float((upper[axis] - lower[axis]) / step[axis])) for axis in range(3))
+    cells: set[Voxel] = set()
+    # A very broad tube covers the entire configured volume. Avoid traversing an
+    # arbitrarily long padded central ray in that case.
+    central: set[Voxel] | None = None
+    padding: tuple[int, ...] = (0, 0, 0)
+    if radius < float(np.linalg.norm(upper - lower)):
+        padding = tuple(math.ceil(radius / float(value)) for value in step)
+        expanded_lower = lower - np.asarray(padding, dtype=np.float64) * step
+        expanded_upper = (
+            lower
+            + (np.asarray(counts, dtype=np.float64) + np.asarray(padding, dtype=np.float64)) * step
+        )
+        expanded = replace(
+            search,
+            min_enu_m=(
+                float(expanded_lower[0]),
+                float(expanded_lower[1]),
+                float(expanded_lower[2]),
+            ),
+            max_enu_m=(
+                float(expanded_upper[0]),
+                float(expanded_upper[1]),
+                float(expanded_upper[2]),
+            ),
+        )
+        try:
+            central = _ray_voxels(
+                ray,
+                expanded,
+                aligned_origin=aligned_origin,
+                maximum_cells=policy.maximum_uncertainty_voxels_per_ray,
+            )
+        except _VoxelLimitReached:
+            return set(), True
+    ranges = (
+        ((range(int(counts[0])), range(int(counts[1])), range(int(counts[2]))),)
+        if central is None
+        else (
+            tuple(
+                range(
+                    max(0, int(cell[axis] - 2 * padding[axis])),
+                    min(int(counts[axis]), cell[axis] + 1),
+                )
+                for axis in range(3)
+            )
+            for cell in sorted(central)
+        )
+    )
+    for choices in ranges:
+        # Unlike itertools.product, nested ranges do not materialize axis pools
+        # before the budget can stop an extremely fine or broad expansion.
+        for x in choices[0]:
+            for y in choices[1]:
+                for z in choices[2]:
+                    cell = (x, y, z)
+                    if (
+                        cell not in cells
+                        and len(cells) >= policy.maximum_uncertainty_voxels_per_ray
+                    ):
+                        return cells, True
+                    cells.add(cell)
+    return cells, False
 
 
 def _line_fit(
@@ -157,6 +275,7 @@ class VoxelCandidateModule(ModuleShell):
     business_implemented = True
     policy: f.CandidatePolicy
     motion_policy: f.GeometryPolicy
+    weights: ports.GeometryWeighting
 
     def __post_init__(self) -> None:
         validate_policy(self.motion_policy)
@@ -173,6 +292,9 @@ class VoxelCandidateModule(ModuleShell):
             or not math.isfinite(self.policy.minimum_candidate_score)
             or self.policy.minimum_candidate_score < 0
             or (self.policy.maximum_candidates is not None and self.policy.maximum_candidates <= 0)
+            or not math.isfinite(self.policy.uncertainty_sigma)
+            or self.policy.uncertainty_sigma < 0
+            or self.policy.maximum_uncertainty_voxels_per_ray <= 0
             or (
                 search.forward_range_m is not None
                 and (
@@ -191,7 +313,11 @@ class VoxelCandidateModule(ModuleShell):
         if any(ray.event.world_frame_id != search.world_frame_id for ray in window.rays):
             raise ValueError("candidate search and ray world frames differ")
         validate_predictions(window, search.world_frame_id, predictions)
-        candidates = self._propose_for(window, None)
+        usable = replace(
+            window,
+            rays=tuple(ray for ray in window.rays if self.weights.weight(ray).weight_scale > 0),
+        )
+        candidates, expansion_limited = self._propose_for(usable, None)
         if self.motion_policy.motion_alignment_model is f.MotionAlignmentModel.TRACK_PREDICTION:
             for prediction in sorted(predictions, key=lambda item: item.track_id):
                 if (
@@ -201,7 +327,9 @@ class VoxelCandidateModule(ModuleShell):
                     and window.rays
                     and midpoint_span(window.rays)
                 ):
-                    candidates.extend(self._propose_for(window, prediction))
+                    proposed, limited_expansion = self._propose_for(usable, prediction)
+                    candidates.extend(proposed)
+                    expansion_limited |= limited_expansion
         limited = (
             self.policy.maximum_candidates is not None
             and len(candidates) > self.policy.maximum_candidates
@@ -209,9 +337,22 @@ class VoxelCandidateModule(ModuleShell):
         if self.policy.maximum_candidates is not None:
             candidates = candidates[: self.policy.maximum_candidates]
         insufficient = (
-            len({ray.event.envelope.station_id for ray in window.rays})
+            len({ray.event.envelope.station_id for ray in usable.rays})
             < self.policy.minimum_independent_stations
         )
+        reasons = []
+        if limited:
+            reasons.append("candidate_limit_reached")
+        if expansion_limited:
+            reasons.append("uncertainty_expansion_limit_reached")
+        if len(usable.rays) != len(window.rays):
+            reasons.append("calibration_policy_excluded_rays")
+        if not candidates:
+            reasons.append(
+                "insufficient_independent_stations"
+                if insufficient
+                else "no_supported_forward_ray_voxel"
+            )
         return f.CandidateBatch(
             window=window.key,
             method=f.CandidateMethod.COARSE_VOXEL,
@@ -224,18 +365,12 @@ class VoxelCandidateModule(ModuleShell):
             candidates=tuple(candidates),
             examined_ray_event_ids=examined,
             unguided_search_performed=True,
-            reason_codes=("candidate_limit_reached",)
-            if limited
-            else ()
-            if candidates
-            else ("insufficient_independent_stations",)
-            if insufficient
-            else ("no_supported_forward_ray_voxel",),
+            reason_codes=tuple(reasons),
         )
 
     def _propose_for(
         self, window: f.SealedObservationWindow, prediction: f.TrackPrediction | None
-    ) -> list[f.SpatialCandidate]:
+    ) -> tuple[list[f.SpatialCandidate], bool]:
         search = self.policy.search
         if prediction is not None:
             # Sweep the configured box across possible support reference times;
@@ -256,10 +391,17 @@ class VoxelCandidateModule(ModuleShell):
             else origins_at(window.rays, window.reference_time_ns, prediction.velocity_enu_mps)
         )
         cells: dict[Voxel, dict[m.StationId, set[m.EventId]]] = {}
+        expansion_limited = False
         for index, ray in enumerate(window.rays):
-            for voxel in _ray_voxels(
-                ray, search, aligned_origin=None if aligned is None else aligned[index]
-            ):
+            ray_voxels, limited = _uncertain_voxels(
+                ray,
+                search,
+                self.policy,
+                self.weights.weight(ray).weight_scale,
+                aligned_origin=None if aligned is None else aligned[index],
+            )
+            expansion_limited |= limited
+            for voxel in ray_voxels:
                 cells.setdefault(voxel, {}).setdefault(ray.event.envelope.station_id, set()).add(
                     _event_id(ray)
                 )
@@ -322,7 +464,7 @@ class VoxelCandidateModule(ModuleShell):
                     score_definition=_STATION_SCORE,
                 )
             )
-        return candidates
+        return candidates, expansion_limited
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -344,12 +486,7 @@ class CandidateGenerationModule(ModuleShell):
 
 @dataclass(frozen=True, kw_only=True)
 class GeometryRefinementModule(ModuleShell):
-    """Unweighted continuous localization for admitted clean rays.
-
-    The declared zero independent noise gives zero conditional covariance, not
-    absolute accuracy. Shared errors remain references; weighted/robust fits are
-    separate work. Unknown uncertainty is never replaced by arbitrary noise.
-    """
+    """Conditional weighted/robust localization with explicit exact constraints."""
 
     business_implemented = True
     center_session_id: m.SessionId
@@ -366,6 +503,11 @@ class GeometryRefinementModule(ModuleShell):
             or self.policy.maximum_condition_number < 1
             or not math.isfinite(self.policy.maximum_residual_m)
             or self.policy.maximum_residual_m < 0
+            or not math.isfinite(self.policy.robust_loss_scale_sigma)
+            or self.policy.robust_loss_scale_sigma <= 0
+            or self.policy.maximum_solver_iterations <= 0
+            or not math.isfinite(self.policy.convergence_tolerance_m)
+            or self.policy.convergence_tolerance_m <= 0
         ):
             raise ValueError("invalid geometry policy")
 
@@ -375,8 +517,8 @@ class GeometryRefinementModule(ModuleShell):
         association: f.AssociationBatch,
         predictions: tuple[f.TrackPrediction, ...],
     ) -> f.GeometryBatch:
-        if self.policy.robust_loss_definition != "least_squares":
-            raise NotImplementedError("clean geometry supports only least_squares loss")
+        if self.policy.robust_loss_definition not in ("least_squares", "huber"):
+            raise NotImplementedError("unsupported geometry loss")
         if association.window != window.key:
             raise ValueError("association and observation windows differ")
         if window.key.center_session_id != self.center_session_id or any(
@@ -416,6 +558,8 @@ class GeometryRefinementModule(ModuleShell):
         minimum_angle: float | None = None
         motion: m.MotionAlignmentEvidence | None = None
         covariance: m.Matrix3x3 | None = None
+        ray_weights = tuple(self.weights.weight(ray) for ray in chosen)
+        fit: RayFit | None = None
         prior = (
             next((item for item in predictions if item.track_id == group.prior_track_id), None)
             if group.motion_alignment_model is f.MotionAlignmentModel.TRACK_PREDICTION
@@ -452,13 +596,9 @@ class GeometryRefinementModule(ModuleShell):
         elif len(stations) < self.policy.minimum_independent_stations:
             reasons.append(f.GeometryReason.INSUFFICIENT_STATIONS)
             status = m.FusionStatus.INSUFFICIENT_STATIONS
-        elif any(ray.event.calibration_usage is not m.CalibrationUsage.VALID for ray in chosen):
-            reasons.append(f.GeometryReason.UNSUPPORTED_CALIBRATION_USAGE)
-        elif any(
-            np.any(ray.event.uncertainty.independent_angular_covariance_rad2)
-            or np.any(ray.event.uncertainty.independent_origin_covariance_m2)
-            for ray in chosen
-        ):
+        elif any(item.weight_scale <= 0 for item in ray_weights):
+            reasons.append(f.GeometryReason.CALIBRATION_POLICY_EXCLUDED)
+        elif any(ray.event.uncertainty.model != "tangent_gaussian_v1" for ray in chosen):
             reasons.append(f.GeometryReason.UNSUPPORTED_UNCERTAINTY_MODEL)
         elif not alignment_valid:
             reasons.append(f.GeometryReason.REFERENCE_TIME_ALIGNMENT_UNAVAILABLE)
@@ -477,12 +617,35 @@ class GeometryRefinementModule(ModuleShell):
                     reference_ns=group.reference_time_ns,
                     velocity=None if prior is None else prior.velocity_enu_mps,
                 )
+                if rank == 3:
+                    fit = fit_rays(
+                        chosen,
+                        self.policy,
+                        tuple(item.weight_scale for item in ray_weights),
+                        fitted,
+                        reference_ns=group.reference_time_ns,
+                        velocity=None if prior is None else prior.velocity_enu_mps,
+                    )
+                    fitted = fit.position
+                    origins = (
+                        np.asarray([ray.event.ray_origin_enu_m for ray in chosen])
+                        if prior is None
+                        else origins_at(chosen, group.reference_time_ns, prior.velocity_enu_mps)
+                    )
+                    vector = fitted - origins
+                    unit = np.asarray(directions)
+                    unit = unit / np.linalg.norm(unit, axis=1)[:, None]
+                    depths = np.einsum("ni,ni->n", unit, vector)
+                    errors = np.linalg.norm(vector - depths[:, None] * unit, axis=1)
             except np.linalg.LinAlgError:
                 reasons.append(f.GeometryReason.SOLVER_FAILURE)
             else:
                 residuals = tuple(float(value) for value in errors)
                 if rank == 3:
-                    condition = float((singular[0] / singular[-1]) ** 2)
+                    condition = max(
+                        float((singular[0] / singular[-1]) ** 2),
+                        1.0 if fit is None else fit.condition,
+                    )
                     if not math.isfinite(condition):
                         condition = None
                 if rank < 3 or max(angles) < self.policy.minimum_intersection_angle_rad:
@@ -493,24 +656,30 @@ class GeometryRefinementModule(ModuleShell):
                     reasons.append(f.GeometryReason.EXCESSIVE_RESIDUAL)
                 if np.any(depths < 0):
                     reasons.append(f.GeometryReason.NONFORWARD_SOLUTION)
+                if fit is not None:
+                    if not fit.exact_consistent:
+                        reasons.append(f.GeometryReason.INCONSISTENT_EXACT_CONSTRAINTS)
+                    if not fit.converged:
+                        reasons.append(f.GeometryReason.SOLVER_NOT_CONVERGED)
                 if reasons:
                     status = m.FusionStatus.GEOMETRY_DEGENERATE
                 else:
+                    assert fit is not None
                     status, position = m.FusionStatus.LOCATED, fitted
-                    covariance = ((0.0, 0.0, 0.0),) * 3
+                    covariance = matrix3(fit.covariance)
                     if prior is not None:
                         assert prior.conditional_state_covariance_enu is not None
-                        projection = velocity_projection(chosen, group.reference_time_ns)
+                        projection = fit.velocity_projection
                         velocity_root = covariance_factor(
                             prior.conditional_state_covariance_enu, 6, "prediction covariance"
                         )[3:, :]
                         projected = projection @ velocity_root
-                        covariance = matrix3(projected @ projected.T)
+                        covariance = matrix3(fit.covariance + projected @ projected.T)
                         motion = m.MotionAlignmentEvidence(
                             prior_track_id=prior.track_id,
                             velocity_enu_mps=prior.velocity_enu_mps,
                             velocity_projection_s=matrix3(projection),
-                            independent_position_covariance_enu_m2=((0.0, 0.0, 0.0),) * 3,
+                            independent_position_covariance_enu_m2=matrix3(fit.covariance),
                         )
         measurement = m.FusionMeasurement(
             center_session_id=self.center_session_id,
@@ -541,6 +710,11 @@ class GeometryRefinementModule(ModuleShell):
             measurement=measurement,
             reasons=tuple(reasons),
             motion_alignment_model=group.motion_alignment_model,
+            ray_weights=ray_weights,
+            normalized_residuals=() if fit is None else fit.normalized_residuals,
+            robust_weights=() if fit is None else fit.robust_weights,
+            solver_iterations=0 if fit is None else fit.iterations,
+            solver_converged=fit is not None and fit.converged,
             shared_installation_state_refs=tuple(
                 dict.fromkeys(ray.event.uncertainty.shared_installation_state_ref for ray in chosen)
             ),

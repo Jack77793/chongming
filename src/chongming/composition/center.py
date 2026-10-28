@@ -56,7 +56,13 @@ def reference_policy(
             tangent_basis_orthogonality_tolerance=1e-6,
             calibration_usage_rules=tuple(
                 f.CalibrationUsageRule(
-                    usage=usage, action=f.CalibrationAction.ACCEPT, geometry_weight_scale=1
+                    usage=usage,
+                    action=f.CalibrationAction.ACCEPT,
+                    geometry_weight_scale={
+                        m.CalibrationUsage.VALID: 1.0,
+                        m.CalibrationUsage.FROZEN: 0.25,
+                        m.CalibrationUsage.STALE: 0.1,
+                    }[usage],
                 )
                 for usage in m.CalibrationUsage
             ),
@@ -81,6 +87,8 @@ def reference_policy(
             minimum_independent_stations=2,
             minimum_candidate_score=2,
             maximum_candidates=None,
+            uncertainty_sigma=3.0,
+            maximum_uncertainty_voxels_per_ray=100000,
         ),
         association=f.AssociationPolicy(
             minimum_independent_stations=2,
@@ -97,7 +105,9 @@ def reference_policy(
             maximum_condition_number=1e6,
             maximum_residual_m=1,
             robust_loss_definition="least_squares",
-            robust_loss_scale_m=1,
+            robust_loss_scale_sigma=1.5,
+            maximum_solver_iterations=50,
+            convergence_tolerance_m=1e-8,
             motion_alignment_model=f.MotionAlignmentModel.TRACK_PREDICTION,
             conservative_speed_bound_mps=None,
             maximum_unaligned_span_ns=1_000_000,
@@ -148,13 +158,15 @@ def declare_center(
     windows = EventWindowModule(
         center_session_id=center_session_id, policy=policy.windows, clock=clock, stations=stations
     )
-    voxels = VoxelCandidateModule(policy=policy.candidates, motion_policy=policy.geometry)
+    weights = CalibrationWeightingModule(rules=policy.admission.calibration_usage_rules)
+    voxels = VoxelCandidateModule(
+        policy=policy.candidates, motion_policy=policy.geometry, weights=weights
+    )
     direct = DirectGeometryCandidateModule(search=policy.candidates.search)
     candidates = CandidateGenerationModule(policy=policy.candidates, voxel=voxels, direct=direct)
     association = CrossStationAssociationModule(
-        policy=policy.association, motion_policy=policy.geometry
+        policy=policy.association, motion_policy=policy.geometry, weights=weights
     )
-    weights = CalibrationWeightingModule(rules=policy.admission.calibration_usage_rules)
     geometry = GeometryRefinementModule(
         center_session_id=center_session_id,
         world_frame_id=policy.admission.world_frame_id,
@@ -215,11 +227,11 @@ def declare_center(
         ("center/stations", "center/calibrations", "center/journal", "center/clock-mapping"),
     )
     bind("center/windows", windows, ("center/clock-mapping", "center/stations"))
-    bind("center/voxels", voxels)
+    bind("center/weights", weights)
+    bind("center/voxels", voxels, ("center/weights",))
     bind("center/direct-candidates", direct)
     bind("center/candidates", candidates, ("center/voxels", "center/direct-candidates"))
-    bind("center/association", association)
-    bind("center/weights", weights)
+    bind("center/association", association, ("center/weights",))
     bind("center/geometry", geometry, ("center/weights",))
     bind("center/tracking", tracking)
     bind(

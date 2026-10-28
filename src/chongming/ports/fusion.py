@@ -163,7 +163,10 @@ class CrossStationAssociator(Protocol):
 
 class GeometryWeighting(Protocol):
     def weight(self, ray: AdmittedRay) -> RayGeometryWeight:
-        """Apply external calibration usage policy to event-time evidence."""
+        """Scale independent precision using event-time usage; zero excludes a ray.
+
+        Shared installation/calibration uncertainty is not per-ray independent noise.
+        """
         ...
 
 

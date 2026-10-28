@@ -142,6 +142,9 @@ class AssociationConflictReason(StrEnum):
     PREDICTION_GATE_FAILED = "prediction_gate_failed"
     SPATIAL_GATE_FAILED = "spatial_gate_failed"
     DEGENERATE_GEOMETRY = "degenerate_geometry"
+    SOLVER_FAILURE = "solver_failure"
+    SOLVER_NOT_CONVERGED = "solver_not_converged"
+    INCONSISTENT_EXACT_CONSTRAINTS = "inconsistent_exact_constraints"
     CANDIDATE_SEARCH_TRUNCATED = "candidate_search_truncated"
     ASSOCIATION_SEARCH_TRUNCATED = "association_search_truncated"
 
@@ -170,8 +173,10 @@ class GeometryReason(StrEnum):
     SOLVER_FAILURE = "solver_failure"
     NONFORWARD_SOLUTION = "nonforward_solution"
     INVALID_SUPPORT_GROUP = "invalid_support_group"
-    UNSUPPORTED_CALIBRATION_USAGE = "unsupported_calibration_usage"
     UNSUPPORTED_UNCERTAINTY_MODEL = "unsupported_uncertainty_model"
+    CALIBRATION_POLICY_EXCLUDED = "calibration_policy_excluded"
+    INCONSISTENT_EXACT_CONSTRAINTS = "inconsistent_exact_constraints"
+    SOLVER_NOT_CONVERGED = "solver_not_converged"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -189,6 +194,12 @@ class RegistryWriteResult:
 
 @dataclass(frozen=True, kw_only=True)
 class CalibrationUsageRule:
+    """Scale independent precision; zero/non-ACCEPT excludes geometry evidence.
+
+    No scale turns shared pose errors into independent noise. Exact independent
+    constraints stay exact under a positive scale, including frozen/stale usage.
+    """
+
     usage: CalibrationUsage
     action: CalibrationAction
     geometry_weight_scale: float
@@ -253,11 +264,20 @@ class EventWindowPolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class CandidatePolicy:
+    """A conservative k-sigma tube, not a probability of target occupancy.
+
+    Zero sigma disables expansion. The per-ray uncertainty budget bounds retained
+    cells and central grid-plane traversal. Exhaustion marks the search incomplete;
+    downstream association cannot assert uniqueness.
+    """
+
     search: VoxelSearchSpec
     primary_method: CandidateMethod
     minimum_independent_stations: int
     minimum_candidate_score: float
     maximum_candidates: int | None
+    uncertainty_sigma: float
+    maximum_uncertainty_voxels_per_ray: int
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -287,6 +307,10 @@ class GeometryPolicy:
     maximum_unaligned_span_ns bounds exposure midpoint differences, not arrival
     jitter or exposure duration. TRACK_PREDICTION keeps this narrow unguided path
     for new targets; an unknown speed never becomes a zero-velocity assumption.
+    Huber scale is dimensionless in whitened 2D perpendicular residual space.
+    Both losses iterate depth-dependent angular covariance to the supplied metric
+    tolerance and iteration budget. The metric residual limit still applies to
+    every supporting ray, including robustly downweighted observations.
     """
 
     minimum_independent_stations: int
@@ -294,7 +318,9 @@ class GeometryPolicy:
     maximum_condition_number: float
     maximum_residual_m: float
     robust_loss_definition: str
-    robust_loss_scale_m: float
+    robust_loss_scale_sigma: float
+    maximum_solver_iterations: int
+    convergence_tolerance_m: float
     motion_alignment_model: MotionAlignmentModel
     conservative_speed_bound_mps: float | None
     maximum_unaligned_span_ns: int
@@ -557,6 +583,8 @@ class AssociationBatch:
 
 @dataclass(frozen=True, kw_only=True)
 class RayGeometryWeight:
+    """Independent information multiplier, never another station vote."""
+
     event_id: EventId
     weight_scale: float
     reason_codes: tuple[str, ...]
@@ -564,7 +592,13 @@ class RayGeometryWeight:
 
 @dataclass(frozen=True, kw_only=True)
 class GeometryResult:
-    """Degenerate groups retain references and reasons without an invented position."""
+    """Degenerate groups retain references and reasons without an invented position.
+
+    Normalized residuals use independent covariance after the usage penalty.
+    None denotes a violated zero-variance constraint, not a finite residual score.
+    Robust weights inflate the local residual model used for conditional covariance;
+    they do not establish calibrated robust-estimator or absolute-pose coverage.
+    """
 
     window: WindowKey
     hypothesis_id: str
@@ -573,6 +607,11 @@ class GeometryResult:
     motion_alignment_model: MotionAlignmentModel
     shared_installation_state_refs: tuple[InstallationStateRef, ...]
     shared_calibration_solution_refs: tuple[CalibrationSolutionRef, ...]
+    ray_weights: tuple[RayGeometryWeight, ...]
+    normalized_residuals: tuple[float | None, ...]
+    robust_weights: tuple[float, ...]
+    solver_iterations: int
+    solver_converged: bool
 
 
 @dataclass(frozen=True, kw_only=True)

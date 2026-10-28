@@ -169,6 +169,11 @@ class ArchitectureStructureTests(unittest.TestCase):
         self.assertIs(shells.CenterFusionModule, type(assembly.center.fusion))
         self.assertIs(modules.CenterTrackingModule, type(assembly.center.tracking))
         self.assertIs(modules.CrossStationAssociationModule, type(assembly.center.association))
+        self.assertIs(modules.CalibrationWeightingModule, type(assembly.center.weights))
+        self.assertTrue(assembly.center.weights.business_implemented)
+        self.assertIs(assembly.center.voxels.weights, assembly.center.weights)
+        self.assertIs(assembly.center.association.weights, assembly.center.weights)
+        self.assertIs(assembly.center.geometry.weights, assembly.center.weights)
 
     def test_routes_and_candidate_methods_keep_all_modules_constructed(self) -> None:
         signatures: set[frozenset[tuple[str, type[object]]]] = set()
@@ -282,7 +287,6 @@ class ArchitectureStructureTests(unittest.TestCase):
             },
             "fusion.py": {
                 "DirectGeometryCandidateModule": {"propose"},
-                "CalibrationWeightingModule": {"weight"},
             },
             "runtime.py": {
                 "EventTransportModule": {"submit", "submit_progress", "collect", "drain"},

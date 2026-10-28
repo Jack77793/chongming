@@ -35,18 +35,6 @@ def origins_at(rays: tuple[f.AdmittedRay, ...], reference_ns: int, velocity: m.V
     return origins + dt[:, None] * np.asarray(velocity, dtype=np.float64)
 
 
-def velocity_projection(rays: tuple[f.AdmittedRay, ...], reference_ns: int) -> Array:
-    """For a full-rank fit, p_fit = y - B v_prior and y observes p + B v."""
-    directions = np.asarray([ray.event.ray_direction_enu_unit for ray in rays])
-    directions = directions / np.linalg.norm(directions, axis=1)[:, None]
-    projectors = np.eye(3) - directions[:, :, None] * directions[:, None, :]
-    dt = np.asarray([(midpoint(ray) - reference_ns) / 1e9 for ray in rays])
-    projection: Array = np.linalg.lstsq(
-        projectors.reshape(-1, 3), (dt[:, None, None] * projectors).reshape(-1, 3), rcond=None
-    )[0]
-    return projection
-
-
 def matrix3(value: Array) -> m.Matrix3x3:
     return cast(m.Matrix3x3, tuple(tuple(float(item) for item in row) for row in value))
 

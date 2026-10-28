@@ -12,7 +12,6 @@ from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.modules.fusion_association import CrossStationAssociationModule
 from chongming.modules.fusion_geometry import VoxelCandidateModule, _line_fit
-from chongming.modules.fusion_motion import velocity_projection
 from tests import test_fusion_geometry as helpers
 
 SECOND = 10**9
@@ -37,6 +36,7 @@ class MotionFusionTests(unittest.TestCase):
                 self.fixture.associator.policy, temporal_gate_ns=40_000_000, spatial_gate_m=1e-6
             ),
             motion_policy=self.geometry.policy,
+            weights=self.geometry.weights,
         )
         self.voxels = VoxelCandidateModule(
             policy=replace(
@@ -44,6 +44,7 @@ class MotionFusionTests(unittest.TestCase):
                 search=replace(self.fixture.search, step_enu_m=(0.02, 0.02, 0.02)),
             ),
             motion_policy=self.geometry.policy,
+            weights=self.geometry.weights,
         )
 
     def window(
@@ -129,12 +130,18 @@ class MotionFusionTests(unittest.TestCase):
         evidence = result.measurement.motion_alignment
         assert evidence is not None
         projection = np.asarray(evidence.velocity_projection_s)
-        np.testing.assert_allclose(
-            projection,
-            velocity_projection(window.rays, group.reference_time_ns),
-            rtol=0,
-            atol=1e-15,
+        directions = np.asarray([ray.event.ray_direction_enu_unit for ray in window.rays])
+        projectors = np.eye(3) - directions[:, :, None] * directions[:, None, :]
+        dt = np.asarray(
+            [
+                (ray.event.capture_time.exposure_start_ns - group.reference_time_ns) / 1e9
+                for ray in window.rays
+            ]
         )
+        expected_projection = np.linalg.solve(
+            projectors.sum(axis=0), (dt[:, None, None] * projectors).sum(axis=0)
+        )
+        np.testing.assert_allclose(projection, expected_projection, rtol=0, atol=1e-15)
         expected = projection @ (4 * np.eye(3)) @ projection.T
         self.assertGreater(float(np.trace(expected)), 0)
         np.testing.assert_allclose(
@@ -152,6 +159,67 @@ class MotionFusionTests(unittest.TestCase):
         )
         self.assertEqual(asdict(window), original)
         self.assertEqual(len(result.shared_installation_state_refs), 3)
+
+    def test_noisy_alignment_projects_velocity_with_the_weighted_estimator(self) -> None:
+        window = self.window()
+        variances = (1e-6, 2e-6, 4e-6)
+        window = replace(
+            window,
+            rays=tuple(
+                replace(
+                    ray,
+                    event=replace(
+                        ray.event,
+                        uncertainty=replace(
+                            ray.event.uncertainty,
+                            independent_origin_covariance_m2=cast(
+                                m.Matrix3x3,
+                                tuple(
+                                    tuple(float(value) for value in row)
+                                    for row in variance * np.eye(3)
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+                for ray, variance in zip(window.rays, variances, strict=True)
+            ),
+        )
+        prediction = self.prediction(window)
+        candidates = self.voxels.propose(window, (prediction,))
+        association = self.associator.associate(window, candidates, (prediction,))
+        self.assertEqual(len(association.selected_groups), 1)
+        group = association.selected_groups[0]
+        (result,) = self.geometry.refine(window, association, (prediction,)).results
+        self.fixture.assert_position(result.measurement, self.expected_at(group.reference_time_ns))
+        evidence = result.measurement.motion_alignment
+        assert evidence is not None
+        directions = np.asarray([ray.event.ray_direction_enu_unit for ray in window.rays])
+        projectors = np.eye(3) - directions[:, :, None] * directions[:, None, :]
+        dt = np.asarray(
+            [
+                (ray.event.capture_time.exposure_start_ns - group.reference_time_ns) / 1e9
+                for ray in window.rays
+            ]
+        )
+        information = projectors / np.asarray(variances)[:, None, None]
+        independent = np.linalg.inv(information.sum(axis=0))
+        projection = independent @ (dt[:, None, None] * information).sum(axis=0)
+        np.testing.assert_allclose(
+            np.asarray(evidence.velocity_projection_s), projection, rtol=0, atol=1e-15
+        )
+        np.testing.assert_allclose(
+            np.asarray(evidence.independent_position_covariance_enu_m2),
+            independent,
+            rtol=0,
+            atol=1e-15,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result.measurement.conditional_position_covariance_enu_m2),
+            independent + 4 * projection @ projection.T,
+            rtol=0,
+            atol=1e-15,
+        )
 
     def test_new_target_cannot_average_wide_exposures_even_if_static_lines_intersect(self) -> None:
         window = self.window(velocity=(0.0, 0.0, 0.0))

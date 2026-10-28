@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.modules.base import ModuleShell
+from chongming.modules.fusion_estimation import fit_rays
 from chongming.modules.fusion_geometry import (
     _STATION_SCORE,
     _event_id,
@@ -24,9 +25,11 @@ from chongming.modules.fusion_matching import ExclusiveChoice, exclusive_compone
 from chongming.modules.fusion_motion import (
     alignment_reference,
     midpoint_span,
+    origins_at,
     validate_policy,
     validate_predictions,
 )
+from chongming.ports import fusion as ports
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -40,6 +43,7 @@ class CrossStationAssociationModule(ModuleShell):
     business_implemented = True
     policy: f.AssociationPolicy
     motion_policy: f.GeometryPolicy
+    weights: ports.GeometryWeighting
 
     def __post_init__(self) -> None:
         validate_policy(self.motion_policy)
@@ -73,7 +77,11 @@ class CrossStationAssociationModule(ModuleShell):
         choice_groups: list[int] = []
         choice_priors: list[m.TrackId | None] = []
         examined: set[tuple[tuple[m.EventId, ...], m.TrackId | None]] = set()
-        truncated = "candidate_limit_reached" in candidates.reason_codes
+        candidate_truncated = any(
+            reason in candidates.reason_codes
+            for reason in ("candidate_limit_reached", "uncertainty_expansion_limit_reached")
+        )
+        truncated = candidate_truncated
         if truncated:
             conflicts.append(
                 self._conflict(
@@ -117,6 +125,8 @@ class CrossStationAssociationModule(ModuleShell):
                         *(sorted(set(item.alternative_ray_event_ids)) for item in stations)
                     ):
                         chosen = tuple(rays[event_id] for event_id in ids)
+                        if any(self.weights.weight(ray).weight_scale <= 0 for ray in chosen):
+                            continue
                         spread = midpoint_span(chosen)
                         modes: list[f.TrackPrediction | None] = []
                         if candidate.origin is f.CandidateOrigin.UNGUIDED_SEARCH:
@@ -265,7 +275,7 @@ class CrossStationAssociationModule(ModuleShell):
                 break
         selected: list[f.AssociatedRayGroup] = []
         ambiguous = truncated
-        if truncated and "candidate_limit_reached" not in candidates.reason_codes:
+        if truncated and not candidate_truncated:
             conflicts.append(
                 self._conflict(
                     window,
@@ -388,6 +398,37 @@ class CrossStationAssociationModule(ModuleShell):
             return f.AssociationConflictReason.SPATIAL_GATE_FAILED, None, 0.0
         if rank < 3:
             return f.AssociationConflictReason.DEGENERATE_GEOMETRY, None, 0.0
+        if any(
+            np.any(ray.event.uncertainty.independent_angular_covariance_rad2)
+            or np.any(ray.event.uncertainty.independent_origin_covariance_m2)
+            for ray in rays
+        ):
+            try:
+                fit = fit_rays(
+                    rays,
+                    self.motion_policy,
+                    tuple(self.weights.weight(ray).weight_scale for ray in rays),
+                    fitted,
+                    reference_ns=reference_ns,
+                    velocity=velocity,
+                )
+            except np.linalg.LinAlgError:
+                return f.AssociationConflictReason.SOLVER_FAILURE, None, 0.0
+            if not fit.converged:
+                return f.AssociationConflictReason.SOLVER_NOT_CONVERGED, None, 0.0
+            if not fit.exact_consistent:
+                return f.AssociationConflictReason.INCONSISTENT_EXACT_CONSTRAINTS, None, 0.0
+            fitted = fit.position
+            origins = (
+                np.asarray([ray.event.ray_origin_enu_m for ray in rays])
+                if velocity is None
+                else origins_at(rays, reference_ns, velocity)
+            )
+            directions = np.asarray([ray.event.ray_direction_enu_unit for ray in rays])
+            directions = directions / np.linalg.norm(directions, axis=1)[:, None]
+            vector = fitted - origins
+            depths = np.einsum("ni,ni->n", directions, vector)
+            residuals = np.linalg.norm(vector - depths[:, None] * directions, axis=1)
         if float(residuals.max()) > self.policy.spatial_gate_m:
             return f.AssociationConflictReason.SPATIAL_GATE_FAILED, None, 0.0
         scale = max(
