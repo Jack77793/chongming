@@ -12,6 +12,7 @@
 | 构建与发行验证               | [开发指南：本地发行](docs/development.md#本地发行)                            |
 | 模块职责、数据契约与设计限制 | [设计说明](docs/design.md)                                                    |
 | 命令、场景配置与资产         | [用户指南](docs/user-guide.md)                                                |
+| 可视化数据契约(模式 2-4)     | [可视化契约](src/chongming/contracts/visualization.py)                        |
 | 授权、数据来源与署名         | [许可声明](README.md#许可与使用责任)、[数据许可](docs/user-guide.md#数据许可) |
 
 ## 实现与协作
