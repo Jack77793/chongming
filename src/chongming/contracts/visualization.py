@@ -18,6 +18,7 @@ from chongming.contracts.model import (
     EventId,
     FusionStatus,
     MeasurementId,
+    Rotation3x3,
     SessionId,
     StationId,
     TrackId,
@@ -34,6 +35,8 @@ class AlgorithmOutputUpdate:
     update_id is monotonic within one run; scenario_time_ns and step_no come
     from the experiment clock, never wall time. Godot detects changes by
     comparing update_id and only processes newer updates.
+
+    station_states provides per-station pose and calibration visualization.
     """
 
     update_id: int
@@ -41,6 +44,7 @@ class AlgorithmOutputUpdate:
     step_no: int
     edge_events: tuple[EdgeStationEvent, ...] | None
     center_events: CenterFusionEvent | None
+    station_states: tuple[StationVisualizationState, ...] | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,10 +117,11 @@ class MeasurementVisualization:
     """Minimal measurement data for 3D point and ellipsoid rendering.
 
     position_enu_m and position_std_enu_m are None when status != LOCATED.
-    position_std_enu_m is the square root of covariance diagonal, for rendering
-    an error ellipsoid. supporting_ray_ids cross-references EdgeStationEvent rays
-    for highlighting in mode 4. minimum_intersection_angle_deg and geometry_condition
-    are quality metrics for diagnostic overlays.
+    position_std_enu_m is the square root of covariance diagonal; render as red
+    circle with diameter equal to the major axis (largest std component).
+    supporting_ray_ids cross-references EdgeStationEvent rays for highlighting
+    in mode 4. minimum_intersection_angle_deg and geometry_condition are quality
+    metrics for diagnostic overlays.
     """
 
     measurement_id: MeasurementId
@@ -139,6 +144,10 @@ class TrackVisualization:
     recent_position_enu_m and recent_time_ns provide the newest history point;
     Godot appends it to the local buffer and prunes old entries. position_std_enu_m
     and velocity_std_enu_mps are square roots of covariance diagonals.
+
+    Trajectory line color is determined by lifecycle: tentative (light red),
+    confirmed (deep red), coasting (orange), deleted (gray). The current position
+    marker uses the same color scheme.
     """
 
     track_id: TrackId
@@ -169,7 +178,9 @@ class TruthTargetState:
     """Ground truth target state for one scenario step.
 
     target_id matches scenario truth IDs, not online track IDs. geometry_type
-    is sphere/box/aircraft for rendering correct bounding volumes.
+    is sphere/box/aircraft for rendering correct bounding volumes. Green circle
+    at position with velocity arrow; station-to-target lines drawn only when
+    in_field_of_view (green thin line). Circle radius matches bounding geometry.
     """
 
     target_id: str
@@ -177,6 +188,8 @@ class TruthTargetState:
     position_enu_m: Vec3
     velocity_enu_mps: Vec3
     geometry_type: str
+    bounding_radius_m: float
+    visibility_by_station: tuple[TargetStationVisibility, ...]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -185,14 +198,48 @@ class VoxelSpaceVisualization:
 
     Only non-zero scored voxels are transmitted to reduce data volume. The search
     box and voxel step define the grid; scored_voxels contain sparse (index, score)
-    pairs. Godot maps scores to transparency: score 0 is fully transparent (not sent),
-    higher scores increase opacity. Typical sparsity: 1-5% of total voxel space.
+    pairs. Godot maps integer scores to transparency: score 0 is fully transparent
+    (not sent), higher scores increase opacity. Typical sparsity: 1-5% of total
+    voxel space. max_score provides normalization hint for transparency mapping.
     """
 
     search_box_min_enu_m: Vec3
     search_box_max_enu_m: Vec3
     voxel_step_enu_m: Vec3
     scored_voxels: tuple[ScoredVoxel, ...]
+    max_score: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class TargetStationVisibility:
+    """Target visibility from one station's main camera for truth visualization.
+
+    Determines whether to draw station-to-target line: only drawn when in_field_of_view
+    is true (green thin line). capture_eligible indicates unobstructed line of sight.
+    """
+
+    station_id: StationId
+    in_field_of_view: bool
+    capture_eligible: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class StationVisualizationState:
+    """Per-station pose and calibration state for visualization.
+
+    Provides configured, actual (truth), and calibrated orientations for displaying
+    calibration drift. Orientation errors are computed as (actual - configured) and
+    (calibrated - configured). Display units: arcmin or arcsec for small angles.
+    All rotations are R_enu_from_main (ENU to camera right/down/forward).
+    """
+
+    station_id: StationId
+    configured_orientation_enu_from_main: Rotation3x3
+    actual_orientation_enu_from_main: Rotation3x3 | None
+    calibrated_orientation_enu_from_main: Rotation3x3 | None
+    calibration_usage: CalibrationUsage | None
+    truth_orientation_error_rad: Vec3 | None
+    calibration_orientation_error_rad: Vec3 | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -200,11 +247,12 @@ class ScoredVoxel:
     """Single non-zero scored voxel in the candidate search space.
 
     grid_index is the integer grid coordinate (i, j, k) within the voxel space.
-    World position is computed as: min + grid_index * step. score is the raw
-    candidate score from the voxel search; supporting_station_count is the number
-    of independent stations contributing rays through this voxel (optional diagnostic).
+    World position is computed as: min + grid_index * step. score is an integer
+    from voxel search (not float); sparse transmission skips score=0 voxels.
+    supporting_station_count is the number of independent stations contributing
+    rays through this voxel (optional diagnostic).
     """
 
     grid_index: tuple[int, int, int]
-    score: float
+    score: int
     supporting_station_count: int
