@@ -42,6 +42,24 @@
           meta.description = "Format the project with nixfmt, Ruff and Prettier";
         };
 
+      # Test-scene assets that are not in Git. Each archive is produced by
+      # scripts/pack_local_asset.py and attached to a GitHub prerelease; Nix
+      # pins the bytes. See docs/user-guide.md#测例资产.
+      localAssetsFor =
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          hannover-500m = pkgs.fetchurl {
+            name = "hannover-500m-2026-10-28.tar.gz";
+            url = "https://github.com/Mikhail-YellowBegonia/chongming/releases/download/assets-hannover-500m-2026-10-28/hannover-500m-2026-10-28.tar.gz";
+            sha256 = "cdb847e50f59757a29de04f4a1f05879322e76b8164402b7b394829c78511510";
+            # OSM content is ODbL; DEM provider terms are recorded in the archive README.
+            meta.license = [ lib.licenses.odbl ];
+          };
+        };
+
       appsFor =
         system:
         let
@@ -117,6 +135,7 @@
     in
     {
       apps = lib.genAttrs systems appsFor;
+      packages = lib.genAttrs systems localAssetsFor;
       devShells = lib.genAttrs systems devShellsFor;
       formatter = lib.genAttrs systems (system: treefmtFor (pkgsFor system));
     };

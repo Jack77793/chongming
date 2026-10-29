@@ -21,12 +21,10 @@ import threading
 import time
 import uuid
 from contextlib import ExitStack
+from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
-
-import numpy as np
-from numpy.typing import NDArray
 
 from chongming.contracts.scene import (
     BoxGeometry,
@@ -42,6 +40,7 @@ from chongming.contracts.scene import (
     TreeVisualSpec,
     TriangleMeshGeometry,
 )
+from chongming.rendering.geometry import asset_mesh
 
 _REQUEST_HEADER = struct.Struct("<I")
 _RESPONSE_HEADER = struct.Struct("<QQ")
@@ -49,6 +48,16 @@ _MAX_REQUEST = 256 * 1024 * 1024
 GODOT_VERSION = "4.7.2"
 _EXTERNAL_PROJECT_ENV = "CHONGMING_GODOT_EXTERNAL_PROJECT"
 _EXTERNAL_SCENE_ENV = "CHONGMING_GODOT_EXTERNAL_SCENE"
+
+
+@dataclass(frozen=True)
+class UiImage:
+    """Final sensor pixels shown in the Godot window: tightly packed RGB8."""
+
+    key: str
+    width: int
+    height: int
+    pixels: bytes
 
 
 def _rotation(state: KinematicState) -> list[float]:
@@ -106,13 +115,17 @@ def _entity(
         payload["parameters"] = [float(value) for value in geometry.half_extents_body_m]
     elif isinstance(geometry, CylinderGeometry):
         payload["parameters"] = [float(geometry.radius_m), float(geometry.height_m)]
-    elif isinstance(geometry, TriangleMeshGeometry):
+    elif isinstance(geometry, TriangleMeshGeometry | ExternalAssetGeometry):
+        # Bundled models are sent as the same body-frame mesh Python uses for truth.
+        mesh = (
+            asset_mesh(geometry.asset_identifier)
+            if isinstance(geometry, ExternalAssetGeometry)
+            else geometry
+        )
         payload["vertices"] = [
-            [float(value) for value in vertex] for vertex in geometry.vertices_body_m
+            [float(value) for value in vertex] for vertex in mesh.vertices_body_m
         ]
-        payload["triangles"] = [list(triangle) for triangle in geometry.triangle_vertex_indices]
-    elif isinstance(geometry, ExternalAssetGeometry):
-        payload["asset_model"] = geometry.asset_identifier
+        payload["triangles"] = [list(triangle) for triangle in mesh.triangle_vertex_indices]
     else:  # pragma: no cover - GeometrySpec is a closed union
         raise TypeError(f"unsupported geometry: {type(geometry).__name__}")
     return payload
@@ -404,6 +417,8 @@ def projected_footprints(
             ]
         elif isinstance(item.geometry, TriangleMeshGeometry):
             local = list(item.geometry.vertices_body_m)
+        elif isinstance(item.geometry, ExternalAssetGeometry):
+            local = list(asset_mesh(item.geometry.asset_identifier).vertices_body_m)
         else:
             raise TypeError(f"unsupported aircraft geometry: {type(item.geometry).__name__}")
         projected: list[tuple[float, float]] = []
@@ -442,37 +457,6 @@ def projected_footprints(
             if width > 0 and height > 0:
                 result[str(item.truth_object_id)] = (width, height)
     return result
-
-
-def srgb_to_linear(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Decode camera RGB for energy-domain exposure integration and noise."""
-    return np.where(values <= 0.04045, values / 12.92, ((values + 0.055) / 1.055) ** 2.4)
-
-
-def quantize_rgb8(
-    intensity: NDArray[np.float64],
-    intensity_min: float,
-    intensity_max: float,
-    noise_std: float,
-    seed: int,
-    stream: str,
-) -> bytes:
-    if intensity_max <= intensity_min:
-        raise ValueError("intensity_max must be greater than intensity_min")
-    if noise_std < 0:
-        raise ValueError("sensor noise standard deviation cannot be negative")
-    values = intensity
-    if noise_std:
-        digest = __import__("hashlib").blake2b(f"{seed}:{stream}".encode(), digest_size=16).digest()
-        values = values + np.random.Generator(
-            np.random.PCG64(int.from_bytes(digest, "big"))
-        ).normal(0.0, noise_std, values.shape)
-    linear = np.clip((values - intensity_min) / (intensity_max - intensity_min), 0.0, 1.0)
-    encoded = np.where(linear <= 0.0031308, 12.92 * linear, 1.055 * linear ** (1 / 2.4) - 0.055)
-    return np.asarray(
-        np.rint(encoded * 255.0),
-        dtype=np.uint8,
-    ).tobytes()
 
 
 def _read_exact(sock: socket.socket, count: int) -> bytes:
@@ -739,6 +723,78 @@ class GodotRenderer:
             if status_length != 1:
                 raise RuntimeError("Godot freeview returned an invalid status")
             return _read_exact(sock, 1) == b"\x01"
+
+    def ui_exchange(
+        self, state: dict[str, Any], images: tuple[UiImage, ...] = ()
+    ) -> list[dict[str, Any]]:
+        """Push UI state and sensor images; return the user commands Godot queued.
+
+        Python is the only requester. Godot stores the latest state for display
+        and answers with the input collected since the previous exchange.
+        """
+        header = encode_ui_request(state, images)
+        with self._lock:
+            sock = self._socket
+            if sock is None:
+                raise RuntimeError("Godot renderer is closed")
+            sock.sendall(header)
+            for image in images:
+                sock.sendall(image.pixels)
+            reply_length, _render_ns = _RESPONSE_HEADER.unpack(
+                _read_exact(sock, _RESPONSE_HEADER.size)
+            )
+            if not 0 < reply_length <= _MAX_REQUEST:
+                raise RuntimeError("Godot UI reply has an invalid length")
+            reply = _read_exact(sock, reply_length)
+        return decode_ui_reply(reply, state["version"], tuple(image.key for image in images))
+
+
+def encode_ui_request(state: dict[str, Any], images: tuple[UiImage, ...]) -> bytes:
+    """Frame a UI request: length-prefixed JSON; the RGB8 trailer follows in image order."""
+    version = state.get("version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise TypeError("UI state requires an integer version")
+    manifest: list[dict[str, Any]] = []
+    offset = 0
+    for image in images:
+        if image.width <= 0 or image.height <= 0:
+            raise ValueError(f"UI image {image.key!r} has an invalid size")
+        if len(image.pixels) != image.width * image.height * 3:
+            raise ValueError(f"UI image {image.key!r} is not tightly packed RGB8")
+        manifest.append(
+            {
+                "key": image.key,
+                "width": image.width,
+                "height": image.height,
+                "offset": offset,
+                "length": len(image.pixels),
+            }
+        )
+        offset += len(image.pixels)
+    if len({entry["key"] for entry in manifest}) != len(manifest):
+        raise ValueError("UI image keys must be unique")
+    request = {"mode": "ui", "state": state, "images": manifest, "binary_length": offset}
+    payload = json.dumps(request, ensure_ascii=False, allow_nan=False).encode()
+    if len(payload) >= 2**32 or len(payload) + offset > _MAX_REQUEST:
+        raise ValueError("Godot UI request is too large")
+    return _REQUEST_HEADER.pack(len(payload)) + payload
+
+
+def decode_ui_reply(
+    reply: bytes, version: int, image_keys: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Validate Godot's UI reply against what was sent and return its commands."""
+    document = json.loads(reply)
+    if not isinstance(document, dict):
+        raise TypeError("Godot UI reply must be a JSON object")
+    accepted, commands = document.get("accepted"), document.get("commands")
+    if not isinstance(accepted, dict) or not isinstance(commands, list):
+        raise TypeError("Godot UI reply requires accepted and commands")
+    if not all(isinstance(c, dict) and isinstance(c.get("type"), str) for c in commands):
+        raise TypeError("Godot UI commands must be objects with a string type")
+    if accepted.get("version") != version or accepted.get("images") != list(image_keys):
+        raise RuntimeError(f"Godot UI accepted {accepted!r}, expected version {version}")
+    return commands
 
 
 _default_renderer: GodotRenderer | None = None

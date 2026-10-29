@@ -119,33 +119,20 @@ from chongming.ports.scene import (
 from chongming.rendering.geometry import (
     contains_point,
     mesh_segment_may_intersect,
+    resolve_geometry,
     surface_hits,
 )
 from chongming.rendering.godot import (
     close_default_renderer,
     default_renderer,
     projected_footprints,
-    quantize_rgb8,
     render_rgb8,
-    srgb_to_linear,
 )
 from chongming.rendering.occlusion_index import OcclusionIndex
 from chongming.scenarios.behaviors import sample_behavior
 
 _EPS = 1e-9
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
-
-
-def exposure_sample_times(capture: CaptureTime, count: int) -> tuple[int, ...]:
-    """Uniform sub-exposure midpoints; the authoritative truth midpoint is separate."""
-    if count <= 0:
-        raise ValueError("exposure_samples must be positive")
-    duration = capture.exposure_end_ns - capture.exposure_start_ns
-    if duration < 0:
-        raise ValueError("exposure end cannot precede start")
-    return tuple(
-        capture.exposure_start_ns + (2 * k + 1) * duration // (2 * count) for k in range(count)
-    )
 
 
 def _scheduled_exposures(
@@ -730,6 +717,7 @@ class VisibilityModule(ModuleShell):
             return min(candidates, key=lambda item: item[0]) if candidates else None
         if pose is None or geometry is None:
             return None
+        geometry = resolve_geometry(geometry)
         if isinstance(geometry, TriangleMeshGeometry) and not mesh_segment_may_intersect(
             origin, target, pose, geometry
         ):
@@ -1128,8 +1116,6 @@ class CameraImagingModule(ModuleShell):
         artifacts = request.imaging_spec.sensor_artifacts
         if artifacts.output_pixel_format is not PixelFormat.RGB8:
             raise ValueError("the Godot scene imager requires rgb8 output")
-        if request.imaging_spec.exposure_samples <= 0:
-            raise ValueError("exposure_samples must be positive")
         frames: list[CameraFrame] = []
         truths: list[CameraFrameTruth] = []
         for frame in request.frames:
@@ -1156,51 +1142,9 @@ class CameraImagingModule(ModuleShell):
             height = camera.actual_intrinsics.image_height_px
             if width <= 0 or height <= 0:
                 raise ValueError("camera dimensions must be positive")
-            integration_times = exposure_sample_times(
-                frame.capture_time, request.imaging_spec.exposure_samples
-            )
-            if any(time not in samples for time in integration_times):
-                raise ValueError("frame is missing a configured sub-exposure sample")
-            sample_buffers: list[bytes] = []
-            for sample_time in integration_times:
-                sample = samples[sample_time]
-                sample_camera = next(
-                    item
-                    for item in sample.cameras
-                    if item.station_id == frame.station_id and item.camera_role is frame.camera_role
-                )
-                sample_pixels, gpu_ms = render_rgb8(sample, sample_camera)
-                self.last_gpu_submissions += 1
-                self.last_gpu_render_ms += gpu_ms
-                sample_buffers.append(sample_pixels)
-            if (
-                len(sample_buffers) == 1
-                and artifacts.intensity_min == 0.0
-                and artifacts.intensity_max == 1.0
-                and artifacts.sensor_noise_std_intensity == 0.0
-            ):
-                pixels = sample_buffers[0]
-            else:
-                intensity = sum(
-                    (
-                        srgb_to_linear(
-                            np.frombuffer(sample_pixels, dtype=np.uint8)
-                            .reshape(height, width, 3)
-                            .astype(np.float64)
-                            / 255.0
-                        )
-                        for sample_pixels in sample_buffers
-                    ),
-                    start=np.zeros((height, width, 3), dtype=np.float64),
-                ) / len(sample_buffers)
-                pixels = quantize_rgb8(
-                    intensity,
-                    artifacts.intensity_min,
-                    artifacts.intensity_max,
-                    artifacts.sensor_noise_std_intensity,
-                    request.random_seed,
-                    f"sensor/{frame.station_id}/{frame.camera_role.value}/{frame.frame_id}",
-                )
+            pixels, gpu_ms = render_rgb8(scene, camera)
+            self.last_gpu_submissions += 1
+            self.last_gpu_render_ms += gpu_ms
             frames.append(
                 CameraFrame(
                     station_id=frame.station_id,
@@ -1721,16 +1665,6 @@ class ScenarioModule(ModuleShell):
                         else camera.exposure.shutter_model.value
                     ),
                 )
-                sample_times = set(exposure_sample_times(capture, spec.imaging.exposure_samples))
-                sample_times.add(midpoint)
-                exposure_scenes = tuple(
-                    logical_scene
-                    if sample_time == midpoint
-                    else self.logic.sample(
-                        SimulationTime(time.clock_domain_id, sample_time, time.step_no)
-                    )
-                    for sample_time in sorted(sample_times)
-                )
                 frame_inputs.append(
                     FrameImagingInput(
                         station_id=camera.station_id,
@@ -1741,7 +1675,7 @@ class ScenarioModule(ModuleShell):
                         ),
                         capture_time=capture,
                         online_camera_config_digest=config.config_digest,
-                        exposure_samples=exposure_scenes,
+                        exposure_samples=(logical_scene,),
                         sampling_period_ns=camera.exposure.frame_period_ns,
                     )
                 )

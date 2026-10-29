@@ -6,8 +6,12 @@ No camera, experiment clock, or window is owned by this module.
 
 from __future__ import annotations
 
+import json
 import math
+import struct
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +20,7 @@ from chongming.contracts.model import Vec3M
 from chongming.contracts.scene import (
     BoxGeometry,
     CylinderGeometry,
+    ExternalAssetGeometry,
     GeometrySpec,
     KinematicState,
     SceneCameraDistortion,
@@ -27,6 +32,92 @@ from chongming.contracts.scene import (
 
 FloatArray = NDArray[np.float64]
 NEAR = 1e-6
+
+# Bundled aircraft are authored in glTF space (right-handed, +Y up) with the nose
+# along a model-specific axis, and the mesh node carries the model's rotation,
+# scale and translation. The body frame is x right, y forward (nose), z up, as for
+# the built-in aircraft mesh. Python owns this conversion and sends the result to
+# Godot, so truth geometry and the rendered mesh cannot diverge.
+AIRCRAFT_ASSET_DIR = Path(__file__).parent / "godot" / "assets" / "aircraft"
+AIRCRAFT_MODELS: dict[str, tuple[str, tuple[float, float, float]]] = {
+    # file name, nose direction in glTF space
+    "f86": ("f86triangled.glb", (1.0, 0.0, 0.0)),
+    "la11": ("la11triangled.glb", (0.0, 0.0, -1.0)),
+}
+_GLTF_UP = np.array([0.0, 1.0, 0.0])
+_GLB_INDEX_TYPES: dict[int, np.dtype[Any]] = {5123: np.dtype("<u2"), 5125: np.dtype("<u4")}
+
+
+def _glb_primitives(identifier: str) -> tuple[dict[str, Any], FloatArray, NDArray[np.int64]]:
+    """Return the glTF document and the first mesh's raw vertices and triangles."""
+    data = (AIRCRAFT_ASSET_DIR / AIRCRAFT_MODELS[identifier][0]).read_bytes()
+    magic, version, _ = struct.unpack_from("<4sII", data)
+    if magic != b"glTF" or version != 2:
+        raise ValueError(f"{identifier}: not a glTF 2.0 binary")
+    json_length, _ = struct.unpack_from("<I4s", data, 12)
+    document = json.loads(data[20 : 20 + json_length])
+    binary = memoryview(data)[28 + json_length :]
+
+    def read(accessor_index: int, dtype: np.dtype[Any], width: int) -> NDArray[Any]:
+        accessor = document["accessors"][accessor_index]
+        view = document["bufferViews"][accessor["bufferView"]]
+        if view.get("byteStride") or "sparse" in accessor:
+            raise ValueError(f"{identifier}: strided or sparse accessors are not supported")
+        offset = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+        return np.frombuffer(binary, dtype=dtype, count=accessor["count"] * width, offset=offset)
+
+    vertices: list[FloatArray] = []
+    triangles: list[NDArray[np.int64]] = []
+    base = 0
+    for primitive in document["meshes"][0]["primitives"]:
+        positions = read(primitive["attributes"]["POSITION"], np.dtype("<f4"), 3).reshape(-1, 3)
+        index_type = _GLB_INDEX_TYPES[document["accessors"][primitive["indices"]]["componentType"]]
+        triangles.append(
+            read(primitive["indices"], index_type, 1).reshape(-1, 3).astype(np.int64) + base
+        )
+        vertices.append(positions.astype(np.float64))
+        base += len(positions)
+    return document, np.concatenate(vertices), np.concatenate(triangles)
+
+
+def _quaternion_matrix(x: float, y: float, z: float, w: float) -> FloatArray:
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+@lru_cache(maxsize=len(AIRCRAFT_MODELS))
+def asset_mesh(identifier: str) -> TriangleMeshGeometry:
+    """Body-frame triangles (x right, y nose, z up) of a bundled aircraft glb."""
+    nose = np.asarray(AIRCRAFT_MODELS[identifier][1], dtype=np.float64)
+    document, vertices, triangles = _glb_primitives(identifier)
+    nodes = [index for index, node in enumerate(document["nodes"]) if "mesh" in node]
+    if len(nodes) != 1 or nodes[0] not in document["scenes"][0]["nodes"]:
+        raise ValueError(f"{identifier}: expected exactly one root mesh node")
+    node = document["nodes"][nodes[0]]
+    scale = np.asarray(node.get("scale", (1.0, 1.0, 1.0)), dtype=np.float64)
+    rotation = _quaternion_matrix(*node.get("rotation", (0.0, 0.0, 0.0, 1.0)))
+    placed = (vertices * scale) @ rotation.T + np.asarray(node.get("translation", (0.0, 0.0, 0.0)))
+    # Rows are the body axes in glTF space; right = nose x up keeps the frame right-handed.
+    body_from_gltf = np.array([np.cross(nose, _GLTF_UP), nose, _GLTF_UP])
+    if np.prod(scale) < 0:
+        # A mirrored node flips winding; restore outward counter-clockwise faces.
+        triangles = triangles[:, ::-1]
+    return TriangleMeshGeometry(
+        tuple(tuple(float(c) for c in v) for v in placed @ body_from_gltf.T),  # type: ignore[misc]
+        tuple(tuple(int(i) for i in t) for t in triangles),  # type: ignore[misc]
+    )
+
+
+def resolve_geometry(geometry: GeometrySpec) -> GeometrySpec:
+    """Replace an external asset reference by the mesh the renderer draws."""
+    if isinstance(geometry, ExternalAssetGeometry):
+        return asset_mesh(geometry.asset_identifier)
+    return geometry
 
 
 @lru_cache(maxsize=8)
@@ -78,6 +169,7 @@ def surface_hits(
     geometry: GeometrySpec,
 ) -> tuple[FloatArray, FloatArray]:
     """Return nearest positive depths and ENU normals; misses have infinite depth."""
+    geometry = resolve_geometry(geometry)
     rotation = np.asarray(pose.rotation_enu_from_body, dtype=np.float64)
     local_origin = (np.asarray(origin) - pose.position_enu_m) @ rotation
     rays = directions @ rotation
@@ -156,11 +248,7 @@ def surface_hits(
             depth[replace] = cap[replace]
             normals[replace, 2] = 1.0 if z == geometry.height_m else -1.0
     else:
-        if not isinstance(geometry, TriangleMeshGeometry):
-            raise TypeError(
-                f"External assets are not supported in Python-side ray tracing; "
-                f"got {type(geometry).__name__}"
-            )
+        assert isinstance(geometry, TriangleMeshGeometry)
         vertices = np.asarray(geometry.vertices_body_m, dtype=np.float64)
         for triangle in geometry.triangle_vertex_indices:
             if min(triangle) < 0 or max(triangle) >= len(vertices):
@@ -209,6 +297,7 @@ def _closed_mesh(geometry: TriangleMeshGeometry) -> bool:
 
 def contains_point(origin: Vec3M, pose: KinematicState, geometry: GeometrySpec) -> bool:
     """Containment for primitives and closed meshes, including cameras inside blockers."""
+    geometry = resolve_geometry(geometry)
     point = (np.asarray(origin) - pose.position_enu_m) @ np.asarray(pose.rotation_enu_from_body)
     if isinstance(geometry, SphereGeometry):
         return bool(point @ point < geometry.radius_m**2)
@@ -221,11 +310,7 @@ def contains_point(origin: Vec3M, pose: KinematicState, geometry: GeometrySpec) 
         )
     # A closed, consistently wound mesh subtends 4*pi steradians from inside.
     # This covers cameras/targets inside concave OSM prisms.
-    if not isinstance(geometry, TriangleMeshGeometry):
-        raise TypeError(
-            f"External assets are not supported in Python-side containment checks; "
-            f"got {type(geometry).__name__}"
-        )
+    assert isinstance(geometry, TriangleMeshGeometry)
     vertices = np.asarray(geometry.vertices_body_m, dtype=np.float64)
     if (
         np.any(point < vertices.min(axis=0))

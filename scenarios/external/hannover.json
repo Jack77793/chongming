@@ -1,0 +1,40 @@
+{
+  "format": "scenario-authoring-v2",
+  "scenario_id": "hannover-500m-crossing",
+  "random_seed": 42,
+  "duration_s": 20,
+  "fps": 30,
+  "stations": [
+    {
+      "id": "station-01",
+      "position_enu_m": [40, -200, 4.8],
+      "main_yaw_deg": 0,
+      "main_elevation_deg": 15
+    },
+    {
+      "id": "station-02",
+      "position_enu_m": [80, -200, 4.7],
+      "main_yaw_deg": 0,
+      "main_elevation_deg": 15
+    }
+  ],
+  "targets": [
+    {
+      "id": "crossing-target",
+      "geometry": { "type": "aircraft", "model": "f86" },
+      "motion": {
+        "type": "constant_velocity",
+        "position_enu_m": [-20, -80, 40],
+        "velocity_enu_mps": [4, 0, 0]
+      }
+    }
+  ],
+  "world_objects": [],
+  "vegetation": [],
+  "osm": {
+    "asset": {
+      "uri": "../assets/hannover-500m/landscape-dem.json",
+      "content_sha256": "ae19043e4bd9ca745be15f987f665b75237bef51387888ed05b1294b82a4fe04"
+    }
+  }
+}

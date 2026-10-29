@@ -49,3 +49,6 @@ results/
 # External projects and recordings
 external-projects/
 recordings/
+
+# Test-scene assets unpacked from GitHub prereleases (see docs/user-guide.md)
+scenarios/assets/hannover-500m/

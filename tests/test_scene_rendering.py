@@ -43,9 +43,7 @@ from chongming.rendering.godot import (
     _editor_markers,
     _request,
     projected_footprints,
-    quantize_rgb8,
     render_rgb8,
-    srgb_to_linear,
 )
 from chongming.scenarios.authoring import compile_authoring, demo_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec, optical_rotation, state
@@ -364,15 +362,6 @@ class SceneConfigurationTests(unittest.TestCase):
                 [l.position_enu_m for l in reference.landmarks],
                 [l.position_enu_m for l in landmarks],
             )
-
-    def test_fixed_seed_and_srgb_energy_integration(self) -> None:
-        document = demo_authoring()
-        document["random_seed"] = 99
-        with self.assertRaisesRegex(ValueError, "fixed random_seed 42"):
-            compile_authoring(document)
-        # Half black/half white exposure encodes half linear energy as sRGB 188.
-        value = np.mean(srgb_to_linear(np.array([0.0, 1.0])))
-        self.assertEqual(quantize_rgb8(np.array([value]), 0, 1, 0, 42, "test"), bytes([188]))
 
     def test_aircraft_mutual_occlusion_uses_the_current_snapshot(self) -> None:
         spec = test_scene(s.SphereGeometry(1.0))
@@ -766,30 +755,16 @@ class SurfaceRenderingTests(unittest.TestCase):
             m.ConfigDigest("online"),
             (first, center, last),
         )
-        imaging = replace(spec.imaging, exposure_samples=2)
-        request = s.ImageGenerationRequest("test", 42, imaging, (frame,))
+        request = s.ImageGenerationRequest("test", 42, spec.imaging, (frame,))
         batch, truth = CameraImagingModule().render(request)
-        first_pixels, _ = render_gpu(first, first.cameras[0])
-        last_pixels, _ = render_gpu(last, last.cameras[0])
-        expected = (
-            srgb_to_linear(first_pixels.astype(np.float64) / 255.0)
-            + srgb_to_linear(last_pixels.astype(np.float64) / 255.0)
-        ) / 2
+        center_pixels, _ = render_gpu(center, center.cameras[0])
         np.testing.assert_array_equal(
-            np.frombuffer(batch.frames[0].image.pixels, dtype=np.uint8).reshape(expected.shape),
-            np.frombuffer(
-                quantize_rgb8(expected, 0.0, 1.0, 0.0, 42, "sensor/station-0/main/frame"),
-                dtype=np.uint8,
-            ).reshape(expected.shape),
+            np.frombuffer(batch.frames[0].image.pixels, dtype=np.uint8).reshape(
+                center_pixels.shape
+            ),
+            center_pixels,
         )
         self.assertGreater(truth.frame_truth[0].targets[0].projected_width_px, 10)
-        artifacts = replace(imaging.sensor_artifacts, sensor_noise_std_intensity=0.02)
-        noisy = replace(request, imaging_spec=replace(imaging, sensor_artifacts=artifacts))
-        self.assertEqual(CameraImagingModule().render(noisy), CameraImagingModule().render(noisy))
-        self.assertNotEqual(
-            batch.frames[0].image.pixels,
-            CameraImagingModule().render(noisy)[0].frames[0].image.pixels,
-        )
         with self.assertRaisesRegex(ValueError, "exact exposure-midpoint"):
             CameraImagingModule().render(
                 replace(request, frames=(replace(frame, exposure_samples=(first, last)),))

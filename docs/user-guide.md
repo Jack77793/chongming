@@ -27,7 +27,7 @@ chongming-center --scenario scenarios/center_clean.json --check
 
 | 命令                | 用途                                  |
 | ------------------- | ------------------------------------- |
-| `chongming-preview` | 浏览器监视、场景编辑与 Godot 自由视角 |
+| `chongming-preview` | Godot 预览窗口与浏览器工作台          |
 | `chongming-center`  | 场景检查、中心算法同步分步开发        |
 | `chongming-scene`   | 有限虚拟场景及证据导出                |
 | `chongming-osm`     | 本地 OSM XML 清洗与地景导入           |
@@ -44,7 +44,9 @@ uv run --frozen chongming-preview --scenario scenarios/review.json
 
 从 authoring JSON 启动后，编辑模式取得独占 token 并暂停实验。面板可编辑站点、目标及地景选择；只有提交才原子写回场景文件。提交前检查磁盘字节摘要，文件被外部修改时拒绝覆盖。撤销重新读取磁盘，关闭服务放弃未提交草稿。
 
-Godot 自由视角使用独立窗口：右键拖动调整视线，按住右键时 WASD 平移、Q/E 升降、Shift 加速。编辑期间连续绘制草稿，但实验保持暂停；非编辑期间随离散场景步更新。浏览器轮询不推进实验时间，视锥和标签不混入传感器图像。
+启动后同时打开 Godot 预览窗口；关闭窗口与 Ctrl+C 等效。工具栏提供播放/暂停、单步、回到起点、站点选择和真值叠加开关；在时间框输入秒数后按“跳转”或回车，逻辑层从起点重启并快进到该时刻，跳转进行中或编辑期间不接受新的跳转。左侧标签页显示所选站点的主、辅相机画面及自由视角，右侧为信息、编辑和日志面板。日志面板列出最近 200 条 `chongming` 日志及 Python 异常栈，有新警告或错误时标签显示圆点。
+
+自由视角在窗口内的标签页中显示：右键在画面上拖动调整视线，按住右键时 WASD 平移、Q/E 升降、Shift 加速。编辑期间连续绘制草稿，但实验保持暂停；非编辑期间随离散场景步更新。窗口刷新和浏览器轮询不推进实验时间，视锥和标签不混入传感器图像。
 
 省略 `--scenario` 和 `--recording` 可查看内置演示，但不能持久化编辑或使用 `--landscape-asset`。预览会评估已生成的辅助图像并显示标定结果，不调用中心工具的算法插件。
 
@@ -167,19 +169,12 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
 - **`sphere`**：球体，需 `radius_m`（正半径，米）
 - **`box`**：长方体，需 `half_extents_m`（`[x, y, z]` 半宽，米，各维度正值）
 - **`cylinder`**：圆柱体，需 `radius_m`（正半径，米）和 `half_height_m`（正半高，米）。圆柱轴沿上（+Z）方向
-- **`aircraft`**：飞行器模型，从外部资产加载。需在目标定义中指定 `geometry.type = "aircraft"` 和 `geometry.asset`：
+- **`aircraft`**：飞行器。省略 `model` 时使用内置简化网格；`model` 取 `f86` 或 `la11` 时使用仓库内置的 glb 模型（`src/chongming/rendering/godot/assets/aircraft/`）：
 
   ```json
   {
     "id": "aircraft-1",
-    "display_name": "飞行器1",
-    "geometry": {
-      "type": "aircraft",
-      "asset": {
-        "uri": "assets/cessna172.glb",
-        "content_sha256": "abc123..."
-      }
-    },
+    "geometry": { "type": "aircraft", "model": "f86" },
     "motion": {
       "type": "constant_velocity",
       "position_enu_m": [-30, -60, 40],
@@ -188,7 +183,7 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
   }
   ```
 
-  资产为 glTF/GLB 格式，需通过 `content_sha256` 验证（计算方式：`sha256sum assets/cessna172.glb`）。模型坐标系为 Godot 右手系（+X 右，+Y 上，+Z 后），朝向前方（-Z）。
+  `rendering/geometry.py` 读取 glb 网格，应用网格节点的旋转、缩放和平移，并转换到机体系（x 右、y 机头、z 上，与内置网格一致）后，同一份顶点同时用于 Python 求交、包围盒、投影和 Godot 渲染；Godot 不再自行加载 glb。Godot 以目标的 `appearance` 覆盖 glb 自带材质，贴图不显示。
 
 外部 Godot 场景通常没有可供 Python 复算的完整几何模型，可将 `occlusion_mode` 设为 `unknown`。运行不会因无法判断遮挡而失败；系统仍记录相机姿态、目标状态和图像，并按目标中心是否在视场内生成候选。该模式的结果只适合在同一固定录像上比较不同系统版本或模型的相对排名，不能解释为排除了遮挡影响的准确率，也不适合直接与 `known` 场景的绝对分数比较。
 
@@ -297,6 +292,36 @@ d02d6a1e8437374b4842f91c66a04b0cfb3da522c3e7747e8e5b298d5eb61388
 
 选区中心为 `(52.38 N, 9.77 E)`，约 1×1 km，配置位于 `scenarios/assets/hannover_500m_import.json`。来源、日期和原始文件字节摘要保存在资产中。在线数据会变化，重新下载或导入不保证命中固定预设。任意合法本地地景应通过场景的 `osm.asset` 引用；没有匹配资产时不要修改预设摘要绕过校验。
 
+### 测例资产
+
+真实地景等测例资产不进入 Git 历史，以确定性归档附加到 GitHub prerelease（tag 前缀 `assets-`）。`flake.nix` 以 `packages.<system>.<name>` 登记下载地址与字节摘要，Nix 负责下载和校验。
+
+| 资产            | 场景                               | 解包位置                          |
+| --------------- | ---------------------------------- | --------------------------------- |
+| `hannover-500m` | `scenarios/external/hannover.json` | `scenarios/assets/hannover-500m/` |
+
+从源码根目录获取：
+
+```sh
+nix build .#hannover-500m --out-link ~/.local/share/chongming/gcroots/hannover-500m
+tar -xzf ~/.local/share/chongming/gcroots/hannover-500m -C scenarios/assets
+```
+
+out-link 同时是 Nix GC root。解包目录已加入 `.gitignore`，可删除后重新解包。`scenarios/external/` 下的场景依赖这些资产，不参与 `scenarios/*.json` 的仓库测试；缺少资产时加载失败并报告路径。
+
+归档内 `README.md` 记录来源 URL、下载时间、字节摘要、内容摘要及重新导入命令。不分发测例录像；录像由场景在本地生成，`truth.jsonl` 应可逐字段复现，图像随 GPU 和驱动存在差异。
+
+制作新资产时，原始下载与导入结果保存在 `~/.local/share/chongming/assets/<name>/`，不要放在 `/tmp`、`output/` 等会被清理的目录。用 `scripts/pack_local_asset.py` 打包，经维护者确认许可后上传：
+
+```sh
+uv run --frozen python scripts/pack_local_asset.py ~/.local/share/chongming/assets/<name> \
+  ~/.local/share/chongming/archives/<name>-<date>.tar.gz
+gh release create assets-<name>-<date> ~/.local/share/chongming/archives/<name>-<date>.tar.gz \
+  --prerelease --latest=false
+```
+
+脚本输出的摘要写入 `flake.nix`。
+
 ### 数据许可
 
 仓库的 `osm_demo.osm`、`osm_landscape_demo.osm` 及其合成资产标注为 CC0-1.0，不是真实 OSM 提取。真实 OSM 数据通常适用 [ODbL-1.0](https://opendatacommons.org/licenses/odbl/1-0/)，需保留 [OpenStreetMap contributors 署名](https://www.openstreetmap.org/copyright)，并遵守 [OSMF attribution guidelines](https://osmfoundation.org/wiki/Licence/Attribution_Guidelines)。转换为网格不自动消除来源许可义务。
@@ -305,4 +330,4 @@ Mapzen/Skadi 的 HGT 格式及来源条件见 [格式说明](https://github.com/
 
 > Mapzen terrain tiles; Europe terrain produced using Copernicus data and information funded by the European Union - EU-DEM layers; global GMTED2010 and SRTM courtesy of USGS.
 
-展示或分发地景时保留资产中的署名与许可；再分发前按实际数据来源及发布方式核对条件。未经授权的本地输入不得进入仓库或发行包。
+展示或分发地景时保留资产中的署名与许可；再分发前按实际数据来源及发布方式核对条件。`hannover-500m` 测例资产以 ODbL-1.0 分发 OSM 衍生数据，DEM 保留上述提供方署名；仓库 AGPL-3.0 许可不适用于这些数据。其他未经授权的本地输入不得进入仓库、发行包或测例资产。
