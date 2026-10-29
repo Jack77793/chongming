@@ -44,10 +44,16 @@ from chongming.contracts.scene import (
     TreePart,
     TreeVisualSpec,
 )
+from chongming.contracts.visualization import AlgorithmOutputUpdate, TruthComparisonSnapshot
 from chongming.joint_calibration import JointCalibrationRunner
 from chongming.modules.scene import ScenarioModule
 from chongming.ports.scene import ScenarioSource
-from chongming.rendering.godot import UiImage, close_default_renderer, default_renderer
+from chongming.rendering.godot import (
+    UiImage,
+    close_default_renderer,
+    default_renderer,
+    visualization_ui_state,
+)
 from chongming.scenarios.assets import read_verified_json
 from chongming.scenarios.authoring import compile_authoring, save_authoring
 from chongming.scenarios.demo import demo_source, demo_spec
@@ -998,8 +1004,15 @@ class GodotUiSession:
         self._log = _UiLogBuffer()
         self._running = True
 
-    def tick(self) -> bool:
-        """Run one exchange. Returns False once the user asked to quit."""
+    def tick(
+        self,
+        *,
+        algorithm_output: AlgorithmOutputUpdate | None = None,
+        truth_snapshots: tuple[TruthComparisonSnapshot, ...] | None = None,
+    ) -> bool:
+        """Send each supplied algorithm increment synchronously, independently of images."""
+        if (algorithm_output is None) != (truth_snapshots is None):
+            raise ValueError("algorithm_output and truth_snapshots must be supplied together")
         status, payload, step = self.runtime.ui_view()
         sequence = payload["sequence"] if payload is not None else None
         frame: dict[str, Any] | None = None
@@ -1021,6 +1034,8 @@ class GodotUiSession:
             "editor": self.runtime.editor_status(),
             "log": self._log.snapshot(),
         }
+        if algorithm_output is not None and truth_snapshots is not None:
+            state.update(visualization_ui_state(algorithm_output, truth_snapshots))
         for command in self._exchange(state, images):
             self._dispatch(command)
         return self._running
