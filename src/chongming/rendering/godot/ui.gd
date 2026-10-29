@@ -79,6 +79,7 @@ var _edit_apply: Button
 var _edit_hint: Label
 var _visualization_layers: Dictionary = {}
 var _station_states: TextEdit
+var _diagnostics: TextEdit
 
 
 ## Build the window around the worker's freeview display, which moves into a tab.
@@ -115,6 +116,9 @@ func build(freeview: TextureRect, freeview_fps: Label) -> void:
 	_panel.add_child(_log)
 	_panel.add_child(_visualization_tab())
 	_panel.set_tab_title(3, "算法图层")
+	_diagnostics = _text_view()
+	_panel.add_child(_diagnostics)
+	_panel.set_tab_title(4, "误差诊断")
 	_panel.set_tab_title(0, "信息")
 	_panel.set_tab_title(1, "编辑")
 	_panel.set_tab_title(2, "日志")
@@ -219,6 +223,22 @@ func _show_station_states(stations: Dictionary) -> void:
 			"未知" if station.calibration_usage == null else str(station.calibration_usage).to_upper(),
 			_vector(station.truth_orientation_error_rad, 9), _vector(station.calibration_orientation_error_rad, 9)])
 	_set_text(_station_states, "尚无站点状态" if lines.is_empty() else "\n\n".join(lines))
+
+
+func _diagnostics_text(summary: Dictionary) -> String:
+	var lines := ["门限内匹配样本误差（本次运行累计）",
+		"开发门限：指向 %s rad；定位 %s m" % [String.num(summary.angle_gate_rad), String.num(summary.distance_gate_m)],
+		"门限仅为开发配置，不代表适用性验证。"]
+	for pair in [["edge", "边缘射线 · 指向偏差", "rad"], ["center", "中心测量 · 定位误差", "m"]]:
+		var stats: Dictionary = summary[pair[0]]
+		lines.append("\n%s\n已接收 %d · 有效（可评估）%d\n匹配 %d · 未匹配 %d · 无法评估 %d\n误差样本数 %d" % [
+			pair[1], stats.outputs, stats.valid, stats.matched, stats.unmatched, stats.unevaluable, stats.sample_count])
+		for metric in [["mean_error", "平均误差"], ["rmse", "RMSE"], ["max_error", "最大误差"]]:
+			var value = stats[metric[0]]
+			lines.append("%s：%s" % [metric[1], "不可计算（无匹配样本）" if value == null else
+				String.num(value, 12) + " " + pair[2]])
+	lines.append("\n接收数 = 匹配 + 未匹配 + 无法评估；有效数 = 匹配 + 未匹配。\n匹配使用对应时刻全部真值，可见性不作门控。\n空真值中的输出记未匹配；无有效位置或方向无法定义记无法评估。\n未匹配输出不等同误报；不提供 TP/FP/FN、召回率或综合分数。")
+	return "\n".join(lines)
 
 
 func _text_view() -> TextEdit:
@@ -387,7 +407,7 @@ func _apply_edit() -> void:
 
 ## Show the state Python just pushed. Textures are the worker's keyed images,
 ## updated in place; a state without a frame keeps showing the previous one.
-func show_state(state: Dictionary, textures: Dictionary, station_states: Dictionary) -> void:
+func show_state(state: Dictionary, textures: Dictionary, station_states: Dictionary, diagnostics: Dictionary) -> void:
 	_state = state
 	_textures = textures
 	if state.get("frame") is Dictionary:
@@ -398,6 +418,7 @@ func show_state(state: Dictionary, textures: Dictionary, station_states: Diction
 	_show_log()
 	_show_editor()
 	_show_station_states(station_states)
+	_set_text(_diagnostics, _diagnostics_text(diagnostics))
 
 
 func _show_controls() -> void:

@@ -1,6 +1,8 @@
 extends RefCounted
 
-## Validated display copies only. A new worker owns a fresh instance per run.
+## Validated display copies only. A new worker owns fresh display and diagnostic state per run.
+const Evaluation = preload("res://evaluation.gd")
+var evaluation := Evaluation.new()
 var last_update: Dictionary = {}
 var truth_by_time: Dictionary = {}
 var rays: Dictionary = {}
@@ -71,13 +73,15 @@ func receive(state: Dictionary) -> bool:
 			if update != last_update or snapshots != _last_snapshots:
 				return _reject("conflicting duplicate update_id")
 			return true
-	# Evaluation will consume this complete increment before display cache eviction.
+	var truth := {}
+	for index in range(times.size()):
+		truth[times[index]] = snapshots[index]
+	# Evaluate the complete validated increment exactly once, before changing display caches.
+	evaluation.process(update, truth)
 	last_update = update
 	display_time_ns = maxi(display_time_ns, update.scenario_time_ns)
 	_last_snapshots = snapshots
-	truth_by_time.clear()
-	for index in range(times.size()):
-		truth_by_time[times[index]] = snapshots[index]
+	truth_by_time = truth
 	edge_diagnostics.clear()
 	if update.edge_events != null:
 		for station in update.edge_events:

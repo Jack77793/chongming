@@ -167,7 +167,8 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
     var document: Dictionary = JSON.parse_string(reply.get_string_from_utf8())
     document.commands.append({"type": "test_layers", "layers": layers, "update_count": _visualization.update_count,
         "ray_count": _visualization.rays.size(), "measurement_count": _visualization.measurements.size(),
-        "track_count": _visualization.tracks.size(), "station_text": _ui._station_states.text, "capture": _capture})
+        "track_count": _visualization.tracks.size(), "station_text": _ui._station_states.text, "capture": _capture,
+        "evaluation": _visualization.evaluation.summary(), "diagnostic_text": _ui._diagnostics.text})
     return JSON.stringify(document).to_utf8_buffer()
 func _render(request: Dictionary) -> PackedByteArray:
     var result := await super._render(request)
@@ -317,6 +318,8 @@ class VisualizationLayerTests(unittest.TestCase):
                 paused["layers"], layers, "Wall-clock time must not expire paused geometry"
             )
             self.assertEqual(paused["update_count"], 1)
+            self.assertEqual(paused["evaluation"], report["evaluation"])
+            self.assertEqual(duplicate["evaluation"], report["evaluation"])
             self.assertEqual(renderer.render(scene, camera)[0], original)
             views: dict[str, np.ndarray] = {}
             version = 5
@@ -327,6 +330,7 @@ class VisualizationLayerTests(unittest.TestCase):
                     {key: value["visible"] for key, value in toggled["layers"].items()}, enabled
                 )
                 self.assertEqual(toggled["update_count"], 1)
+                self.assertEqual(toggled["evaluation"], report["evaluation"])
                 for key in LAYERS:
                     self.assertEqual(toggled["layers"][key]["geometry"], layers[key]["geometry"])
                 self.assertTrue(renderer.editor_update(scene, camera, realtime=False))
@@ -359,6 +363,7 @@ class VisualizationLayerTests(unittest.TestCase):
                 }
             )[0]
             self.assertEqual(expired["update_count"], 2)
+            self.assertEqual(expired["evaluation"], report["evaluation"])
             for key in ("truth", "rays", "measurements"):
                 self.assertEqual(expired["layers"][key]["geometry"]["children"], [])
             self.assertEqual(expired["track_count"], 3)

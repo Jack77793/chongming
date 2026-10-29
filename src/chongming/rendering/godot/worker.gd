@@ -319,7 +319,7 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
 	_ui_state = state
 	if _ui == null:
 		_open_ui()
-	_ui.show_state(state, _ui_textures, _visualization.station_states)
+	_ui.show_state(state, _ui_textures, _visualization.station_states, _visualization.evaluation.summary())
 	if _visualization.update_count != previous_update_count:
 		_redraw_freeview()
 	var reply := {
