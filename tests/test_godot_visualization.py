@@ -327,7 +327,7 @@ class VisualizationReceiverTests(unittest.TestCase):
         self.assertTrue(all(report["accepted"] for report in reports))
         self.assertEqual([report["update_count"] for report in reports], [1, 1, 1, 2])
         self.assertEqual(
-            [len(report["track_history"]["track-a"]) for report in reports], [2, 2, 2, 4]
+            [len(report["track_history"]["track-a"]) for report in reports], [2, 2, 2, 2]
         )
         self.assertEqual([len(report["measurements"]) for report in reports], [1, 1, 1, 2])
         fresh = self.receive({"version": 1})[0]
@@ -335,6 +335,133 @@ class VisualizationReceiverTests(unittest.TestCase):
         self.assertEqual(fresh["rays"], [])
         self.assertEqual(fresh["track_history"], {})
         self.assertEqual(fresh["truth_snapshots"], [])
+
+    def test_retention_uses_exact_experiment_time_and_deleted_tracks_are_removed(self) -> None:
+        initial = fixed_update()
+        assert initial.center_events is not None
+        initial = replace(
+            initial,
+            center_events=replace(
+                initial.center_events,
+                tracks=(
+                    replace(initial.center_events.tracks[-1], lifecycle=m.TrackLifecycle.DELETED),
+                ),
+            ),
+        )
+        states = [{"version": 1, **visualization_ui_state(initial, fixed_truth())}]
+        times = (
+            TIME + 1_000_000_000,
+            TIME + 1_000_000_001,
+            TIME + 10 + 3_000_000_000,
+            TIME + 11 + 3_000_000_000,
+            TIME + 20 + 3_000_000_000,
+            TIME + 21 + 3_000_000_000,
+        )
+        for index, time_ns in enumerate(times, 2):
+            empty = replace(
+                initial,
+                update_id=index,
+                scenario_time_ns=time_ns,
+                edge_events=None,
+                center_events=None,
+                station_states=None,
+            )
+            states.append(
+                {
+                    "version": index,
+                    **visualization_ui_state(empty, (v.TruthComparisonSnapshot(targets=()),)),
+                }
+            )
+        # A later-arriving old increment must not revive already expired display data.
+        states.append(
+            {"version": 8, **visualization_ui_state(replace(initial, update_id=8), fixed_truth())}
+        )
+        reports = self.receive(*states)
+        self.assertTrue(all(item["accepted"] for item in reports))
+        self.assertEqual([len(item["rays"]) for item in reports], [1, 1, 0, 0, 0, 0, 0, 0])
+        self.assertEqual([len(item["measurements"]) for item in reports], [1, 1, 1, 1, 0, 0, 0, 0])
+        self.assertEqual([len(item["tracks"]) for item in reports], [1, 1, 1, 1, 1, 1, 0, 0])
+        self.assertEqual(reports[-1]["track_history"], {})
+        # Display eviction must not truncate the complete accepted increment.
+        self.assertEqual(len(reports[-1]["last_update"]["edge_events"][0]["rays"]), 1)
+        self.assertEqual(len(reports[-1]["last_update"]["center_events"]["measurements"]), 1)
+
+    def test_retention_at_signed_64_bit_time_limits_does_not_overflow_or_round(self) -> None:
+        initial = fixed_update()
+        assert initial.edge_events is not None
+        for start in (-(2**63), 2**63 - 1 - 1_000_000_001):
+            with self.subTest(start=start):
+                edge = initial.edge_events[0]
+                output = replace(
+                    initial,
+                    scenario_time_ns=start,
+                    center_events=None,
+                    station_states=None,
+                    edge_events=(
+                        replace(
+                            edge,
+                            rays=(replace(edge.rays[0], capture_time_ns=start),),
+                            diagnostics=(),
+                        ),
+                    ),
+                )
+                states = []
+                for index, elapsed in enumerate((0, 1_000_000_000, 1_000_000_001), 1):
+                    update = replace(
+                        output,
+                        update_id=index,
+                        scenario_time_ns=start + elapsed,
+                        edge_events=output.edge_events if index == 1 else None,
+                    )
+                    states.append(
+                        {
+                            "version": index,
+                            **visualization_ui_state(
+                                update, (v.TruthComparisonSnapshot(targets=()),)
+                            ),
+                        }
+                    )
+                reports = self.receive(*states)
+                self.assertTrue(all(item["accepted"] for item in reports))
+                self.assertEqual([len(item["rays"]) for item in reports], [1, 1, 0])
+
+    def test_track_history_is_time_ordered_replaces_same_time_and_keeps_latest_100(self) -> None:
+        initial = fixed_update()
+        assert initial.center_events is not None
+        prototype = initial.center_events.tracks[-1]
+        points = tuple(
+            replace(
+                prototype,
+                event_time_ns=TIME + index,
+                recent_time_ns=TIME + index,
+                position_enu_m=(float(index), 0.0, 0.0),
+                recent_position_enu_m=(float(index), 0.0, 0.0),
+            )
+            for index in reversed(range(120))
+        )
+        corrected = replace(
+            points[0], position_enu_m=(999.0, 0.0, 0.0), recent_position_enu_m=(999.0, 0.0, 0.0)
+        )
+        output = replace(
+            initial,
+            scenario_time_ns=TIME + 200,
+            edge_events=None,
+            center_events=replace(
+                initial.center_events, measurements=(), tracks=(*points, corrected, points[-1])
+            ),
+        )
+        payload = {
+            "version": 1,
+            **visualization_ui_state(output, (v.TruthComparisonSnapshot(targets=()),)),
+        }
+        first, duplicate, heartbeat = self.receive(payload, payload, {"version": 2})
+        self.assertTrue(first["accepted"], first)
+        history = first["track_history"]["track-a"]
+        self.assertEqual([item["time_ns"] for item in history], list(range(TIME + 20, TIME + 120)))
+        self.assertEqual(history[-1]["position_enu_m"], [999.0, 0.0, 0.0])
+        self.assertEqual(first["tracks"][0]["position_enu_m"], [999.0, 0.0, 0.0])
+        self.assertEqual(first, duplicate)
+        self.assertEqual(first, heartbeat)
 
     def test_invalid_updates_leave_all_accepted_caches_unchanged(self) -> None:
         valid = state(2)
@@ -443,7 +570,7 @@ class VisualizationSocketTests(unittest.TestCase):
                 )
                 self.assertEqual(second["measurement_count"], 2)
                 self.assertEqual(second["ray_count"], 1)
-                self.assertEqual(len(second["track_history"]["track-a"]), 4)
+                self.assertEqual(len(second["track_history"]["track-a"]), 2)
                 self.assertNotIn("SCRIPT ERROR", renderer._diagnostics())
             finally:
                 renderer.close()

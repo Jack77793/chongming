@@ -77,6 +77,8 @@ var _edit_fields: Dictionary = {}
 var _edit_labels: Dictionary = {}
 var _edit_apply: Button
 var _edit_hint: Label
+var _visualization_layers: Dictionary = {}
+var _station_states: TextEdit
 
 
 ## Build the window around the worker's freeview display, which moves into a tab.
@@ -111,6 +113,8 @@ func build(freeview: TextureRect, freeview_fps: Label) -> void:
 	_panel.add_child(_editor_tab())
 	_log = _text_view()
 	_panel.add_child(_log)
+	_panel.add_child(_visualization_tab())
+	_panel.set_tab_title(3, "算法图层")
 	_panel.set_tab_title(0, "信息")
 	_panel.set_tab_title(1, "编辑")
 	_panel.set_tab_title(2, "日志")
@@ -185,6 +189,36 @@ func _freeview_tab(freeview: TextureRect, freeview_fps: Label) -> Control:
 	_freeview_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	box.add_child(_freeview_hint)
 	return box
+
+
+func _visualization_tab() -> VBoxContainer:
+	var box := VBoxContainer.new()
+	for pair in [["truth", "真值：绿色圆圈、速度及视场连线"], ["rays", "边缘：黄色射线及独立角度 σ 圆锥"],
+			["measurements", "中心：红色测量位置及尺寸圆"], ["tracks", "轨迹：历史及当前位置"]]:
+		var check := CheckBox.new()
+		var key: String = pair[0]
+		check.text = pair[1]
+		check.button_pressed = true
+		check.toggled.connect(func(enabled: bool) -> void: worker.ui_set_visualization_layer(key, enabled))
+		_visualization_layers[key] = check
+		box.add_child(check)
+	var legend := Label.new()
+	legend.text = "仅自由视角，不写入传感器像素。\n射线：VALID 实线 / FROZEN 虚线 / STALE 点线\n轨迹：暂定浅红 / 确认深红 / 滑行橙 / 删除灰\n射线保留 1 s，测量及删除轨迹保留 3 s（实验时间）。\n轨迹保留最近 100 点；速度箭头为 1 s 位移。\n测量圆直径 = max(σE, σN, σU)，仅尺寸示意。\n未知 σ 不绘制；角度 σ ≥ π/2 无法绘制圆锥。\n\n站点姿态差：配置相机坐标系（右 / 下 / 前），单位 rad。"
+	legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(legend)
+	_station_states = _text_view()
+	_station_states.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	box.add_child(_station_states)
+	return box
+
+
+func _show_station_states(stations: Dictionary) -> void:
+	var lines := []
+	for station in stations.values():
+		lines.append("%s · %s\n  实际相对配置：%s\n  校准相对配置：%s" % [station.station_id,
+			"未知" if station.calibration_usage == null else str(station.calibration_usage).to_upper(),
+			_vector(station.truth_orientation_error_rad, 9), _vector(station.calibration_orientation_error_rad, 9)])
+	_set_text(_station_states, "尚无站点状态" if lines.is_empty() else "\n\n".join(lines))
 
 
 func _text_view() -> TextEdit:
@@ -353,7 +387,7 @@ func _apply_edit() -> void:
 
 ## Show the state Python just pushed. Textures are the worker's keyed images,
 ## updated in place; a state without a frame keeps showing the previous one.
-func show_state(state: Dictionary, textures: Dictionary) -> void:
+func show_state(state: Dictionary, textures: Dictionary, station_states: Dictionary) -> void:
 	_state = state
 	_textures = textures
 	if state.get("frame") is Dictionary:
@@ -363,6 +397,7 @@ func show_state(state: Dictionary, textures: Dictionary) -> void:
 	_set_text(_info, _info_text())
 	_show_log()
 	_show_editor()
+	_show_station_states(station_states)
 
 
 func _show_controls() -> void:

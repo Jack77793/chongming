@@ -110,6 +110,7 @@ func _setup_world() -> void:
 	_free_camera.fov = 70.0
 	_free_camera.far = 5000.0
 	_free_viewport.add_child(_free_camera)
+	_visualization.attach(_world, _free_camera, _enu)
 	_editor_gizmos = Node3D.new()
 	_world.add_child(_editor_gizmos)
 	_editor_display = TextureRect.new()
@@ -298,6 +299,7 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
 		expected_offset += length
 	if expected_offset != trailer.size():
 		return PackedByteArray()
+	var previous_update_count := _visualization.update_count
 	if not _visualization.receive(state):
 		push_error("Godot visualization rejected UI update: %s" % _visualization.error)
 		return PackedByteArray()
@@ -317,7 +319,9 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
 	_ui_state = state
 	if _ui == null:
 		_open_ui()
-	_ui.show_state(state, _ui_textures)
+	_ui.show_state(state, _ui_textures, _visualization.station_states)
+	if _visualization.update_count != previous_update_count:
+		_redraw_freeview()
 	var reply := {
 		"accepted": {"version": state.get("version"), "images": keys},
 		"commands": _ui_commands,
@@ -613,7 +617,13 @@ func _position_editor_overview(entities: Array) -> void:
 	_free_camera.look_at(focus, Vector3.UP)
 
 
+func ui_set_visualization_layer(key: String, enabled: bool) -> void:
+	_visualization.set_layer_visible(key, enabled)
+	_redraw_freeview()
+
+
 func _sync_editor_markers(markers: Array) -> void:
+	_visualization.set_station_origins(markers)
 	for child in _editor_gizmos.get_children():
 		child.free()
 	for marker_value in markers:

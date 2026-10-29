@@ -13,6 +13,37 @@ var update_count := 0
 var error := ""
 var _last_snapshots: Array = []
 
+const RAY_LIFETIME_NS := 1_000_000_000
+const MEASUREMENT_LIFETIME_NS := 3_000_000_000
+const DELETED_TRACK_LIFETIME_NS := 3_000_000_000
+const HISTORY_LIMIT := 100
+const MIN_TIME_NS := -9223372036854775807 - 1
+const TRUTH_COLOR := Color("#52e888")
+const RAY_COLOR := Color("#ffe052")
+const MEASUREMENT_COLOR := Color("#ff424f")
+const TRACK_COLORS := {
+	"tentative": Color("#ff9e9e"), "confirmed": Color("#db2638"),
+	"coasting": Color("#ff9d32"), "deleted": Color("#929292"),
+}
+# UV.x is distance along a ray, so dash/dot spacing is in metres, not frame time.
+const RAY_SHADER := """shader_type spatial;
+render_mode unshaded, shadows_disabled;
+uniform vec4 line_color : source_color;
+uniform int pattern = 0;
+void fragment() {
+    if (pattern == 1 && mod(UV.x, 4.0) > 2.0) { discard; }
+    if (pattern == 2 && mod(UV.x, 1.2) > 0.15) { discard; }
+    ALBEDO = line_color.rgb;
+}
+"""
+var display_time_ns := MIN_TIME_NS
+var layers: Dictionary = {}
+var _root: Node3D
+var _camera: Camera3D
+var _enu: Callable
+var _station_origins: Dictionary = {}
+var _ray_materials: Dictionary = {}
+
 
 func receive(state: Dictionary) -> bool:
 	error = ""
@@ -42,6 +73,7 @@ func receive(state: Dictionary) -> bool:
 			return true
 	# Evaluation will consume this complete increment before display cache eviction.
 	last_update = update
+	display_time_ns = maxi(display_time_ns, update.scenario_time_ns)
 	_last_snapshots = snapshots
 	truth_by_time.clear()
 	for index in range(times.size()):
@@ -57,17 +89,234 @@ func receive(state: Dictionary) -> bool:
 		for measurement in update.center_events.measurements:
 			measurements[measurement.measurement_id] = measurement
 		for track in update.center_events.tracks:
-			tracks[track.track_id] = track
-			if not track_history.has(track.track_id):
-				track_history[track.track_id] = []
+			if not tracks.has(track.track_id) or track.event_time_ns >= tracks[track.track_id].event_time_ns:
+				tracks[track.track_id] = track
 			if track.recent_position_enu_m != null:
-				track_history[track.track_id].append({"time_ns": track.recent_time_ns,
-					"position_enu_m": track.recent_position_enu_m})
+				_append_history(track)
 	if update.station_states != null:
 		for station in update.station_states:
 			station_states[station.station_id] = station
+	_prune()
 	update_count += 1
+	redraw()
 	return true
+
+
+func _append_history(track: Dictionary) -> void:
+	if not track_history.has(track.track_id):
+		track_history[track.track_id] = []
+	var history: Array = track_history[track.track_id]
+	var point := {"time_ns": track.recent_time_ns, "position_enu_m": track.recent_position_enu_m}
+	var index := 0
+	while index < history.size() and history[index].time_ns < point.time_ns:
+		index += 1
+	if index < history.size() and history[index].time_ns == point.time_ns:
+		history[index] = point
+	else:
+		history.insert(index, point)
+	while history.size() > HISTORY_LIMIT:
+		history.pop_front()
+
+
+func _expired(time_ns: int, lifetime_ns: int) -> bool:
+	# Guard subtraction at the signed-64-bit lower bound; never round nanoseconds to floats.
+	return display_time_ns >= MIN_TIME_NS + lifetime_ns and time_ns < display_time_ns - lifetime_ns
+
+
+func _prune() -> void:
+	for key in rays.keys():
+		if _expired(rays[key].capture_time_ns, RAY_LIFETIME_NS):
+			rays.erase(key)
+	for key in measurements.keys():
+		if _expired(measurements[key].reference_time_ns, MEASUREMENT_LIFETIME_NS):
+			measurements.erase(key)
+	for key in tracks.keys():
+		if tracks[key].lifecycle == "deleted" and _expired(tracks[key].event_time_ns, DELETED_TRACK_LIFETIME_NS):
+			tracks.erase(key)
+			track_history.erase(key)
+
+
+func attach(parent: Node3D, camera: Camera3D, enu: Callable) -> void:
+	_camera = camera
+	_enu = enu
+	_root = Node3D.new()
+	_root.name = "AlgorithmVisualization"
+	parent.add_child(_root)
+	for key in ["truth", "rays", "measurements", "tracks"]:
+		var layer := Node3D.new()
+		layer.name = key
+		_root.add_child(layer)
+		layers[key] = layer
+	var shader := Shader.new()
+	shader.code = RAY_SHADER
+	for pattern in ["valid", "frozen", "stale"]:
+		var material := ShaderMaterial.new()
+		material.shader = shader
+		material.set_shader_parameter("line_color", RAY_COLOR)
+		material.set_shader_parameter("pattern", ["valid", "frozen", "stale"].find(pattern))
+		_ray_materials[pattern] = material
+	redraw()
+
+
+func set_layer_visible(key: String, enabled: bool) -> void:
+	layers[key].visible = enabled
+
+
+func set_station_origins(markers: Array) -> void:
+	var origins := {}
+	for marker in markers:
+		if marker.kind == "camera" and str(marker.id).ends_with("/main"):
+			origins[str(marker.id).trim_suffix("/main")] = _enu.call(marker.position)
+	if origins != _station_origins:
+		_station_origins = origins
+		redraw()
+
+
+func redraw() -> void:
+	if _root == null:
+		return
+	for layer in layers.values():
+		for child in layer.get_children():
+			child.free()
+	if not last_update.is_empty():
+		for target in truth_by_time[last_update.scenario_time_ns].targets:
+			_draw_truth(target)
+	for ray in rays.values():
+		_draw_ray(ray)
+	for measurement in measurements.values():
+		if measurement.position_enu_m != null:
+			var anchor := _anchor(layers.measurements, measurement.measurement_id, measurement.position_enu_m)
+			_marker(anchor, MEASUREMENT_COLOR)
+			_uncertainty(anchor, measurement.position_std_enu_m, MEASUREMENT_COLOR)
+	for track in tracks.values():
+		_draw_track(track)
+
+
+func _anchor(parent: Node3D, id: String, position: Array) -> Node3D:
+	var anchor := Node3D.new()
+	# IDs are data, not NodePaths; do not use them as node names.
+	anchor.set_meta("id", id)
+	anchor.position = _enu.call(position)
+	parent.add_child(anchor)
+	return anchor
+
+
+func _mesh(parent: Node3D, name: String, points: Array[Vector3], color: Color,
+		primitive := Mesh.PRIMITIVE_LINES, material: Material = null) -> MeshInstance3D:
+	var instance := MeshInstance3D.new()
+	instance.name = name
+	instance.layers = 2
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mesh := ImmediateMesh.new()
+	mesh.surface_begin(primitive)
+	for index in range(points.size()):
+		if primitive == Mesh.PRIMITIVE_LINES:
+			mesh.surface_set_uv(Vector2(0.0 if index % 2 == 0 else points[index].distance_to(points[index - 1]), 0.0))
+		mesh.surface_add_vertex(points[index])
+	mesh.surface_end()
+	instance.mesh = mesh
+	if material == null:
+		var solid := StandardMaterial3D.new()
+		solid.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		solid.albedo_color = color
+		if color.a < 1.0:
+			solid.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			solid.cull_mode = BaseMaterial3D.CULL_DISABLED
+		material = solid
+	instance.material_override = material
+	parent.add_child(instance)
+	return instance
+
+
+func _circle(parent: Node3D, radius: float, color: Color) -> void:
+	if radius <= 0.0:
+		return
+	var points: Array[Vector3] = []
+	for index in range(48):
+		for angle in [TAU * index / 48.0, TAU * (index + 1) / 48.0]:
+			points.append(Vector3(cos(angle), sin(angle), 0.0) * radius)
+	var ring := _mesh(parent, "SizeCircle", points, color)
+	var material := ring.material_override as StandardMaterial3D
+	material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+
+
+func _marker(parent: Node3D, color: Color) -> void:
+	_mesh(parent, "Position", [Vector3(-0.3, 0, 0), Vector3(0.3, 0, 0),
+		Vector3(0, -0.3, 0), Vector3(0, 0.3, 0), Vector3(0, 0, -0.3), Vector3(0, 0, 0.3)], color)
+
+
+func _uncertainty(parent: Node3D, std: Variant, color: Color) -> void:
+	if std != null:
+		# Contract: circle diameter is the largest diagonal standard deviation, not an ellipsoid.
+		_circle(parent, maxf(std[0], maxf(std[1], std[2])) * 0.5, color)
+
+
+func _arrow(parent: Node3D, direction: Vector3, color: Color) -> void:
+	if direction.length_squared() <= 0.0:
+		return
+	var unit := direction.normalized()
+	var side := unit.cross(Vector3.UP)
+	if side.length_squared() < 0.001:
+		side = unit.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var head := direction.length() * 0.2
+	_mesh(parent, "Velocity", [Vector3.ZERO, direction, direction, direction - unit * head + side * head * 0.5,
+		direction, direction - unit * head - side * head * 0.5], color)
+
+
+func _draw_truth(target: Dictionary) -> void:
+	var anchor := _anchor(layers.truth, target.target_id, target.position_enu_m)
+	_circle(anchor, target.bounding_radius_m, TRUTH_COLOR)
+	# One second of displacement, in metres; this is a velocity glyph, not a prediction.
+	_arrow(anchor, _enu.call(target.velocity_enu_mps), TRUTH_COLOR)
+	var links: Array[Vector3] = []
+	for visibility in target.visibility_by_station:
+		if visibility.in_field_of_view and _station_origins.has(visibility.station_id):
+			links.append(Vector3.ZERO)
+			links.append(_station_origins[visibility.station_id] - anchor.position)
+	if not links.is_empty():
+		_mesh(anchor, "StationLinks", links, TRUTH_COLOR)
+
+
+func _draw_ray(ray: Dictionary) -> void:
+	var anchor := _anchor(layers.rays, JSON.stringify(ray.event_id), ray.origin_enu_m)
+	var direction: Vector3 = _enu.call(ray.direction_enu_unit)
+	var end := direction * _camera.far
+	_mesh(anchor, "Ray", [Vector3.ZERO, end], RAY_COLOR, Mesh.PRIMITIVE_LINES,
+		_ray_materials[ray.calibration_usage])
+	if ray.angular_std_rad == null or ray.angular_std_rad <= 0.0 or ray.angular_std_rad >= PI * 0.5:
+		return
+	var side := direction.cross(Vector3.UP)
+	if side.length_squared() < 0.001:
+		side = direction.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var up := direction.cross(side).normalized()
+	var radius := _camera.far * tan(ray.angular_std_rad)
+	var points: Array[Vector3] = []
+	for index in range(32):
+		for vertex in [Vector3.ZERO,
+				end + radius * (side * cos(TAU * index / 32.0) + up * sin(TAU * index / 32.0)),
+				end + radius * (side * cos(TAU * (index + 1) / 32.0) + up * sin(TAU * (index + 1) / 32.0))]:
+			points.append(vertex)
+	_mesh(anchor, "AngularStdCone", points, Color(RAY_COLOR, 0.08), Mesh.PRIMITIVE_TRIANGLES)
+
+
+func _draw_track(track: Dictionary) -> void:
+	var color: Color = TRACK_COLORS[track.lifecycle]
+	var node := Node3D.new()
+	node.set_meta("id", track.track_id)
+	layers.tracks.add_child(node)
+	var points: Array[Vector3] = []
+	var history: Array = track_history.get(track.track_id, [])
+	for index in range(1, history.size()):
+		points.append(_enu.call(history[index - 1].position_enu_m))
+		points.append(_enu.call(history[index].position_enu_m))
+	if not points.is_empty():
+		_mesh(node, "History", points, color)
+	if track.position_enu_m != null:
+		var anchor := _anchor(node, track.track_id, track.position_enu_m)
+		_marker(anchor, color)
+		_uncertainty(anchor, track.position_std_enu_m, color)
 
 
 func _reject(reason: String) -> bool:
