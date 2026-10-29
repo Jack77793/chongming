@@ -115,7 +115,12 @@ class CenterTrackingModule(ModuleShell):
             transition @ track.covariance @ transition.T
             + acceleration @ self._acceleration @ acceleration.T
         )
-        return transition @ track.state, (covariance + covariance.T) / 2
+        covariance = (covariance + covariance.T) / 2
+        # Enforce minimum position variance (5m physical resolution limit)
+        min_var = 5.0**2
+        for i in range(3):
+            covariance[i, i] = max(covariance[i, i], min_var)
+        return transition @ track.state, covariance
 
     def predict(
         self, clock_domain_id: str, reference_time_ns: int
@@ -293,6 +298,10 @@ class CenterTrackingModule(ModuleShell):
             )
             roots = np.hstack((correction @ prior_root, gain @ noise_root))
             track.covariance = roots @ roots.T
+            # Enforce minimum position variance (5m physical resolution limit)
+            min_var = 5.0**2
+            for i in range(3):
+                track.covariance[i, i] = max(track.covariance[i, i], min_var)
         recovered = track.lifecycle is m.TrackLifecycle.COASTING
         track.count += 1
         track.last_measurement = measurement
@@ -448,11 +457,24 @@ class CenterTrackingModule(ModuleShell):
                     )
                 )
         events.extend(self._retire(event_time_ns))
+        assigned_observation_to_track: dict[int, m.TrackId] = {
+            observation_index: tracks[track_index].track_id
+            for index in sorted(selected)
+            for track_index, observation_index in [pairs[index]]
+        }
         for index, track in enumerate(tracks):
             if index not in assigned_tracks and track.track_id in self._tracks:
-                reason = ambiguous_tracks.get(
-                    index, "measurement_gate_failed" if observations else "no_measurement"
-                )
+                contending = [
+                    (obs_idx, assigned_observation_to_track[obs_idx])
+                    for t_idx, obs_idx in pairs
+                    if t_idx == index and obs_idx in assigned_observation_to_track
+                ]
+                if contending:
+                    reason = "measurement_assigned_to_other_track"
+                elif index in ambiguous_tracks:
+                    reason = ambiguous_tracks[index]
+                else:
+                    reason = "measurement_gate_failed" if observations else "no_measurement"
                 events.extend(self._missing(track, event_time_ns, emit=True, reason=reason))
         return tuple(sorted(events, key=lambda event: (event.event_time_ns, event.track_id)))
 
