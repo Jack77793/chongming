@@ -97,6 +97,7 @@ class CenterFusionEvent:
 
     Contains measurements and track updates generated during this center processing
     cycle. Batch-level counts summarize intermediate pipeline stages for diagnostics.
+    voxel_space provides sparse scored voxels for candidate visualization (optional).
     """
 
     measurements: tuple[MeasurementVisualization, ...]
@@ -104,6 +105,7 @@ class CenterFusionEvent:
     window_count: int
     candidate_count: int
     association_count: int
+    voxel_space: VoxelSpaceVisualization | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -175,3 +177,34 @@ class TruthTargetState:
     position_enu_m: Vec3
     velocity_enu_mps: Vec3
     geometry_type: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class VoxelSpaceVisualization:
+    """Sparse voxel scores for candidate space visualization.
+
+    Only non-zero scored voxels are transmitted to reduce data volume. The search
+    box and voxel step define the grid; scored_voxels contain sparse (index, score)
+    pairs. Godot maps scores to transparency: score 0 is fully transparent (not sent),
+    higher scores increase opacity. Typical sparsity: 1-5% of total voxel space.
+    """
+
+    search_box_min_enu_m: Vec3
+    search_box_max_enu_m: Vec3
+    voxel_step_enu_m: Vec3
+    scored_voxels: tuple[ScoredVoxel, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ScoredVoxel:
+    """Single non-zero scored voxel in the candidate search space.
+
+    grid_index is the integer grid coordinate (i, j, k) within the voxel space.
+    World position is computed as: min + grid_index * step. score is the raw
+    candidate score from the voxel search; supporting_station_count is the number
+    of independent stations contributing rays through this voxel (optional diagnostic).
+    """
+
+    grid_index: tuple[int, int, int]
+    score: float
+    supporting_station_count: int
