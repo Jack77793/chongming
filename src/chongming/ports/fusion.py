@@ -163,7 +163,10 @@ class CrossStationAssociator(Protocol):
 
 class GeometryWeighting(Protocol):
     def weight(self, ray: AdmittedRay) -> RayGeometryWeight:
-        """Apply external calibration usage policy to event-time evidence."""
+        """Scale independent precision using event-time usage; zero excludes a ray.
+
+        Shared installation/calibration uncertainty is not per-ray independent noise.
+        """
         ...
 
 
@@ -178,6 +181,9 @@ class GeometryRefiner(Protocol):
 
         Use original rays, not voxel centers or averaged pairwise midpoints. Report
         covariance conditional on the registered installation/calibration solutions.
+        Motion-aligned groups require predictions at their supporting reference
+        epoch; the returned dependence on the velocity prior is not independent
+        position evidence for a second filter update.
         """
         ...
 
@@ -195,7 +201,10 @@ class CenterTracker(Protocol):
     ) -> tuple[TrackEvent, ...]:
         """Maintain tentative -> confirmed -> coasting -> deleted session-local IDs.
 
-        Consume sealed windows exactly once in nondecreasing reference-time order;
+        Consume one sealed batch exactly once with one-to-one assignments. Each
+        measurement keeps its own reference time, after the previous consumed
+        horizon and no later than event_time_ns, the current batch horizon.
+        Ambiguous assignments do not update filters or create duplicate tracks;
         a publication is never retrospectively rewritten by a late arrival.
         """
         ...

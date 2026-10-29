@@ -1,4 +1,4 @@
-"""Public typed declarations for the stage-2 architecture skeleton."""
+"""Typed module implementations and the remaining architecture declarations."""
 
 from .device import (
     AuxiliaryCalibrationModule,
@@ -14,21 +14,25 @@ from .device import (
     Tracking2DModule,
 )
 from .fusion import (
+    CalibrationWeightingModule,
+    DirectGeometryCandidateModule,
+)
+from .fusion_association import CrossStationAssociationModule
+from .fusion_engine import CenterFusionModule
+from .fusion_geometry import (
+    CandidateGenerationModule,
+    GeometryRefinementModule,
+    VoxelCandidateModule,
+)
+from .fusion_ingress import (
     AdmissionJournalModule,
     CalibrationRegistryModule,
-    CalibrationWeightingModule,
-    CandidateGenerationModule,
-    CenterFusionModule,
-    CenterTrackingModule,
-    CrossStationAssociationModule,
-    DirectGeometryCandidateModule,
     EventAdmissionModule,
     EventClockMappingModule,
     EventWindowModule,
-    GeometryRefinementModule,
     StationRegistryModule,
-    VoxelCandidateModule,
 )
+from .fusion_tracking import CenterTrackingModule
 from .runtime import (
     EventTransportModule,
     EvidenceWriterModule,

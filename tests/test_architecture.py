@@ -1,8 +1,7 @@
 """Inspect graph construction and contract boundaries, without running algorithms.
 
-The stage-2 AST guard is temporary: replace it with behavioral validation when
-implementing stage 3. It deliberately checks the agreed absence of business logic,
-not mathematical outcomes or duplicated implementation details.
+The AST guard covers only explicitly named pending methods. Remove each entry
+when its implementation gains behavioral tests; other methods are not restricted.
 """
 
 from __future__ import annotations
@@ -32,7 +31,8 @@ from chongming.contracts.scene import (
 )
 from chongming.modules import base
 from chongming.modules.base import ModuleShell
-from chongming.modules.fusion import DirectGeometryCandidateModule, VoxelCandidateModule
+from chongming.modules.fusion import DirectGeometryCandidateModule
+from chongming.modules.fusion_geometry import VoxelCandidateModule
 from chongming.ports import development, device, fusion, runtime
 from tests.fixtures import architecture_specs
 
@@ -63,6 +63,47 @@ def _port_classes(module: ModuleType) -> tuple[type[object], ...]:
         for _, cls in inspect.getmembers(module, inspect.isclass)
         if cls.__module__ == module.__name__ and getattr(cls, "_is_protocol", False)
     )
+
+
+def _assert_pending_stubs(
+    case: unittest.TestCase, tree: ast.Module, expected: dict[str, set[str]]
+) -> None:
+    """Check only named pending methods, including that every entry still exists."""
+    discovered: dict[str, set[str]] = {}
+    for declaration in tree.body:
+        if not isinstance(declaration, ast.ClassDef) or declaration.name not in expected:
+            continue
+        discovered[declaration.name] = set()
+        for method in declaration.body:
+            if (
+                not isinstance(method, ast.FunctionDef)
+                or method.name not in expected[declaration.name]
+            ):
+                continue
+            discovered[declaration.name].add(method.name)
+            route = f"{declaration.name}.{method.name}"
+            body = list(method.body)
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                body.pop(0)
+            case.assertEqual(len(body), 1, f"{route}: pending stub must only raise")
+            case.assertIsInstance(body[0], ast.Raise, f"{route}: pending stub must only raise")
+            assert isinstance(body[0], ast.Raise)
+            exception = body[0].exc
+            case.assertIsInstance(exception, ast.Call, route)
+            assert isinstance(exception, ast.Call)
+            case.assertIsInstance(exception.func, ast.Name, route)
+            assert isinstance(exception.func, ast.Name)
+            case.assertEqual(exception.func.id, "NotImplementedError", route)
+            case.assertFalse(exception.keywords, route)
+            case.assertLessEqual(len(exception.args), 1, route)
+            for argument in exception.args:
+                case.assertIsInstance(argument, (ast.Name, ast.Constant), route)
+    case.assertEqual(discovered, expected, "Pending stub entries must resolve")
 
 
 class ArchitectureStructureTests(unittest.TestCase):
@@ -117,6 +158,22 @@ class ArchitectureStructureTests(unittest.TestCase):
             for key in ready:
                 del remaining[key]
         self.assertEqual(resolved, set(nodes))
+
+    def test_public_center_exports_resolve_to_the_bound_implementations(self) -> None:
+        from chongming import composition, modules
+        from chongming.modules import shells
+
+        assembly, _ = _construct()
+        self.assertIs(composition.CenterAssembly, type(assembly.center))
+        self.assertIs(modules.CenterFusionModule, type(assembly.center.fusion))
+        self.assertIs(shells.CenterFusionModule, type(assembly.center.fusion))
+        self.assertIs(modules.CenterTrackingModule, type(assembly.center.tracking))
+        self.assertIs(modules.CrossStationAssociationModule, type(assembly.center.association))
+        self.assertIs(modules.CalibrationWeightingModule, type(assembly.center.weights))
+        self.assertTrue(assembly.center.weights.business_implemented)
+        self.assertIs(assembly.center.voxels.weights, assembly.center.weights)
+        self.assertIs(assembly.center.association.weights, assembly.center.weights)
+        self.assertIs(assembly.center.geometry.weights, assembly.center.weights)
 
     def test_routes_and_candidate_methods_keep_all_modules_constructed(self) -> None:
         signatures: set[frozenset[tuple[str, type[object]]]] = set()
@@ -208,58 +265,64 @@ class ArchitectureStructureTests(unittest.TestCase):
                         check_type(annotation, f"{port.__name__}.{name}.{parameter}", set())
         self.assertGreater(checked_methods, 0)
 
-    def test_stage_two_shell_business_methods_only_raise(self) -> None:
+    def test_remaining_shell_methods_are_explicit_stubs(self) -> None:
         module_directory = Path(inspect.getfile(base)).parent
-        implemented_scene = {
-            "ModuleShell",
-            "ExperimentClockModule",
-            "TrajectoryModule",
-            "CameraProjectionModule",
-            "VisibilityModule",
-            "SceneLogicModule",
-            "CameraImagingModule",
-            "VirtualObservationModule",
-            "ScenarioModule",
-            "EventSequencerModule",
+        pending = {
+            "device.py": {
+                "MotionDetectionModule": {"detect"},
+                "Tracking2DModule": {"update"},
+                "MainDetectionModule": {"process"},
+                "ReferenceRecognitionModule": {"recognize"},
+                "CalibrationEstimationModule": {"estimate"},
+                "CalibrationHistoryModule": {
+                    "record_solution",
+                    "record_state",
+                    "lookup_solution",
+                    "snapshot_at",
+                },
+                "CalibrationStateModule": {"consider", "tick"},
+                "AuxiliaryCalibrationModule": {"process", "tick"},
+                "RayGenerationModule": {"build"},
+                "DeviceModule": {"process_main", "process_auxiliary", "tick"},
+            },
+            "fusion.py": {
+                "DirectGeometryCandidateModule": {"propose"},
+            },
+            "runtime.py": {
+                "EventTransportModule": {"submit", "submit_progress", "collect", "drain"},
+                "EvidenceWriterModule": {
+                    "begin",
+                    "record_online",
+                    "record_transport",
+                    "record_drain",
+                    "record_truth",
+                    "finish",
+                },
+                "SystemRunnerModule": {"start", "step", "run", "stop"},
+            },
+            "scene.py": {
+                "EvaluationModule": {"observe", "finalize"},
+                "MonitoringModule": {"render"},
+            },
         }
-        checked_methods = 0
-        for source in module_directory.glob("*.py"):
-            tree = ast.parse(source.read_text(), filename=str(source))
-            for declaration in tree.body:
-                if not isinstance(declaration, ast.ClassDef):
-                    continue
-                if declaration.name in implemented_scene:
-                    continue
-                for method in declaration.body:
-                    if not isinstance(method, ast.FunctionDef) or method.name in {
-                        "__init__",
-                        "__new__",
-                    }:
-                        continue
-                    checked_methods += 1
-                    with self.subTest(source=source.name, cls=declaration.name, method=method.name):
-                        body = list(method.body)
-                        if (
-                            body
-                            and isinstance(body[0], ast.Expr)
-                            and isinstance(body[0].value, ast.Constant)
-                            and isinstance(body[0].value.value, str)
-                        ):
-                            body.pop(0)
-                        self.assertEqual(len(body), 1, "Stage 2 methods cannot produce fake data")
-                        self.assertIsInstance(body[0], ast.Raise)
-                        assert isinstance(body[0], ast.Raise)
-                        exception = body[0].exc
-                        self.assertIsInstance(exception, ast.Call)
-                        assert isinstance(exception, ast.Call)
-                        self.assertIsInstance(exception.func, ast.Name)
-                        assert isinstance(exception.func, ast.Name)
-                        self.assertEqual(exception.func.id, "NotImplementedError")
-                        self.assertFalse(exception.keywords)
-                        self.assertLessEqual(len(exception.args), 1)
-                        for argument in exception.args:
-                            self.assertIsInstance(argument, (ast.Name, ast.Constant))
-        self.assertGreater(checked_methods, 0)
+        for filename, classes in pending.items():
+            source = module_directory / filename
+            with self.subTest(source=filename):
+                _assert_pending_stubs(self, ast.parse(source.read_text()), classes)
+
+    def test_stub_guard_allows_implemented_methods_and_rejects_silent_stubs(self) -> None:
+        for classname in ("MotionDetectionModule", "StationRegistryModule"):
+            with self.subTest(cls=classname):
+                tree = ast.parse(
+                    f"class {classname}:\n"
+                    "    def implemented(self):\n"
+                    "        return 1\n"
+                    "    def pending(self):\n"
+                    "        raise NotImplementedError('pending')\n"
+                )
+                _assert_pending_stubs(self, tree, {classname: {"pending"}})
+                with self.assertRaisesRegex(AssertionError, "pending stub must only raise"):
+                    _assert_pending_stubs(self, tree, {classname: {"implemented"}})
 
 
 if __name__ == "__main__":

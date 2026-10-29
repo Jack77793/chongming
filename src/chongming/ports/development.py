@@ -2,15 +2,16 @@
 
 from typing import Protocol
 
-from chongming.contracts.development import CenterInputStep, CenterRegistration
-from chongming.contracts.model import FusionMeasurement, TrackEvent
+from chongming.contracts.development import (
+    CenterAlgorithmResult,
+    CenterInputStep,
+    CenterRegistration,
+)
 
 
 class CenterAlgorithm(Protocol):
     def start(self, registration: CenterRegistration) -> None: ...
 
-    def process(
-        self, step: CenterInputStep
-    ) -> tuple[tuple[FusionMeasurement, ...], tuple[TrackEvent, ...]]: ...
+    def process(self, step: CenterInputStep) -> CenterAlgorithmResult: ...
 
     def close(self) -> None: ...

@@ -125,6 +125,7 @@ class _VideoEncoder:
         try:
             self._process.stdin.write(pixels)
         except BrokenPipeError as error:
+            assert self._process.stderr is not None
             detail = self._process.stderr.read().decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"FFmpeg video encoding failed: {detail or error}") from error
 

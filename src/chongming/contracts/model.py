@@ -353,6 +353,11 @@ class CalibrationSolution:
     rotation is R_enu_from_main, not the inverse auxiliary image rotation.
     The rotation-only first version keeps the configured optical-centre position;
     a position correction requires an upgraded shared pose covariance contract.
+
+    Virtual held solutions under deterministic camera jitter may declare a
+    conservative marginal second-moment envelope in correction_covariance,
+    identified by quality reason codes. This is not an exact Gaussian or joint
+    temporal distribution; shared uncertainty cannot be averaged away per ray.
     """
 
     solution_ref: CalibrationSolutionRef
@@ -502,6 +507,21 @@ class MeasurementRef:
 
 
 @dataclass(frozen=True, kw_only=True)
+class MotionAlignmentEvidence:
+    """Aligned position z uses a shared velocity prior, not independent evidence.
+
+    z + B v_prior observes [I B] x. B has units seconds. The published position
+    covariance includes B Cov(v) B.T, but filtering uses the independent covariance
+    and this observation matrix to avoid counting the velocity prior twice.
+    """
+
+    prior_track_id: TrackId
+    velocity_enu_mps: Vec3
+    velocity_projection_s: Matrix3x3
+    independent_position_covariance_enu_m2: Matrix3x3
+
+
+@dataclass(frozen=True, kw_only=True)
 class FusionMeasurement:
     center_session_id: SessionId
     measurement_id: MeasurementId
@@ -512,6 +532,7 @@ class FusionMeasurement:
     status: FusionStatus
     position_enu_m: Vec3M | None
     conditional_position_covariance_enu_m2: Matrix3x3 | None
+    motion_alignment: MotionAlignmentEvidence | None
     supporting_ray_event_ids: tuple[EventId, ...]
     supporting_station_ids: tuple[StationId, ...]
     residuals_m: tuple[float, ...]

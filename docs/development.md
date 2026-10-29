@@ -5,7 +5,7 @@
 在源码根目录使用仓库提供的 Nix 和 uv：
 
 ```sh
-nix develop
+nix develop --no-update-lock-file
 uv sync --frozen
 ```
 
@@ -26,7 +26,7 @@ Flake 为 `x86_64-linux`、`aarch64-linux`、`aarch64-darwin` 提供 shell 和 f
 Linux 无桌面环境可使用软件渲染：
 
 ```sh
-nix develop .#software --command xvfb-run -a uv run --frozen chongming-scene \
+nix develop --no-update-lock-file .#software --command xvfb-run -a uv run --frozen chongming-scene \
   --scenario scenarios/empty.json --output results/software-example --no-video
 ```
 
@@ -38,6 +38,7 @@ nix develop .#software --command xvfb-run -a uv run --frozen chongming-scene \
 
 ```sh
 ruff check src tests scripts
+ruff format --check src tests scripts
 uv run --frozen mypy src tests
 uv run --frozen python -m unittest tests.test_architecture -v
 for scenario in scenarios/*.json; do
@@ -48,41 +49,43 @@ done
 完整测试需要图形环境和 Nix shell（提供 Godot）：
 
 ```sh
-# 必须在 Nix shell 中运行以提供 CHONGMING_GODOT
-nix develop --command uv run --frozen python -m unittest discover -s tests -v
+nix develop --no-update-lock-file --command uv run --frozen python -m unittest discover -s tests -v
 ```
 
 无桌面 Linux 可从源码根目录执行：
 
 ```sh
-nix develop .#software --command xvfb-run -a uv run --frozen python \
+nix develop --no-update-lock-file .#software --command xvfb-run -a uv run --frozen python \
   -m unittest discover -s tests -v
 ```
 
 检查失败时区分本轮引入的问题与原有问题，并报告原因及未验证项。不要通过放宽超时、弱化断言或返回假结果使检查通过。
 
-### PR 前检查清单
+PR 前执行上述静态检查、完整回归、全部发行场景校验和格式化，并记录命令与结果。几何、渲染或资产行为变更需要覆盖对应路径，场景 `--check` 通过不能代替真实运行。
 
-提交 Pull Request 前必须完成：
+### 中心回归
 
-1. **全部测试**：`nix develop --command uv run --frozen python -m unittest discover -s tests -v`
-2. **类型检查**：`uv run --frozen mypy src tests`
-3. **代码规范**：`ruff check src tests scripts`
-4. **格式化**：`nix fmt`
-5. **场景验证**：所有 `scenarios/*.json` 通过 `--check`
+纯中心组件和虚拟误差测试不需要图形会话，在开发 shell 内执行：
 
-### 外部依赖本地化
+```sh
+uv run --frozen python -m unittest \
+  tests.test_fusion_ingress tests.test_fusion_geometry tests.test_fusion_matching \
+  tests.test_fusion_motion tests.test_fusion_uncertainty tests.test_fusion_tracking \
+  tests.test_ray_errors tests.test_architecture -v
+```
 
-所有外部依赖资产（地形、模型、纹理等）必须本地化管理，包括：
+`tests.test_reference_fusion` 覆盖在线插件、真实 CLI、多目标交叉与漏检、异步站点、乱序／延迟、静默恢复和带噪校准状态。它包含引擎启动测试，需要图形环境：
 
-- 通过 Git LFS 或 Nix flake 管理大文件
-- 在代码中使用相对路径或资产哈希引用
-- 配置文件中记录资产来源和许可信息
-- 确保 CI 和离线环境可访问
+```sh
+nix develop --no-update-lock-file .#software --command xvfb-run -a uv run --frozen python \
+  -m unittest tests.test_reference_fusion -v
+```
 
-是否将资产加入 `.gitignore` 由维护者决定，但本地化管理是强制要求。
+组件测试还校验解析加权解、精确／奇异约束、搜索截断、稳健降权，以及独立光心／角度误差的 Monte Carlo 协方差。测试场景使用真值作离线断言，插件注册和在线输入不得携带正确对应、目标 ID 或生成参数。
 
-统一格式化入口为 `nix fmt`，由 `treefmt.toml` 调度 nixfmt、Ruff 和 Prettier：
+### 格式化
+
+统一入口为 `nix fmt`，由 `treefmt.toml` 调度 nixfmt、Ruff 和 Prettier：
 
 ```sh
 nix fmt
@@ -93,6 +96,30 @@ nix fmt -- --no-cache --fail-on-change
 最后一条命令仍会改写不合规文件，并以失败状态报告改动，不是只读检查。不要用 `--excludes` 临时追加规则，它会覆盖配置中的全局排除项；选择文件时直接传路径。
 
 格式化涵盖 Python、Nix、JSON、Web 文件及 Markdown，不执行 lint 自动修复。缓存、输出、锁文件及不匹配的原始 OSM/HGT、Godot 文件不参与格式化。JSON 资产排版不会改变内容摘要；具体规则见[用户指南](user-guide.md#json-资产)。
+
+## 外部资产管理
+
+地形、模型、纹理和外部 Godot 工程须先准备为本地固定快照，运行时不依赖在线地图或资产下载。记录来源、版本或日期、原始文件摘要、处理命令及许可；关键资产经授权后可用 Git LFS 或固定 Nix 输入管理，不能将本地资源自动加入仓库或发行包。
+
+Hannover 固定预设只保存配置与内容身份，不代表仓库已收录真实地图或 DEM。准备资产时保留原始输入、导入报告和独立备份；在线重新下载不保证相同内容，不以修改预设摘要绕过校验。JSON 内容摘要与文件字节摘要的用途见[用户指南](user-guide.md#json-资产)。
+
+外部场景的 `--check` 只验证 Python 配置，不检查资源导入或 Godot 渲染。正式录制前应单独验证场景加载，保存外部工程提交与资源摘要，并保留各素材许可。Truck Town 的挂载方法见[用户指南](user-guide.md#外部-godot-场景)。
+
+## 中心算法接入
+
+`ports.development.CenterAlgorithm` 定义同步插件边界，JSON 不加载可执行代码。工厂由 `--algorithm module:factory` 显式指定，不带参数地创建算法对象：
+
+| 方法                  | 输入与职责                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `start(registration)` | `CenterRegistration` 含 `stations`、`center_session_id`、`policy`、`clock_mapping` 和 `started_at`，没有场景定义或真值 |
+| `process(step)`       | `CenterInputStep` 含校准解、普通到达事件、主相机完成进度、处理时刻和有限结束标记；返回 `CenterAlgorithmResult`         |
+| `close()`             | 释放算法资源；参考实现逆序停止已启动模块，重复关闭安全                                                                 |
+
+`CenterAlgorithmResult` 的 `measurements`、`tracks` 为展开结果，`batches` 保留完整 `FusionBatchResult`，包括准入、水位、候选、关联和几何诊断。仅返回二元元组不符合接口。工具先交付校准解，再交付引用它的事件和进度，有限末尾另有 `stream_ended` 步。
+
+`reference.create_algorithm()` 构造参考实现；已有 `ports.fusion.FusionEngine` 可用 `reference.FusionEngineAdapter` 适配。`composition/center.py` 只根据在线策略构造依赖，不读取场景或启动业务；插件负责启动和关闭。准入与窗口在 `fusion_ingress.py`，候选与细化在 `fusion_geometry.py`，关联与排他搜索在 `fusion_association.py`／`fusion_matching.py`，数值估计和对齐在 `fusion_estimation.py`／`fusion_motion.py`，跟踪及编排在 `fusion_tracking.py`／`fusion_engine.py`，均位于 `modules/`。
+
+`reference_policy()` 提供参考阈值；开发工具的窗口宽度取最小配置相机曝光周期。调整稳健损失、准入、水位或跟踪门限需要 Python 装配，authoring JSON 的 `search` 只配置搜索范围与步长，CLI 不提供任意策略覆盖。自定义驱动或插件应保存实际使用的完整策略与时钟映射，不能修改内部策略后仍把原注册配置当作复现实验记录。算法语义见[设计说明](design.md#中心融合与三维跟踪)，默认值和输出读取方法见[用户指南](user-guide.md#参考融合与跟踪)。
 
 ## 源码与修改边界
 
@@ -123,7 +150,7 @@ uv run --frozen python scripts/distribute.py check --output dist/release --rende
 无图形环境时可省略 `--render` 完成安装与预览 HTML 检查，但这不验证 Godot 运行。Linux 软件渲染的完整检查：
 
 ```sh
-nix develop .#software --command xvfb-run -a uv run --frozen python \
+nix develop --no-update-lock-file .#software --command xvfb-run -a uv run --frozen python \
   scripts/distribute.py check --output dist/release --render
 ```
 

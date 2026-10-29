@@ -18,61 +18,28 @@ from typing import Any
 
 from chongming.composition.development import development_run
 from chongming.composition.graph import declare_assembly
-from chongming.contracts.development import CenterInputStep, CenterRegistration
+from chongming.contracts.development import (
+    CenterAlgorithmResult,
+    CenterInputStep,
+    CenterRegistration,
+)
 from chongming.contracts.fusion import StationEventTimeProgress
 from chongming.contracts.model import (
     CameraRole,
     CaptureTime,
-    FusionMeasurement,
     ProcessingTime,
     RayEvent,
     ReceivedEvent,
     StationEvent,
-    TrackEvent,
 )
 from chongming.contracts.runtime import ModuleHealth
 from chongming.contracts.scene import ScenarioStep
 from chongming.ports.development import CenterAlgorithm
-from chongming.ports.fusion import FusionEngine
 from chongming.rendering.godot import default_renderer
 from chongming.scenarios.run import SceneEvidenceWriter, _json, _provenance
 from chongming.scenarios.serialization import load_scenario, validate_supported_features
 
 logger = logging.getLogger(__name__)
-
-
-class FusionEngineAdapter:
-    """Use the existing FusionEngine port without exposing privileged scenario data."""
-
-    def __init__(self, engine: FusionEngine) -> None:
-        self.engine = engine
-
-    def start(self, registration: CenterRegistration) -> None:
-        for station in registration.stations:
-            result = self.engine.register_station(station)
-            if result.status.value not in {"registered", "already_registered"}:
-                raise ValueError(f"station registration failed: {result.reason_codes}")
-
-    def process(
-        self,
-        step: CenterInputStep,
-    ) -> tuple[tuple[FusionMeasurement, ...], tuple[TrackEvent, ...]]:
-        for solution in step.solutions:
-            result = self.engine.register_calibration(solution)
-            if result.status.value not in {"registered", "already_registered"}:
-                raise ValueError(f"calibration registration failed: {result.reason_codes}")
-        batches = [self.engine.process(event) for event in step.events]
-        batches.extend(self.engine.report_progress(progress) for progress in step.progress)
-        batches.append(self.engine.tick(step.time))
-        return (
-            tuple(m for batch in batches for m in batch.measurements),
-            tuple(t for batch in batches for t in batch.tracks),
-        )
-
-    def close(self) -> None:
-        close_engine = getattr(self.engine, "close", None)
-        if close_engine is not None:
-            close_engine()
 
 
 class InputInspector:
@@ -83,7 +50,7 @@ class InputInspector:
         self.solutions: dict[Any, Any] = {}
         self.last_sequence: dict[tuple[str, str], int] = {}
 
-    def process(self, step: CenterInputStep) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    def process(self, step: CenterInputStep) -> CenterAlgorithmResult:
         for solution in step.solutions:
             self.solutions[solution.solution_ref] = solution
         for received in step.events:
@@ -103,7 +70,7 @@ class InputInspector:
                 direction = event.ray_direction_enu_unit
                 if not math.isclose(sum(v * v for v in direction), 1, abs_tol=1e-8):
                     raise ValueError("ray direction is not a unit vector")
-        return (), ()
+        return CenterAlgorithmResult(measurements=(), tracks=(), batches=())
 
     def close(self) -> None:
         self.solutions.clear()
@@ -161,9 +128,10 @@ class CenterSession:
                 self.health.append(binding.module.start_module(binding.node.module_key, now))
             registration = CenterRegistration(
                 stations=self.spec.station_configs,
-                search=self.spec.voxel_search,
-                clock_domain_id=now.clock_domain_id,
                 center_session_id=str(self.run_spec.center_session_id),
+                policy=self.run_spec.fusion_policy,
+                clock_mapping=self.run_spec.processing_to_capture_clock,
+                started_at=now,
             )
             self._algorithm_started = True
             self.algorithm.start(registration)
@@ -269,7 +237,8 @@ class CenterSession:
             if step is not None:
                 self.writer.record(step)
             began = time.perf_counter()
-            measurements, tracks = self.algorithm.process(online)
+            result = self.algorithm.process(online)
+            measurements, tracks = result.measurements, result.tracks
             center_ms = (time.perf_counter() - began) * 1000
             self._results.write(
                 _json(
@@ -278,6 +247,7 @@ class CenterSession:
                         "time": online.time,
                         "measurements": measurements,
                         "tracks": tracks,
+                        "batches": result.batches,
                         "center_ms": center_ms,
                         "stream_ended": online.stream_ended,
                     }
@@ -300,6 +270,7 @@ class CenterSession:
                 "video_enabled": self.source.video_enabled,
                 "measurements": asdict_list(measurements),
                 "tracks": asdict_list(tracks),
+                "batches": asdict_list(result.batches),
                 "center_ms": center_ms,
                 "stages": asdict(step.truth.timing) if step and step.truth.timing else None,
             }

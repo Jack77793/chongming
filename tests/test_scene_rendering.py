@@ -12,8 +12,10 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -30,6 +32,7 @@ from chongming.modules.scene import (
     TrajectoryModule,
     VisibilityModule,
 )
+from chongming.ports.scene import ScenarioSource
 from chongming.preview import (
     DiscreteRenderClock,
     PreviewRuntime,
@@ -229,6 +232,8 @@ class SceneConfigurationTests(unittest.TestCase):
         self.assertEqual(len(spec.scene_definition.vegetation), 2)
         self.assertIsInstance(spec.scene_definition.vegetation[0].geometry, s.CylinderGeometry)
         self.assertIsInstance(spec.scene_definition.vegetation[1].geometry, s.CylinderGeometry)
+        assert isinstance(spec.scene_definition.vegetation[0].visual, s.TreeVisualSpec)
+        assert isinstance(spec.scene_definition.vegetation[1].visual, s.TreeVisualSpec)
         self.assertEqual(spec.scene_definition.vegetation[0].visual.part, s.TreePart.TRUNK)
         self.assertEqual(spec.scene_definition.vegetation[1].visual.part, s.TreePart.CANOPY)
         logic = SceneLogicModule(TrajectoryModule(), CameraProjectionModule(), VisibilityModule())
@@ -258,6 +263,7 @@ class SceneConfigurationTests(unittest.TestCase):
             tree_payload[0]["position"], list(first.vegetation[1].base_pose.position_enu_m)
         )
         self.assertEqual(tree_payload[0]["visual"]["kind"], "tree_canopy")
+        assert isinstance(first.vegetation[1].visual, s.TreeVisualSpec)
         self.assertEqual(tree_payload[0]["visual"]["height"], first.vegetation[1].visual.height_m)
         self.assertEqual(tree_payload[0]["visual"]["radius"], first.vegetation[1].visual.radius_m)
         self.assertIsNone(tree_payload[0]["vertices"])
@@ -574,7 +580,8 @@ class SurfaceRenderingTests(unittest.TestCase):
             ys, xs = np.nonzero(pixels[:, :, 0].astype(int) > pixels[:, :, 1].astype(int) + 40)
             self.assertGreater(len(xs), 10)
             expected = CameraProjectionModule().project(camera, point).centroid_px
-            np.testing.assert_allclose((xs.mean(), ys.mean()), expected, atol=0.8)
+            assert expected is not None
+            np.testing.assert_allclose(np.asarray((xs.mean(), ys.mean())), expected, atol=0.8)
 
     def test_renderer_survives_parent_terminal_signals_and_closes_cleanly(self) -> None:
         renderer = GodotRenderer()
@@ -713,7 +720,8 @@ class SurfaceRenderingTests(unittest.TestCase):
         )
         rays = optical_rays(camera.actual_intrinsics, camera.actual_distortion)
         for u, v in ((0, 0), (63, 47), (32, 24)):
-            ray = tuple(float(x) for x in rays[v * 64 + u])
+            x, y, z = rays[v * 64 + u]
+            ray = (float(x), float(y), float(z))
             projection = CameraProjectionModule().project(camera, ray)
             assert projection.centroid_px is not None
             np.testing.assert_allclose(projection.centroid_px, (u, v), atol=1e-6)
@@ -764,7 +772,9 @@ class SurfaceRenderingTests(unittest.TestCase):
             ),
             center_pixels,
         )
-        self.assertGreater(truth.frame_truth[0].targets[0].projected_width_px, 10)
+        projected_width_px = truth.frame_truth[0].targets[0].projected_width_px
+        assert projected_width_px is not None
+        self.assertGreater(projected_width_px, 10)
         with self.assertRaisesRegex(ValueError, "exact exposure-midpoint"):
             CameraImagingModule().render(
                 replace(request, frames=(replace(frame, exposure_samples=(first, last)),))
@@ -845,6 +855,26 @@ class SurfaceRenderingTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_source_factory_receives_render_options_on_start_and_restart(self) -> None:
+        spec = demo_spec(station_count=1, fps=2)
+        calls: list[tuple[s.ScenarioSpec, int, bool]] = []
+
+        def factory(
+            spec: s.ScenarioSpec, *, render_every: int, video_enabled: bool
+        ) -> ScenarioSource:
+            calls.append((spec, render_every, video_enabled))
+            return demo_source(spec, render_every=render_every, video_enabled=video_enabled)
+
+        runtime = PreviewRuntime(spec, render_fps=1, video_enabled=False, source_factory=factory)
+        runtime.control("pause")
+        runtime.start()
+        self.addCleanup(runtime.close)
+        runtime.control("step")
+        self.wait_snapshot(runtime, lambda data: data["snapshot"] is not None)
+        runtime.control("restart")
+        self.wait_snapshot(runtime, lambda data: data["snapshot"]["loop"] == 2)
+        self.assertEqual(calls, [(spec, runtime.render_every, False)] * 2)
+
     def test_freeview_is_independent_of_sensor_pixels_and_experiment_controls(self) -> None:
         scene = snapshot(test_scene(s.SphereGeometry(1.0)))
         camera = replace(
@@ -958,9 +988,11 @@ class PreviewTests(unittest.TestCase):
                             timeout=5,
                         )
                     )
+                    latest_step = runtime._latest_step
+                assert latest_step is not None
                 first = runtime.snapshot()["logical_step_count"]
-                self.assertTrue(runtime._latest_step.truth.camera_frames)
-                self.assertFalse(runtime._latest_step.video.frames)
+                self.assertTrue(latest_step.truth.camera_frames)
+                self.assertFalse(latest_step.video.frames)
                 runtime.edit_update(
                     "station",
                     document["stations"][0]["id"],
@@ -1005,7 +1037,7 @@ class PreviewTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
 
-            def post(route: str, body: dict) -> tuple[int, dict]:
+            def post(route: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
                 request = Request(
                     f"http://127.0.0.1:{server.server_port}/api/editor/{route}",
                     data=json.dumps(body).encode(),
@@ -1148,7 +1180,9 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(runtime.snapshot(stations[0])["snapshot"]["sequence"], 2)
             self.assertEqual(encode.call_count, 6)
 
-    def wait_snapshot(self, runtime: PreviewRuntime, predicate) -> dict:
+    def wait_snapshot(
+        self, runtime: PreviewRuntime, predicate: Callable[[dict[str, Any]], bool]
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + 5
         with runtime._condition:
             ready = runtime._condition.wait_for(

@@ -19,7 +19,7 @@ chongming-center --scenario scenarios/center_clean.json --check
 
 普通安装不使用 `uv run` 自动同步源码项目。用户目录没有开发脚本和 Flake，需要开发环境时先解压随附 sdist。NixOS 用户应在源码的 Nix shell 内安装和运行，以取得 Python wheel 所需的动态库。依赖安装可能联网，实验运行不下载地景数据。
 
-实际运行另需 Godot 4.7.2 stable 标准版、图形会话及 OpenGL 3.3。设置 `CHONGMING_GODOT` 指向可执行文件，或在 PATH 提供 `godot4`／`godot`；Nix shell 已配置。Windows 的环境路径与激活方式不同，本指南的安装命令和发行检查以 POSIX 环境为准。
+实际运行另需 Godot 4.7.2 stable 标准版、图形会话及 OpenGL 3.3。设置 `CHONGMING_GODOT` 指向可执行文件，或在 PATH 提供 `godot4`／`godot`；录制与回放另需 FFmpeg，可用 `CHONGMING_FFMPEG` 指定。Nix shell 已配置两者。Windows 的环境路径与激活方式不同，本指南的安装命令和发行检查以 POSIX 环境为准。
 
 下文采用源码形式 `uv run --frozen <command>`；普通安装激活环境后直接执行 `<command>`。场景路径相对当前目录，资产路径默认相对场景文件目录，包内资源不依赖工作目录。
 
@@ -70,13 +70,47 @@ uv run --frozen chongming-center --scenario scenarios/center_clean.json --output
 
 `--run --tick-hz 10` 可直接连续运行，节拍只影响墙钟速度。默认 `InputInspector` 检查配置、校准引用、序号与射线，不计算位置或轨迹。
 
-受信任的 Python 工厂可通过 `--algorithm my_center:factory` 接入。工厂返回实现 `ports.development.CenterAlgorithm` 的对象：
+受信任的 Python 工厂可通过 `--algorithm my_center:factory` 接入，接口与策略装配见[开发指南](development.md#中心算法接入)。JSON 不加载 Python 代码，算法不得读取真值文件或完整场景配置。
 
-- `start(registration)` 接收在线站点配置、搜索盒、时钟和中心会话。
-- `process(step)` 接收校准解、普通事件和主相机流进度，同步返回 `(measurements, tracks)`。
-- `close()` 释放资源。
+### 参考融合与跟踪
 
-先登记校准解，再消费引用它的事件和完成进度；有限末尾另有 `stream_ended` 步。已有 `FusionEngine` 可通过 `FusionEngineAdapter` 接入。JSON 不加载 Python 代码，算法不得读取真值文件或完整场景配置。
+显式启用参考算法，默认仍无视频：
+
+```sh
+uv run --frozen chongming-center --scenario scenarios/center_clean.json \
+  --algorithm chongming.reference:create_algorithm \
+  --output results/center-reference --run --tick-hz 240
+```
+
+该示例为 30 秒双站单目标实验。`--tick-hz 240` 仅缩短墙钟等待，不改变曝光时刻，也不保证实际运行速率；省略 `--run` 可用 `step`／`run N` 检查阶段结果。无桌面 Linux 的图形环境见[开发指南](development.md#图形环境)。
+
+参考路径消费普通虚拟射线，执行事件准入、封口窗口、体素候选、多目标关联、加权连续定位及恒速跟踪，不运行主相机检测或完整设备射线链路。已有有效速度先验可对齐异步站点，新目标仍须具备足够窄的多站曝光支持。运动、误差和失败语义见[设计说明](design.md#中心融合与三维跟踪)。
+
+`composition/center.py::reference_policy()` 的主要默认设置如下。这些是实验策略，不是部署精度或性能承诺；自定义策略需要 Python 装配，不能通过修改 authoring JSON 任意覆盖。
+
+| 策略       | 默认设置                                                                                                                            |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| 窗口       | 宽度取最小配置相机曝光周期，允许迟到 0；首次等待及空闲阈值 1 s，离线阈值 3 s                                                        |
+| 候选       | `coarse_voxel`，至少 2 个独立站；独立误差扩展系数 3，每射线不确定度扩展及其中心遍历预算 100000                                      |
+| 关联       | 时间门限为一个窗口，空间门限 10 m，预测门限 2 m；假设预算 4096，每冲突分量搜索节点 20000                                            |
+| 几何       | 交会角门限 0.01 rad，条件数上限 `1e6`，逐射线残差上限 1 m；最多 50 次迭代，位置收敛容差 `1e-8` m                                    |
+| 损失与校准 | 默认 `least_squares`；可选 `huber`，尺度 1.5 标准差；VALID／FROZEN／STALE 独立精度乘数为 1／0.25／0.1                               |
+| 对齐       | `track_prediction` 保留无先验搜索；新目标曝光中点跨度上限 1 ms                                                                      |
+| 跟踪       | 至少 2 次测量确认，确认间隔上限 1 s；已确认轨迹失联 1 s 后进入 `coasting`、3 s 后删除；平方 Mahalanobis 门限 9，初始化空间门限 10 m |
+
+`center-output.jsonl` 每行对应一次同步调用，包含 `step_no`、处理时间、`measurements`、`tracks`、`batches` 和 `center_ms`。顶层测量／轨迹是阶段批次的展开视图，统计时选一层，不能重复计数。`center_ms` 只计插件调用，不包括场景生成和证据写入。
+
+| 结果                                    | 读取方式                                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `measurements[]`                        | 以 `status == "located"` 确认有效位置；读取 `reference_time_ns`、支持站／事件和条件位置协方差                           |
+| `tracks[]`                              | 按中心会话内 `track_id` 读取 `tentative`、`confirmed`、`coasting`、`deleted`；首个位置的速度和完整状态协方差可为 `null` |
+| `batches[].admissions`、`window_update` | 查看隔离、拒绝、重复、迟到、水位和封口窗口；隔离事件可在引用补齐后重试，迟到证据不重开窗口                              |
+| `batches[].candidates`、`associations`  | 查看支持站、未分配射线、竞争假设和搜索截断；空候选不等于全世界没有目标                                                  |
+| `batches[].geometry[].results`          | 查看 `ray_weights`、`normalized_residuals`、`robust_weights`、迭代数、收敛与失败原因；残差为 `null` 可表示违反精确约束  |
+
+算法可能因站数不足、关联歧义、搜索截断、近共线、精确约束冲突或求解失败而没有有效位置。先查阶段状态和原因，再判断是否可用；`solver_converged` 本身不代表通过质量门限。条件协方差不包含共享安装／校准误差，零条件协方差也不等于零绝对误差。
+
+`manifest.json` 的 `algorithms_complete` 保持 `false`，表示完整系统链路尚未完成；`summary.json` 的 `state: "complete"` 只表示本次有限运行结束。
 
 ### 有限导出与输出
 
@@ -106,25 +140,18 @@ manifest 的 `installation` 区分 `editable` 与 `installed`；`package_digests
 
 ### 录制回放
 
-当前回放源可读取图像和时间戳，但回放预览尚不能正常运行。数据缺失与接口边界见[设计说明](design.md#证据回放)。
-
-使用有限导出生成含 PNG 序列的证据目录，不加 `--no-video`：
+使用有限导出生成 H.264 证据目录，不加 `--no-video`：
 
 ```sh
 uv run --frozen chongming-scene --scenario scenarios/empty.json --output results/recording-demo
-```
-
-回放需要保留该目录的证据文件、PNG 及 `authoring.json`；仅有编译后的 `scenario.json` 无法加载。外部资产须按 `authoring.json` 中的路径和摘要保持可用。
-
-已提供的回放参数示例：
-
-```sh
 uv run --frozen chongming-preview --recording results/recording-demo --playback-fps 30
 ```
 
-`--recording` 与 `--scenario`、`--camera-position-offset` 互斥，回放不支持场景编辑。回放入口仍初始化 Godot，图形环境要求不变；`chongming-center` 尚不支持 `--recording`。
+回放需要保留 `online.jsonl`、`truth.jsonl`、`truth-static.json`、`timing.jsonl`、`video.json`、`video/` 和 `authoring.json`；旧 PNG 序列不属于当前视频格式。仅有编译后的 `scenario.json` 无法加载，外部资产须按作者配置中的路径和摘要保持可用。
 
-`--playback-fps` 仅与 `--recording` 配合使用且须为正数，限制的是场景步速率，不保证相机或浏览器显示帧率。省略时回放源不主动等待，预览仍受 `--render-fps` 节拍限制。
+这是实验性预览入口，未恢复普通事件及完整评估数据；到达录制末尾后会转入实时场景源，不保证循环原录像。它仍初始化 Godot，不能作为不启动渲染器的完整回放方案。具体边界见[设计说明](design.md#证据回放)。
+
+`--recording` 与 `--scenario`、`--camera-position-offset` 互斥，不支持场景编辑；`chongming-center` 尚不支持 `--recording`。`--playback-fps` 仅与录制配合使用且须为正数，限制场景步速率，不保证相机或浏览器帧率。省略时回放源不主动等待，预览仍受 `--render-fps` 限制。
 
 ## 场景配置
 
@@ -132,13 +159,15 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
 
 示例均位于发行包或源码的 `scenarios/`：
 
-| 场景                                         | 用途                             |
-| -------------------------------------------- | -------------------------------- |
-| `center_clean.json`                          | 双站单目标、30 秒中心输入        |
-| `constant_velocity.json`、`empty.json`       | 交叉直线运动、无目标             |
-| `heightfield.json`、`heightfield_asset.json` | 内嵌与外部山脊网格               |
-| `review.json`、`photography.json`            | 三类形状、摄影环境与相机抖动     |
-| `osm.json`、`osm_landscape.json`             | 合成建筑及完整地景，不是真实地图 |
+| 场景                                         | 用途                                   |
+| -------------------------------------------- | -------------------------------------- |
+| `center_clean.json`                          | 双站单目标、30 秒中心输入              |
+| `constant_velocity.json`、`empty.json`       | 交叉直线运动、无目标                   |
+| `heightfield.json`、`heightfield_asset.json` | 内嵌与外部山脊网格                     |
+| `review.json`、`photography.json`            | 三类形状、摄影环境与相机抖动           |
+| `osm.json`、`osm_landscape.json`             | 合成建筑及完整地景，不是真实地图       |
+| `truck_town.json`                            | 本地外部 Godot 城市，需另行准备工程    |
+| `aircraft_model_test.json`                   | 飞行器模型配置检查，不代表完整运行验收 |
 
 坐标为 ENU 东／北／上，距离单位米，时间单位秒。相机系为右／下／前。基础字段如下，未知字段或非法值会报错：
 
@@ -149,7 +178,7 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
 | `duration_s`、`fps`                                   | 正时长，默认 24 秒；采样率默认 30 Hz，每站支持 1 至 60 Hz                                                                |
 | `stations[]`                                          | 1 至 4 站，唯一 `id`、`position_enu_m`；可选 `main_yaw_deg`、`main_elevation_deg`、`auxiliary_yaw_deg`、`fps`、`start_s` |
 | `targets[]`                                           | 唯一 ID、`geometry`、`motion`；`[]` 表示无目标                                                                           |
-| `geometry`                                            | `sphere` + `radius_m`、`box` + `half_extents_m`、`cylinder` + `radius_m` + `half_height_m`，或 `aircraft`（见下文）      |
+| `geometry`                                            | `sphere` + `radius_m`、`box` + `half_extents_m`，或 `aircraft` + 可选 `model`，运行边界见下文                            |
 | `motion`                                              | `constant_velocity` + 位置/速度，或 `orbit` + 中心/半径/周期，可选相位及垂直振幅                                         |
 | `world_objects[]`                                     | 静态物体；`[]` 清空内置地物，仍保留各站 A4 标志物                                                                        |
 | `terrain`                                             | `flat` 或 `heightfield`；网格使用原点、间距、内嵌高度或外部资产                                                          |
@@ -162,30 +191,44 @@ uv run --frozen chongming-preview --recording results/recording-demo --playback-
 
 省略地物、目标、植被或风字段时可能保留演示默认值；空场景应显式使用空数组及 `wind: null`。主相机为 1920×1080、对角 FOV 60°；辅助相机为 640×480、水平 FOV 2.6°，标称水平朝向 10 m 外与站点 ID 绑定的横向 A4 棋盘。方位角 0° 向北，正向东；显式抖动可使瞬时辅助姿态偏离水平。输出为无 alpha 的 sRGB RGB8。
 
-#### 几何类型
+### 几何类型
 
-支持的几何类型：
+作者格式接受以下 `geometry.type`：
 
-- **`sphere`**：球体，需 `radius_m`（正半径，米）
-- **`box`**：长方体，需 `half_extents_m`（`[x, y, z]` 半宽，米，各维度正值）
-- **`cylinder`**：圆柱体，需 `radius_m`（正半径，米）和 `half_height_m`（正半高，米）。圆柱轴沿上（+Z）方向
-- **`aircraft`**：飞行器。省略 `model` 时使用内置简化网格；`model` 取 `f86` 或 `la11` 时使用仓库内置的 glb 模型（`src/chongming/rendering/godot/assets/aircraft/`）：
+| 类型       | 参数                                                                            |
+| ---------- | ------------------------------------------------------------------------------- |
+| `sphere`   | `radius_m`，正半径，米                                                          |
+| `box`      | `half_extents_m`，`[x, y, z]` 正半宽，米                                        |
+| `aircraft` | 不指定 `model` 时使用内置三角网格；`model: "f86"` 或 `"la11"` 选择随包 GLB 模型 |
 
-  ```json
-  {
-    "id": "aircraft-1",
-    "geometry": { "type": "aircraft", "model": "f86" },
-    "motion": {
-      "type": "constant_velocity",
-      "position_enu_m": [-30, -60, 40],
-      "velocity_enu_mps": [0, 10, -1]
-    }
-  }
-  ```
+例如目标的几何字段可写为：
 
-  `rendering/geometry.py` 读取 glb 网格，应用网格节点的旋转、缩放和平移，并转换到机体系（x 右、y 机头、z 上，与内置网格一致）后，同一份顶点同时用于 Python 求交、包围盒、投影和 Godot 渲染；Godot 不再自行加载 glb。Godot 以目标的 `appearance` 覆盖 glb 自带材质，贴图不显示。
+```json
+{ "type": "aircraft", "model": "f86" }
+```
 
-外部 Godot 场景通常没有可供 Python 复算的完整几何模型，可将 `occlusion_mode` 设为 `unknown`。运行不会因无法判断遮挡而失败；系统仍记录相机姿态、目标状态和图像，并按目标中心是否在视场内生成候选。该模式的结果只适合在同一固定录像上比较不同系统版本或模型的相对排名，不能解释为排除了遮挡影响的准确率，也不适合直接与 `known` 场景的绝对分数比较。
+`rendering/geometry.py` 读取 GLB 网格，应用网格节点的旋转、缩放和平移，并转换到机体系（x 右、y 机头、z 上，与内置网格一致）后，同一份顶点同时用于 Python 求交、包围盒、投影和 Godot 渲染；Godot 不再自行加载 GLB。Godot 以目标的 `appearance` 覆盖 GLB 自带材质，贴图不显示。
+
+`model` 不是任意文件路径，作者格式不支持 `geometry.asset`。
+
+内部 `CylinderGeometry(radius_m, height_m)` 用于植被等圆柱代理，不是作者格式可选的 `geometry.type`。
+
+### 外部 Godot 场景
+
+Truck Town 示例使用 [Godot demo projects 的 `3d/truck_town`](https://github.com/godotengine/godot-demo-projects/tree/master/3d/truck_town)。先在本地准备并固定上游提交，不将外部工程复制进本仓库。以下命令只挂载静态城市场景，相机和飞行物仍由 Python 实验时钟控制：
+
+```sh
+CHONGMING_GODOT_EXTERNAL_PROJECT=/path/to/godot-demo-projects/3d/truck_town \
+CHONGMING_GODOT_EXTERNAL_SCENE=res://town/model/town_model.gltf \
+uv run --frozen chongming-scene --scenario scenarios/truck_town.json \
+  --output results/truck-town
+```
+
+两个环境变量必须同时设置，场景路径须以 `res://` 开头且位于工程资源中。渲染器复制外部资源到临时工程，再覆盖本项目 worker，忽略外部 `project.godot` 和导入缓存，并重新导入资源。输入工程不被修改；车辆控制、物理和 UI 不属于该示例的验证范围。
+
+`truck_town.json` 使用 `occlusion_mode: "unknown"`，外部网格不提供 Python 遮挡真值。录制可保留相机、目标状态和图像，只能在同一固定录像内比较系统，不能据此声称已校正遮挡或保证绝对准确率。录像读取沿用[录制回放](#录制回放)的限制。
+
+Godot demo 仓库采用 MIT 许可，模型和纹理仍须核对各自 `license.txt`。正式录制应另存工程提交、资源摘要和许可说明，不能仅依赖本项目包摘要复现外部场景。
 
 ### 摄影与植被
 

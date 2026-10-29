@@ -59,6 +59,8 @@ class AdmissionReason(StrEnum):
     CALIBRATION_SOLUTION_UNKNOWN = "calibration_solution_unknown"
     CALIBRATION_SOLUTION_SCOPE_MISMATCH = "calibration_solution_scope_mismatch"
     CALIBRATION_CONFIGURATION_MISMATCH = "calibration_configuration_mismatch"
+    CALIBRATION_EVIDENCE_MISMATCH = "calibration_evidence_mismatch"
+    CALIBRATION_STATE_CONFLICT = "calibration_state_conflict"
     CALIBRATION_EXPOSURE_OUTSIDE_VALIDITY = "calibration_exposure_outside_validity"
     CALIBRATION_USAGE_QUARANTINED = "calibration_usage_quarantined"
     CALIBRATION_USAGE_REJECTED = "calibration_usage_rejected"
@@ -86,6 +88,7 @@ class StationStreamHealth(StrEnum):
     ACTIVE = "active"
     IDLE = "idle"
     OFFLINE = "offline"
+    RECOVERING = "recovering"
     ENDED = "ended"
 
 
@@ -135,11 +138,21 @@ class AssociationConflictReason(StrEnum):
     COMPETING_TARGET_HYPOTHESES = "competing_target_hypotheses"
     INSUFFICIENT_INDEPENDENT_STATIONS = "insufficient_independent_stations"
     TEMPORAL_GATE_FAILED = "temporal_gate_failed"
+    MOTION_ALIGNMENT_UNAVAILABLE = "motion_alignment_unavailable"
+    PREDICTION_GATE_FAILED = "prediction_gate_failed"
     SPATIAL_GATE_FAILED = "spatial_gate_failed"
+    DEGENERATE_GEOMETRY = "degenerate_geometry"
+    SOLVER_FAILURE = "solver_failure"
+    SOLVER_NOT_CONVERGED = "solver_not_converged"
+    INCONSISTENT_EXACT_CONSTRAINTS = "inconsistent_exact_constraints"
+    CANDIDATE_SEARCH_TRUNCATED = "candidate_search_truncated"
+    ASSOCIATION_SEARCH_TRUNCATED = "association_search_truncated"
 
 
 class AssociationBatchStatus(StrEnum):
     ASSOCIATIONS_SELECTED = "associations_selected"
+    PARTIALLY_ASSOCIATED = "partially_associated"
+    NO_VALID_ASSOCIATION = "no_valid_association"
     ASSOCIATION_AMBIGUOUS = "association_ambiguous"
     INSUFFICIENT_STATIONS = "insufficient_stations"
     NO_CANDIDATE_IN_VOLUME = "no_candidate_in_volume"
@@ -158,6 +171,12 @@ class GeometryReason(StrEnum):
     EXCESSIVE_RESIDUAL = "excessive_residual"
     REFERENCE_TIME_ALIGNMENT_UNAVAILABLE = "reference_time_alignment_unavailable"
     SOLVER_FAILURE = "solver_failure"
+    NONFORWARD_SOLUTION = "nonforward_solution"
+    INVALID_SUPPORT_GROUP = "invalid_support_group"
+    UNSUPPORTED_UNCERTAINTY_MODEL = "unsupported_uncertainty_model"
+    CALIBRATION_POLICY_EXCLUDED = "calibration_policy_excluded"
+    INCONSISTENT_EXACT_CONSTRAINTS = "inconsistent_exact_constraints"
+    SOLVER_NOT_CONVERGED = "solver_not_converged"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -175,6 +194,12 @@ class RegistryWriteResult:
 
 @dataclass(frozen=True, kw_only=True)
 class CalibrationUsageRule:
+    """Scale independent precision; zero/non-ACCEPT excludes geometry evidence.
+
+    No scale turns shared pose errors into independent noise. Exact independent
+    constraints stay exact under a positive scale, including frozen/stale usage.
+    """
+
     usage: CalibrationUsage
     action: CalibrationAction
     geometry_weight_scale: float
@@ -239,42 +264,87 @@ class EventWindowPolicy:
 
 @dataclass(frozen=True, kw_only=True)
 class CandidatePolicy:
+    """A conservative k-sigma tube, not a probability of target occupancy.
+
+    Zero sigma disables expansion. The per-ray uncertainty budget bounds retained
+    cells and central grid-plane traversal. Exhaustion marks the search incomplete;
+    downstream association cannot assert uniqueness.
+    """
+
     search: VoxelSearchSpec
     primary_method: CandidateMethod
     minimum_independent_stations: int
     minimum_candidate_score: float
     maximum_candidates: int | None
+    uncertainty_sigma: float
+    maximum_uncertainty_voxels_per_ray: int
 
 
 @dataclass(frozen=True, kw_only=True)
 class AssociationPolicy:
+    """Rank disjoint groups by station pairs, prior matches, then normalized error.
+
+    The margin applies to the summed squared residual/prediction gate ratios.
+    The hypothesis budget bounds examined ray combinations and expanded prior
+    choices; the node budget applies independently to each conflict component.
+    """
+
     minimum_independent_stations: int
     temporal_gate_ns: int
     spatial_gate_m: float
     ambiguity_score_margin: float
+    prediction_spatial_gate_m: float
+    maximum_hypotheses: int
+    maximum_search_nodes: int
 
 
 @dataclass(frozen=True, kw_only=True)
 class GeometryPolicy:
-    """At least two independent stations; numerical quality limits remain supplied."""
+    """At least two independent stations; numerical quality limits remain supplied.
+
+    The angle limit applies to the strongest acute pair; the normal-matrix
+    condition and maximum per-ray residual assess the complete support group.
+    maximum_unaligned_span_ns bounds exposure midpoint differences, not arrival
+    jitter or exposure duration. TRACK_PREDICTION keeps this narrow unguided path
+    for new targets; an unknown speed never becomes a zero-velocity assumption.
+    Huber scale is dimensionless in whitened 2D perpendicular residual space.
+    Both losses iterate depth-dependent angular covariance to the supplied metric
+    tolerance and iteration budget. The metric residual limit still applies to
+    every supporting ray, including robustly downweighted observations.
+    """
 
     minimum_independent_stations: int
     minimum_intersection_angle_rad: float
     maximum_condition_number: float
     maximum_residual_m: float
     robust_loss_definition: str
-    robust_loss_scale_m: float
+    robust_loss_scale_sigma: float
+    maximum_solver_iterations: int
+    convergence_tolerance_m: float
     motion_alignment_model: MotionAlignmentModel
     conservative_speed_bound_mps: float | None
+    maximum_unaligned_span_ns: int
 
 
 @dataclass(frozen=True, kw_only=True)
 class TrackingPolicy:
+    """Two exposure times initialize velocity; confirmation count is at least two.
+
+    Acceleration covariance is m2/s4 for a constant acceleration per prediction
+    interval, not a continuous-time spectral density. No noise floor is implied.
+    Uninitialized seeds use a Euclidean position gate, not a guessed velocity
+    prior. Assignment costs are squared gate ratios; the margin applies to their
+    sum. The node budget applies independently to each conflict component.
+    """
+
     confirmation_measurement_count: int
     confirmation_max_gap_ns: int
     coast_after_ns: int
     delete_after_ns: int
     association_gate_mahalanobis_squared: float
+    initialization_spatial_gate_m: float
+    association_ambiguity_margin: float
+    maximum_assignment_search_nodes: int
     process_acceleration_covariance_enu_m2ps4: Matrix3x3
 
 
@@ -347,7 +417,11 @@ class StationEventTimeProgress:
 
 @dataclass(frozen=True, kw_only=True)
 class StationProgress:
-    """Retain maximum exposure when ENDED; None remains valid for a zero-frame stream."""
+    """Retain maximum exposure when ENDED; None is valid for zero-frame streams.
+
+    RECOVERING means fresh delivery is still behind the first open window. Such
+    a stream rejoins the watermark only after supplying current usable progress.
+    """
 
     station_id: StationId
     station_session_id: SessionId | None
@@ -421,6 +495,7 @@ class SpatialCandidate:
     window: WindowKey
     method: CandidateMethod
     origin: CandidateOrigin
+    prior_track_id: TrackId | None
     coarse_position_enu_m: Vec3 | None
     region_min_enu_m: Vec3 | None
     region_max_enu_m: Vec3 | None
@@ -445,13 +520,18 @@ class CandidateBatch:
 
 @dataclass(frozen=True, kw_only=True)
 class TrackPrediction:
-    """A gating prior; it cannot replace current ray evidence or unguided search."""
+    """A gating prior, valid before valid_until_ns, never a current station vote.
+
+    Read-only extrapolation may be requested beyond validity; such a prediction
+    cannot guide candidates or alignment in a consumed window.
+    """
 
     center_session_id: SessionId
     track_id: TrackId
     clock_domain_id: str
     world_frame_id: WorldFrameId
     reference_time_ns: int
+    valid_until_ns: int
     position_enu_m: Vec3
     velocity_enu_mps: Vec3
     conditional_state_covariance_enu: Matrix6x6 | None
@@ -463,6 +543,10 @@ class AssociatedRayGroup:
 
     Across selected groups in one batch an EventId is used at most once. Group IDs
     are scoped by window (which includes the center session); truth IDs are absent.
+    Without a motion prior, reference time is the midpoint of the earliest/latest
+    supporting exposure midpoints, not an assumed position at the window center.
+    Velocity-aligned groups use the earliest supporting midpoint, avoiding an
+    extrapolated measurement later than all current evidence.
     """
 
     hypothesis_id: str
@@ -473,6 +557,7 @@ class AssociatedRayGroup:
     supporting_ray_event_ids: tuple[EventId, ...]
     supporting_station_ids: tuple[StationId, ...]
     prior_track_id: TrackId | None
+    motion_alignment_model: MotionAlignmentModel
     score: float
     score_definition: ScoreDefinition
 
@@ -498,6 +583,8 @@ class AssociationBatch:
 
 @dataclass(frozen=True, kw_only=True)
 class RayGeometryWeight:
+    """Independent information multiplier, never another station vote."""
+
     event_id: EventId
     weight_scale: float
     reason_codes: tuple[str, ...]
@@ -505,7 +592,13 @@ class RayGeometryWeight:
 
 @dataclass(frozen=True, kw_only=True)
 class GeometryResult:
-    """Degenerate groups retain references and reasons without an invented position."""
+    """Degenerate groups retain references and reasons without an invented position.
+
+    Normalized residuals use independent covariance after the usage penalty.
+    None denotes a violated zero-variance constraint, not a finite residual score.
+    Robust weights inflate the local residual model used for conditional covariance;
+    they do not establish calibrated robust-estimator or absolute-pose coverage.
+    """
 
     window: WindowKey
     hypothesis_id: str
@@ -514,6 +607,11 @@ class GeometryResult:
     motion_alignment_model: MotionAlignmentModel
     shared_installation_state_refs: tuple[InstallationStateRef, ...]
     shared_calibration_solution_refs: tuple[CalibrationSolutionRef, ...]
+    ray_weights: tuple[RayGeometryWeight, ...]
+    normalized_residuals: tuple[float | None, ...]
+    robust_weights: tuple[float, ...]
+    solver_iterations: int
+    solver_converged: bool
 
 
 @dataclass(frozen=True, kw_only=True)

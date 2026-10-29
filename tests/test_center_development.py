@@ -10,17 +10,22 @@ import unittest
 from collections.abc import Generator
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Never, cast
 from unittest.mock import patch
 
 import numpy as np
 
+from chongming.contracts import fusion as f
 from chongming.contracts import model as m
 from chongming.contracts import scene as s
-from chongming.contracts.development import CenterInputStep, CenterRegistration
-from chongming.development import CenterSession, FusionEngineAdapter, InputInspector
+from chongming.contracts.development import (
+    CenterAlgorithmResult,
+    CenterInputStep,
+    CenterRegistration,
+)
+from chongming.development import CenterSession, InputInspector
 from chongming.modules import scene as modules
+from chongming.reference import FusionEngineAdapter
 from chongming.scenarios.authoring import compile_authoring, demo_authoring, save_authoring
 from chongming.scenarios.demo import demo_source
 from chongming.scenarios.run import _json, read_truth_records, run_scene
@@ -38,9 +43,7 @@ class Recorder(InputInspector):
         super().start(registration)
         self.registration = registration
 
-    def process(
-        self, step: CenterInputStep
-    ) -> tuple[tuple[m.FusionMeasurement, ...], tuple[m.TrackEvent, ...]]:
+    def process(self, step: CenterInputStep) -> CenterAlgorithmResult:
         self.inputs.append(step)
         return super().process(step)
 
@@ -401,6 +404,28 @@ class CenterDevelopmentTests(unittest.TestCase):
         calls: list[tuple[str, object]] = []
 
         class Engine:
+            def _batch(self, now: m.ProcessingTime) -> f.FusionBatchResult:
+                return f.FusionBatchResult(
+                    center_session_id=m.SessionId("adapter-test"),
+                    produced_at=now,
+                    admissions=(),
+                    window_update=f.WindowUpdate(
+                        receipts=(),
+                        sealed_windows=(),
+                        watermark=f.WatermarkSnapshot(
+                            capture_clock_domain_id=now.clock_domain_id,
+                            event_time_ns=None,
+                            evaluated_at=now,
+                            station_progress=(),
+                        ),
+                    ),
+                    candidates=(),
+                    associations=(),
+                    geometry=(),
+                    measurements=(),
+                    tracks=(),
+                )
+
             def register_station(self, station: m.StationConfig) -> RegistryWriteResult:
                 calls.append(("station", station))
                 return RegistryWriteResult(status=RegistryWriteStatus.REGISTERED, reason_codes=())
@@ -409,17 +434,17 @@ class CenterDevelopmentTests(unittest.TestCase):
                 calls.append(("solution", solution))
                 return RegistryWriteResult(status=RegistryWriteStatus.REGISTERED, reason_codes=())
 
-            def process(self, event: m.ReceivedEvent) -> SimpleNamespace:
+            def process(self, event: m.ReceivedEvent) -> f.FusionBatchResult:
                 calls.append(("event", event))
-                return SimpleNamespace(measurements=(), tracks=())
+                return self._batch(event.arrival_time)
 
-            def report_progress(self, progress: StationEventTimeProgress) -> SimpleNamespace:
+            def report_progress(self, progress: StationEventTimeProgress) -> f.FusionBatchResult:
                 calls.append(("progress", progress))
-                return SimpleNamespace(measurements=(), tracks=())
+                return self._batch(progress.received_at)
 
-            def tick(self, time: m.ProcessingTime) -> SimpleNamespace:
+            def tick(self, time: m.ProcessingTime) -> f.FusionBatchResult:
                 calls.append(("tick", time))
-                return SimpleNamespace(measurements=(), tracks=())
+                return self._batch(time)
 
             def close(self) -> None:
                 calls.append(("close", None))
@@ -432,6 +457,9 @@ class CenterDevelopmentTests(unittest.TestCase):
             )
             try:
                 session.step()
+                row = json.loads((Path(directory) / "run/center-output.jsonl").read_text())
+                self.assertEqual(len(row["batches"]), 7)
+                self.assertTrue(all("window_update" in batch for batch in row["batches"]))
                 self.assertEqual(
                     [name for name, _ in calls],
                     ["station"] * 2
