@@ -27,6 +27,7 @@ from chongming.contracts.scene import CameraFrameTruth, LogicalSceneSnapshot, Sc
 from chongming.contracts.visualization import AlgorithmOutputUpdate, TruthComparisonSnapshot
 from chongming.edge_runtime import EdgeStepOutput
 from chongming.preview import GodotUiChannel, _preview_metadata, _UiLogBuffer
+from chongming.reference import ReferenceFusionAlgorithm
 from chongming.rendering.godot import GodotRenderer
 from chongming.visualization import (
     center_fusion_event,
@@ -47,6 +48,8 @@ class CenterRunUi:
     def __init__(self, session: CenterSession, renderer: GodotRenderer) -> None:
         self.session = session
         self.renderer = renderer
+        if isinstance(session.algorithm, ReferenceFusionAlgorithm):
+            session.algorithm.voxel_diagnostics.enabled = True
         self.channel = GodotUiChannel(renderer.ui_exchange)
         self.running = True
         self._station = str(session.spec.station_configs[0].station_id)
@@ -184,7 +187,14 @@ class CenterRunUi:
             )
             if edge_output is not None
             else None,
-            center_events=center_fusion_event(result) if result is not None else None,
+            center_events=center_fusion_event(
+                result,
+                voxel_space=self.session.algorithm.voxel_diagnostics.snapshot
+                if isinstance(self.session.algorithm, ReferenceFusionAlgorithm)
+                else None,
+            )
+            if result is not None
+            else None,
             station_states=tuple(stations),
         )
         snapshots = truth_snapshots(

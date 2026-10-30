@@ -11,6 +11,10 @@ var tracks: Dictionary = {}
 var track_history: Dictionary = {}
 var station_states: Dictionary = {}
 var edge_diagnostics: Array = []
+var voxel_space: Variant = null
+var voxel_update_id := 0
+var selected_measurement_id := ""
+var _voxel_dirty := true
 var update_count := 0
 var error := ""
 var _last_snapshots: Array = []
@@ -23,6 +27,9 @@ const MIN_TIME_NS := -9223372036854775807 - 1
 const TRUTH_COLOR := Color("#52e888")
 const RAY_COLOR := Color("#ffe052")
 const MEASUREMENT_COLOR := Color("#ff424f")
+const SELECTION_COLOR := Color("#66ddff")
+const VOXEL_COLOR := Color("#80b8ff")
+const VOXEL_MAX_ALPHA := 0.3
 const TRACK_COLORS := {
 	"tentative": Color("#ff9e9e"), "confirmed": Color("#db2638"),
 	"coasting": Color("#ff9d32"), "deleted": Color("#929292"),
@@ -45,6 +52,7 @@ var _camera: Camera3D
 var _enu: Callable
 var _station_origins: Dictionary = {}
 var _ray_materials: Dictionary = {}
+var _selected_ray_materials: Dictionary = {}
 
 
 func receive(state: Dictionary) -> bool:
@@ -90,6 +98,12 @@ func receive(state: Dictionary) -> bool:
 			edge_diagnostics.append({"station_id": station.station_id,
 				"station_session_id": station.station_session_id, "diagnostics": station.diagnostics})
 	if update.center_events != null:
+		# No sealed window means no new snapshot. A sealed window without an
+		# export (or with an empty grid) replaces the old one rather than mixing it.
+		if update.center_events.window_count > 0 or update.center_events.voxel_space != null:
+			voxel_space = update.center_events.voxel_space
+			voxel_update_id = update.update_id
+			_voxel_dirty = true
 		for measurement in update.center_events.measurements:
 			measurements[measurement.measurement_id] = measurement
 		for track in update.center_events.tracks:
@@ -146,7 +160,7 @@ func attach(parent: Node3D, camera: Camera3D, enu: Callable) -> void:
 	_root = Node3D.new()
 	_root.name = "AlgorithmVisualization"
 	parent.add_child(_root)
-	for key in ["truth", "rays", "measurements", "tracks"]:
+	for key in ["truth", "rays", "measurements", "tracks", "voxels"]:
 		var layer := Node3D.new()
 		layer.name = key
 		_root.add_child(layer)
@@ -159,6 +173,10 @@ func attach(parent: Node3D, camera: Camera3D, enu: Callable) -> void:
 		material.set_shader_parameter("line_color", RAY_COLOR)
 		material.set_shader_parameter("pattern", ["valid", "frozen", "stale"].find(pattern))
 		_ray_materials[pattern] = material
+		var selected := material.duplicate() as ShaderMaterial
+		selected.set_shader_parameter("line_color", SELECTION_COLOR)
+		_selected_ray_materials[pattern] = selected
+	_voxel_dirty = true
 	redraw()
 
 
@@ -179,8 +197,10 @@ func set_station_origins(markers: Array) -> void:
 func redraw() -> void:
 	if _root == null:
 		return
-	for layer in layers.values():
-		for child in layer.get_children():
+	for key in layers:
+		if key == "voxels" and not _voxel_dirty:
+			continue
+		for child in layers[key].get_children():
 			child.free()
 	if not last_update.is_empty():
 		for target in truth_by_time[last_update.scenario_time_ns].targets:
@@ -190,10 +210,68 @@ func redraw() -> void:
 	for measurement in measurements.values():
 		if measurement.position_enu_m != null:
 			var anchor := _anchor(layers.measurements, measurement.measurement_id, measurement.position_enu_m)
-			_marker(anchor, MEASUREMENT_COLOR)
-			_uncertainty(anchor, measurement.position_std_enu_m, MEASUREMENT_COLOR)
+			var color := SELECTION_COLOR if measurement.measurement_id == selected_measurement_id else MEASUREMENT_COLOR
+			_marker(anchor, color)
+			_uncertainty(anchor, measurement.position_std_enu_m, color)
 	for track in tracks.values():
 		_draw_track(track)
+	if _voxel_dirty:
+		_draw_voxels()
+		_voxel_dirty = false
+
+
+func select_measurement(id: String) -> bool:
+	if id != "" and id != selected_measurement_id and not measurements.has(id):
+		return false
+	if selected_measurement_id != id:
+		selected_measurement_id = id
+		redraw()
+	return true
+
+
+func selection_summary() -> Dictionary:
+	var result := {"measurement_id": selected_measurement_id, "expired": false,
+		"available_ray_ids": [], "missing_ray_ids": []}
+	if selected_measurement_id == "":
+		return result
+	if not measurements.has(selected_measurement_id):
+		result.expired = true
+		return result
+	for id in measurements[selected_measurement_id].supporting_ray_ids:
+		if rays.has(JSON.stringify(id)):
+			result.available_ray_ids.append(id)
+		else:
+			result.missing_ray_ids.append(id)
+	return result
+
+
+func _draw_voxels() -> void:
+	if voxel_space == null or voxel_space.scored_voxels.is_empty():
+		return
+	# Batch line segments by score, not one node/material per voxel.
+	var groups := {}
+	for voxel in voxel_space.scored_voxels:
+		if not groups.has(voxel.score):
+			groups[voxel.score] = []
+		var lower: Array = []
+		var upper: Array = []
+		for axis in range(3):
+			lower.append(voxel_space.search_box_min_enu_m[axis] + voxel.grid_index[axis] * voxel_space.voxel_step_enu_m[axis])
+			upper.append(minf(voxel_space.search_box_max_enu_m[axis], lower[axis] + voxel_space.voxel_step_enu_m[axis]))
+		var corners: Array[Vector3] = []
+		for index in range(8):
+			corners.append(_enu.call([upper[0] if (index & 1) != 0 else lower[0],
+				upper[1] if (index & 2) != 0 else lower[1], upper[2] if (index & 4) != 0 else lower[2]]))
+		for index in range(8):
+			for bit in [1, 2, 4]:
+				if (index & bit) == 0:
+					groups[voxel.score].append(corners[index])
+					groups[voxel.score].append(corners[index | bit])
+	for score in groups:
+		var points: Array[Vector3] = []
+		points.assign(groups[score])
+		_mesh(layers.voxels, "Score%d" % score, points,
+			Color(VOXEL_COLOR, VOXEL_MAX_ALPHA * float(score) / float(voxel_space.max_score)))
 
 
 func _anchor(parent: Node3D, id: String, position: Array) -> Node3D:
@@ -286,8 +364,12 @@ func _draw_ray(ray: Dictionary) -> void:
 	var anchor := _anchor(layers.rays, JSON.stringify(ray.event_id), ray.origin_enu_m)
 	var direction: Vector3 = _enu.call(ray.direction_enu_unit)
 	var end := direction * _camera.far
-	_mesh(anchor, "Ray", [Vector3.ZERO, end], RAY_COLOR, Mesh.PRIMITIVE_LINES,
-		_ray_materials[ray.calibration_usage])
+	var selected := false
+	if measurements.has(selected_measurement_id):
+		selected = ray.event_id in measurements[selected_measurement_id].supporting_ray_ids
+	var color := SELECTION_COLOR if selected else RAY_COLOR
+	_mesh(anchor, "Ray", [Vector3.ZERO, end], color, Mesh.PRIMITIVE_LINES,
+		_selected_ray_materials[ray.calibration_usage] if selected else _ray_materials[ray.calibration_usage])
 	if ray.angular_std_rad == null or ray.angular_std_rad <= 0.0 or ray.angular_std_rad >= PI * 0.5:
 		return
 	var side := direction.cross(Vector3.UP)
@@ -302,7 +384,7 @@ func _draw_ray(ray: Dictionary) -> void:
 				end + radius * (side * cos(TAU * index / 32.0) + up * sin(TAU * index / 32.0)),
 				end + radius * (side * cos(TAU * (index + 1) / 32.0) + up * sin(TAU * (index + 1) / 32.0))]:
 			points.append(vertex)
-	_mesh(anchor, "AngularStdCone", points, Color(RAY_COLOR, 0.08), Mesh.PRIMITIVE_TRIANGLES)
+	_mesh(anchor, "AngularStdCone", points, Color(color, 0.08), Mesh.PRIMITIVE_TRIANGLES)
 
 
 func _draw_track(track: Dictionary) -> void:
@@ -486,6 +568,7 @@ func _voxels(voxels: Variant) -> bool:
 	for axis in range(3):
 		if voxels.voxel_step_enu_m[axis] <= 0 or voxels.search_box_min_enu_m[axis] >= voxels.search_box_max_enu_m[axis]:
 			return false
+	var indices := {}
 	for voxel in voxels.scored_voxels:
 		if not _record(voxel, ["grid_index", "score", "supporting_station_count"]) \
 				or not _integers(voxel, ["score", "supporting_station_count"]) \
@@ -496,6 +579,13 @@ func _voxels(voxels: Variant) -> bool:
 			if not _integer(voxel.grid_index[axis]):
 				return false
 			voxel.grid_index[axis] = voxel.grid_index[axis].to_int()
+			var position: float = voxels.search_box_min_enu_m[axis] + voxel.grid_index[axis] * voxels.voxel_step_enu_m[axis]
+			if not is_finite(position) or position >= voxels.search_box_max_enu_m[axis]:
+				return false
+		var key := JSON.stringify(voxel.grid_index)
+		if indices.has(key):
+			return false
+		indices[key] = true
 	return true
 
 

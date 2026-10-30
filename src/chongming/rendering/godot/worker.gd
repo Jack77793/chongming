@@ -320,6 +320,7 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
 	if _ui == null:
 		_open_ui()
 	_ui.show_state(state, _ui_textures, _visualization.station_states, _visualization.evaluation.summary())
+	_refresh_visualization_controls()
 	if _visualization.update_count != previous_update_count:
 		_redraw_freeview()
 	var reply := {
@@ -620,6 +621,17 @@ func _position_editor_overview(entities: Array) -> void:
 func ui_set_visualization_layer(key: String, enabled: bool) -> void:
 	_visualization.set_layer_visible(key, enabled)
 	_redraw_freeview()
+
+
+func ui_select_measurement(id: String) -> void:
+	if _visualization.select_measurement(id):
+		_refresh_visualization_controls()
+		_redraw_freeview()
+
+
+func _refresh_visualization_controls() -> void:
+	_ui.show_visualization(_visualization.measurements, _visualization.selection_summary(),
+		_visualization.voxel_space, _visualization.voxel_update_id)
 
 
 func _sync_editor_markers(markers: Array) -> void:

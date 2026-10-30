@@ -484,7 +484,7 @@ class CenterUiRoundTripTests(unittest.TestCase):
                 self.assertEqual(reports[-1]["evaluation"]["center"]["outputs"], count)
                 self.assertEqual(reports[-1]["evaluation"]["edge"]["outputs"], 0)
                 self.assertIn("模式 3", reports[-1]["info_text"])
-                self.assertIn("体素显示尚未接入", reports[-1]["info_text"])
+                self.assertIn("体素仅支持参考中心算法的无先验原始投票", reports[-1]["info_text"])
                 self.assertNotIn("辅助相机标定", reports[-1]["info_text"])
                 if run == "clean":
                     stats = reports[-1]["evaluation"]["center"]

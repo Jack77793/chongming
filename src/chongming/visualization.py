@@ -46,6 +46,7 @@ from chongming.contracts.visualization import (
     TrackVisualization,
     TruthComparisonSnapshot,
     TruthTargetState,
+    VoxelSpaceVisualization,
 )
 from chongming.ports.scene import SceneLogic
 from chongming.rendering.geometry import resolve_geometry
@@ -149,8 +150,10 @@ def track_visualization(track: TrackEvent) -> TrackVisualization:
     )
 
 
-def center_fusion_event(result: CenterAlgorithmResult) -> CenterFusionEvent:
-    """Top-level outputs are authoritative; batches only supply stage counts."""
+def center_fusion_event(
+    result: CenterAlgorithmResult, *, voxel_space: VoxelSpaceVisualization | None = None
+) -> CenterFusionEvent:
+    """Convert outputs plus the separately exported last-window raw voxel snapshot."""
     return CenterFusionEvent(
         measurements=tuple(measurement_visualization(item) for item in result.measurements),
         tracks=tuple(track_visualization(item) for item in result.tracks),
@@ -165,7 +168,7 @@ def center_fusion_event(result: CenterAlgorithmResult) -> CenterFusionEvent:
             for batch in result.batches
             for associations in batch.associations
         ),
-        voxel_space=None,
+        voxel_space=voxel_space,
     )
 
 

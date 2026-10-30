@@ -80,6 +80,9 @@ var _edit_hint: Label
 var _visualization_layers: Dictionary = {}
 var _station_states: TextEdit
 var _diagnostics: TextEdit
+var _measurement_select: OptionButton
+var _measurement_details: Label
+var _voxel_status: Label
 
 
 ## Build the window around the worker's freeview display, which moves into a tab.
@@ -195,10 +198,15 @@ func _freeview_tab(freeview: TextureRect, freeview_fps: Label) -> Control:
 	return box
 
 
-func _visualization_tab() -> VBoxContainer:
+func _visualization_tab() -> ScrollContainer:
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	var box := VBoxContainer.new()
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(box)
 	for pair in [["truth", "真值：绿色圆圈、速度及视场连线"], ["rays", "边缘：黄色射线及独立角度 σ 圆锥"],
-			["measurements", "中心：红色测量位置及尺寸圆"], ["tracks", "轨迹：历史及当前位置"]]:
+			["measurements", "中心：红色测量位置及尺寸圆"], ["tracks", "轨迹：历史及当前位置"],
+			["voxels", "体素：无先验原始站点投票（线框）"]]:
 		var check := CheckBox.new()
 		var key: String = pair[0]
 		check.text = pair[1]
@@ -210,10 +218,54 @@ func _visualization_tab() -> VBoxContainer:
 	legend.text = "仅自由视角，不写入传感器像素。\n射线：VALID 实线 / FROZEN 虚线 / STALE 点线\n轨迹：暂定浅红 / 确认深红 / 滑行橙 / 删除灰\n射线保留 1 s，测量及删除轨迹保留 3 s（实验时间）。\n轨迹保留最近 100 点；速度箭头为 1 s 位移。\n测量圆直径 = max(σE, σN, σU)，仅尺寸示意。\n未知 σ 不绘制；角度 σ ≥ π/2 无法绘制圆锥。\n\n站点姿态差：配置相机坐标系（右 / 下 / 前），单位 rad。"
 	legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	box.add_child(legend)
+	_voxel_status = Label.new()
+	_voxel_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_voxel_status)
+	_measurement_select = OptionButton.new()
+	_measurement_select.clip_text = true
+	_measurement_select.fit_to_longest_item = false
+	_measurement_select.item_selected.connect(func(index: int) -> void:
+		worker.ui_select_measurement(str(_measurement_select.get_item_metadata(index))))
+	box.add_child(_measurement_select)
+	_measurement_details = Label.new()
+	_measurement_details.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_measurement_details)
 	_station_states = _text_view()
 	_station_states.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_station_states.custom_minimum_size.y = 140
 	box.add_child(_station_states)
-	return box
+	return scroll
+
+
+func show_visualization(measurements: Dictionary, selection: Dictionary, voxels: Variant, voxel_update: int) -> void:
+	var ids: Array = measurements.keys()
+	ids.sort()
+	var selected: String = selection.measurement_id
+	if selection.expired:
+		ids.append(selected)
+	ids.push_front("")
+	var previous: Array = []
+	for index in range(_measurement_select.item_count):
+		previous.append(str(_measurement_select.get_item_metadata(index)))
+	if previous != ids:
+		_measurement_select.clear()
+		for id in ids:
+			_measurement_select.add_item("不选择测量" if id == "" else ("已过期：" if id == selected and selection.expired else "测量：") + id)
+			_measurement_select.set_item_metadata(_measurement_select.item_count - 1, id)
+	_measurement_select.select(ids.find(selected))
+	if selected == "":
+		_measurement_details.text = "选择测量后，以青色高亮缓存中尚存的支持射线。"
+	elif selection.expired:
+		_measurement_details.text = "测量 %s 已过期，无法显示；不重建支持射线。" % selected
+	else:
+		var measurement: Dictionary = measurements[selected]
+		_measurement_details.text = "%s · %s · 参考时刻 %d ns\n支持射线：可显示 %d / %d\n%s" % [selected,
+			measurement.status, measurement.reference_time_ns, selection.available_ray_ids.size(),
+			measurement.supporting_ray_ids.size(),
+			"全部仍在缓存中。" if selection.missing_ray_ids.is_empty() else "部分或全部未接收或已过期，无法显示；不重建。"]
+	_voxel_status.text = "体素：尚无快照（或最后封口窗口未提供原始投票），不保留旧窗口。" if voxels == null else \
+		"体素：更新 #%d · 最后封口窗口\n%d 个非零网格 · 最大站点票数 %d\n仅无先验搜索，透明度不超过 0.3；空快照会清除旧图。" % [
+			voxel_update, voxels.scored_voxels.size(), voxels.max_score]
 
 
 func _show_station_states(stations: Dictionary) -> void:
@@ -531,9 +583,9 @@ func _info_text() -> String:
 	if mode == 2:
 		lines.append("模式 2 · 边缘测试（真实图像算法输入）\n不运行中心算法；缺失边缘结果不使用虚拟射线替代。\n")
 	elif mode == 3:
-		lines.append("模式 3 · 中心测试（普通虚拟射线输入）\n同步执行，结束后退出；不支持编辑或时间跳转。\n体素显示尚未接入。\n")
+		lines.append("模式 3 · 中心测试（普通虚拟射线输入）\n同步执行，结束后退出；不支持编辑或时间跳转。\n体素仅支持参考中心算法的无先验原始投票。\n")
 	elif mode == 4:
-		lines.append("模式 4 · 集成测试（图像 → 设备实际事件 → 中心算法）\n同步执行，结束后退出；体素显示尚未接入。\n")
+		lines.append("模式 4 · 集成测试（图像 → 设备实际事件 → 中心算法）\n同步执行，结束后退出；体素仅支持参考中心算法的无先验原始投票。\n")
 	if playback.get("error") != null:
 		lines.append("错误：%s" % playback.error)
 		lines.append("")

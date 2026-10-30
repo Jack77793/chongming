@@ -303,7 +303,7 @@ class VisualizationReceiverTests(unittest.TestCase):
             self.assertTrue(result["accepted"], result)
             self.assertEqual(result["truth_times"], [time_ns])
             self.assertEqual(result["rays"], [])
-        # Validate optional voxel payloads here; exporting and drawing them is a later unit.
+        # The optional voxel payload uses the same exact-integer framing.
         output = fixed_update()
         assert output.center_events is not None
         voxels = v.VoxelSpaceVisualization(

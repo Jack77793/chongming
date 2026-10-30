@@ -23,7 +23,7 @@ from chongming.rendering.godot import GodotRenderer, visualization_ui_state
 from tests import test_godot_visualization as transport
 from tests.test_scene_rendering import snapshot, test_scene
 
-LAYERS = ("truth", "rays", "measurements", "tracks")
+LAYERS = ("truth", "rays", "measurements", "tracks", "voxels")
 
 
 def layer_state() -> dict[str, Any]:
@@ -87,6 +87,16 @@ def layer_state() -> dict[str, Any]:
                 ),
             ),
             tracks=tuple(tracks),
+            voxel_space=v.VoxelSpaceVisualization(
+                search_box_min_enu_m=(-3.0, 0.0, 2.0),
+                search_box_max_enu_m=(3.0, 8.0, 8.0),
+                voxel_step_enu_m=(2.0, 2.0, 2.0),
+                max_score=2,
+                scored_voxels=(
+                    v.ScoredVoxel(grid_index=(0, 2, 1), score=1, supporting_station_count=1),
+                    v.ScoredVoxel(grid_index=(1, 2, 1), score=2, supporting_station_count=2),
+                ),
+            ),
         ),
         station_states=(
             replace(
@@ -147,6 +157,8 @@ func _node_report(node: Node3D) -> Dictionary:
         var material: Material = node.material_override
         if material is ShaderMaterial:
             result["pattern"] = material.get_shader_parameter("pattern")
+            var color: Color = material.get_shader_parameter("line_color")
+            result["line_color"] = [color.r, color.g, color.b, color.a]
         else:
             result["color"] = [material.albedo_color.r, material.albedo_color.g, material.albedo_color.b, material.albedo_color.a]
             result["billboard"] = material.billboard_mode
@@ -161,6 +173,13 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
         _style_camera = request.state.test_style_camera
     for key in request.state.get("test_layers", {}):
         _ui._visualization_layers[key].button_pressed = request.state.test_layers[key]
+    if request.state.has("test_select"):
+        var id: String = request.state.test_select
+        for index in range(_ui._measurement_select.item_count):
+            if str(_ui._measurement_select.get_item_metadata(index)) == id:
+                _ui._measurement_select.select(index)
+                _ui._measurement_select.item_selected.emit(index)
+                break
     var layers := {}
     for key in _visualization.layers:
         layers[key] = {"visible": _visualization.layers[key].visible, "geometry": _node_report(_visualization.layers[key])}
@@ -168,7 +187,10 @@ func _ui_exchange(request: Dictionary, trailer: PackedByteArray) -> PackedByteAr
     document.commands.append({"type": "test_layers", "layers": layers, "update_count": _visualization.update_count,
         "ray_count": _visualization.rays.size(), "measurement_count": _visualization.measurements.size(),
         "track_count": _visualization.tracks.size(), "station_text": _ui._station_states.text, "capture": _capture,
-        "evaluation": _visualization.evaluation.summary(), "diagnostic_text": _ui._diagnostics.text})
+        "evaluation": _visualization.evaluation.summary(), "diagnostic_text": _ui._diagnostics.text,
+        "selection": _visualization.selection_summary(), "selection_text": _ui._measurement_details.text,
+        "voxel_space": _visualization.voxel_space, "voxel_text": _ui._voxel_status.text,
+        "voxel_update": _visualization.voxel_update_id})
     return JSON.stringify(document).to_utf8_buffer()
 func _render(request: Dictionary) -> PackedByteArray:
     var result := await super._render(request)
