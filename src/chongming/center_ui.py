@@ -1,11 +1,11 @@
-"""Synchronous mode-3 visualization; ordinary center inputs stay truth-free."""
+"""Shared synchronous visualization for device, center and integrated runs."""
 
 from __future__ import annotations
 
 import logging
 import math
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 
 from chongming.contracts.development import CenterAlgorithmResult
@@ -19,14 +19,18 @@ from chongming.contracts.model import (
     CameraFrame,
     CameraRole,
     CaptureTime,
+    DiagnosticEvent,
+    RayEvent,
     StationId,
 )
 from chongming.contracts.scene import CameraFrameTruth, LogicalSceneSnapshot, ScenarioStep
 from chongming.contracts.visualization import AlgorithmOutputUpdate, TruthComparisonSnapshot
+from chongming.edge_runtime import EdgeStepOutput
 from chongming.preview import GodotUiChannel, _preview_metadata, _UiLogBuffer
 from chongming.rendering.godot import GodotRenderer
 from chongming.visualization import (
     center_fusion_event,
+    edge_station_event,
     station_visualization_state,
     truth_snapshots,
 )
@@ -58,7 +62,13 @@ class CenterRunUi:
         self._update_id = 0
         self._log = _UiLogBuffer()
 
-    def publish(self, step: ScenarioStep | None, result: CenterAlgorithmResult) -> None:
+    def publish(
+        self,
+        step: ScenarioStep | None,
+        result: CenterAlgorithmResult | None,
+        *,
+        edge_output: EdgeStepOutput | None = None,
+    ) -> None:
         """Adapt only after the raw result is persisted, before any next source step."""
         clock = self.session.source.clock.read()
         self._scene = step.truth.logical_scene if step else self.session.source.logic.sample(clock)
@@ -69,10 +79,19 @@ class CenterRunUi:
             self._solutions.update(
                 (solution.solution_ref, solution) for solution in step.packets.calibration_solutions
             )
-            for truth in step.truth.camera_frames:
-                if truth.camera_role is CameraRole.MAIN:
-                    self._captures[truth.station_id] = truth.capture_time
-            for frame in step.video.frames:
+            if edge_output is None:
+                for truth in step.truth.camera_frames:
+                    if truth.camera_role is CameraRole.MAIN:
+                        self._captures[truth.station_id] = truth.capture_time
+            else:
+                for completed in edge_output.frames:
+                    self._captures[completed.detections.main_frame_ref.station_id] = (
+                        completed.detections.capture_time
+                    )
+            if not self.session.video_enabled:
+                self._frames.clear()
+                self._frame_truth.clear()
+            for frame in step.video.frames if self.session.video_enabled else ():
                 key = (frame.station_id, frame.camera_role)
                 self._frames[key] = frame
                 self._frame_truth[key] = next(
@@ -85,12 +104,40 @@ class CenterRunUi:
                 truth=replace(step.truth, camera_frames=tuple(self._frame_truth.values())),
             )
             self._payload = _preview_metadata(self._display_step, self._update_id + 1, 1)
+            if edge_output is not None:
+                self._payload["packets"] = {
+                    "calibration_event_count": len(edge_output.calibrations),
+                    "ray_count": sum(isinstance(event, RayEvent) for event in edge_output.events),
+                    "diagnostic_count": sum(
+                        isinstance(event, DiagnosticEvent) for event in edge_output.events
+                    ),
+                    "rays": [
+                        asdict(event) for event in edge_output.events if isinstance(event, RayEvent)
+                    ],
+                }
+        if edge_output is not None:
+            for control_update in edge_output.calibrations:
+                for diagnostic in control_update.diagnostics:
+                    if diagnostic.capture_time is None:
+                        observed = control_update.state_event.state.observed_at
+                        logger.info(
+                            "Control diagnostic station=%s observed_at=%s:%d (not an exposure) %s: %s",
+                            diagnostic.envelope.station_id,
+                            observed.clock_domain_id,
+                            observed.time_ns,
+                            diagnostic.category,
+                            ", ".join(diagnostic.reason_codes),
+                        )
         stations = []
         for config in self.session.spec.station_configs:
             state = self._states.get(config.station_id)
             capture = self._captures.get(config.station_id)
             calibration = None
-            if state is not None and capture is not None:
+            if self.session.edge is not None and capture is not None:
+                calibration = self.session.edge.stations[config.station_id].history.snapshot_at(
+                    capture
+                )
+            elif state is not None and capture is not None:
                 calibration = CalibrationSnapshot(
                     main_capture_time=capture,
                     state=state,
@@ -122,8 +169,22 @@ class CenterRunUi:
             update_id=self._update_id,
             scenario_time_ns=clock.time_ns,
             step_no=clock.step_no,
-            edge_events=None,
-            center_events=center_fusion_event(result),
+            edge_events=tuple(
+                edge_station_event(
+                    station_id=station.config.station_id,
+                    station_session_id=station.device.station_session_id,
+                    events=tuple(
+                        event
+                        for event in edge_output.events
+                        if event.envelope.station_id == station.config.station_id
+                        and not (isinstance(event, DiagnosticEvent) and event.capture_time is None)
+                    ),
+                )
+                for station in self.session.assembly.stations
+            )
+            if edge_output is not None
+            else None,
+            center_events=center_fusion_event(result) if result is not None else None,
             station_states=tuple(stations),
         )
         snapshots = truth_snapshots(
@@ -155,6 +216,9 @@ class CenterRunUi:
                 "center_ms": last["center_ms"],
                 "measurement_count": len(last["measurements"]),
                 "track_event_count": len(last["tracks"]),
+                "edge_ms": last["edge_ms"],
+                "edge_frame_count": last["edge_frame_count"],
+                "edge_diagnostic_count": last["edge_diagnostic_count"],
             }
             if last is not None
             else None,
@@ -173,7 +237,7 @@ class CenterRunUi:
             station_id=self._station,
             editor={"active": False, "freeview": self._freeview},
             log=self._log.snapshot(),
-            execution_mode=3,
+            execution_mode=self.session.mode,
             algorithm_output=algorithm_output,
             truth_snapshots=snapshots,
         ):
@@ -197,7 +261,7 @@ class CenterRunUi:
                 self._freeview = command["enabled"]
                 self._push_freeview()
             else:
-                raise ValueError(f"command is unavailable in mode 3: {kind}")
+                raise ValueError(f"command is unavailable in mode {self.session.mode}: {kind}")
         except (ValueError, TypeError, KeyError):
             logger.warning("UI command %s failed", kind, exc_info=True)
 

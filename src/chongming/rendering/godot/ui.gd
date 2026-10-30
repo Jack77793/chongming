@@ -528,8 +528,12 @@ func _info_text() -> String:
 	var playback: Dictionary = _state.get("playback", {})
 	var lines := []
 	var mode := int(_state.get("execution_mode", 1))
-	if mode == 3:
+	if mode == 2:
+		lines.append("模式 2 · 边缘测试（真实图像算法输入）\n不运行中心算法；缺失边缘结果不使用虚拟射线替代。\n")
+	elif mode == 3:
 		lines.append("模式 3 · 中心测试（普通虚拟射线输入）\n同步执行，结束后退出；不支持编辑或时间跳转。\n体素显示尚未接入。\n")
+	elif mode == 4:
+		lines.append("模式 4 · 集成测试（图像 → 设备实际事件 → 中心算法）\n同步执行，结束后退出；体素显示尚未接入。\n")
 	if playback.get("error") != null:
 		lines.append("错误：%s" % playback.error)
 		lines.append("")
@@ -573,11 +577,17 @@ func _info_text() -> String:
 		lines.append("  %s (%s)  位置 %s m  速度 %.2f m/s  %s" % [item.display_name, item.truth_object_id,
 			_vector(item.state.position_enu_m), speed, capture])
 	lines.append("")
-	if mode == 3:
+	if mode != 1:
 		var last: Dictionary = playback.get("last", {}) if playback.get("last") is Dictionary else {}
-		lines.append("中心算法 %s ms · 本步测量 %d · 轨迹事件 %d" % [
-			last.get("center_ms", "—"), last.get("measurement_count", 0), last.get("track_event_count", 0)])
-		lines.append("虚拟校准状态与姿态差见“算法图层”。")
+		if mode == 2 or mode == 4:
+			lines.append("设备处理 %s ms · 完成主帧 %d · 诊断 %d" % [
+				last.get("edge_ms", "—"), last.get("edge_frame_count", 0), last.get("edge_diagnostic_count", 0)])
+			lines.append("算法成像始终开启；--video 仅控制图像显示与证据视频。")
+			lines.append("无曝光时刻的控制诊断见日志，不计为射线误差样本。")
+		if mode == 3 or mode == 4:
+			lines.append("中心算法 %s ms · 本步测量 %d · 轨迹事件 %d" % [
+				last.get("center_ms", "—"), last.get("measurement_count", 0), last.get("track_event_count", 0)])
+		lines.append("校准使用状态与姿态差见“算法图层”。")
 		return "\n".join(lines)
 	lines.append("辅助相机标定")
 	var calibration: Dictionary = _frame.get("calibration", {})

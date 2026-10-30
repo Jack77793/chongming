@@ -63,6 +63,51 @@ def _positive(value: float) -> bool:
     return not isinstance(value, bool) and math.isfinite(value) and value > 0
 
 
+def validate_detection_policy(policy: d.DetectionPolicy) -> None:
+    if policy.algorithm_id != MOG2_ALGORITHM_ID or policy.score_definition != FILL_RATIO_SCORE:
+        raise ValueError("MOG2 requires its algorithm and fill-ratio score definitions")
+    if not _positive(policy.minimum_component_area_px2) or (
+        policy.maximum_component_area_px2 is not None
+        and (
+            not _positive(policy.maximum_component_area_px2)
+            or policy.maximum_component_area_px2 < policy.minimum_component_area_px2
+        )
+    ):
+        raise ValueError("invalid component area limits")
+    warmup = policy.background_warmup_frame_count
+    history = policy.background_history_frame_count
+    threshold = policy.background_variance_threshold
+    rate = policy.background_learning_rate
+    shadows = policy.background_detect_shadows
+    if (
+        type(warmup) is not int
+        or warmup < 0
+        or type(history) is not int
+        or not 0 < history <= 2_147_483_647  # OpenCV history is a signed 32-bit integer.
+        or threshold is None
+        or not _positive(threshold)
+        or rate is None
+        or isinstance(rate, bool)
+        or not math.isfinite(rate)
+        or not 0 <= rate <= 1
+        or not isinstance(shadows, bool)
+    ):
+        raise ValueError("MOG2 background parameters must all be explicitly configured")
+
+
+def validate_tracking_policy(policy: d.Tracking2DPolicy) -> None:
+    if (
+        policy.algorithm_id != TRACKING_ALGORITHM_ID
+        or policy.quality_definition != TRACK_QUALITY_SCORE
+        or not _positive(policy.association_gate_px)
+        or type(policy.confirmation_frame_count) is not int
+        or policy.confirmation_frame_count <= 0
+        or type(policy.maximum_missing_duration_ns) is not int
+        or policy.maximum_missing_duration_ns <= 0
+    ):
+        raise ValueError("invalid local tracking policy or quality definition")
+
+
 class MotionDetectionModule(ModuleShell):
     """One grayscale background model, bound by the first valid main-frame metadata.
 
@@ -86,35 +131,11 @@ class MotionDetectionModule(ModuleShell):
 
     def _create_model(self) -> cv2.BackgroundSubtractorMOG2:
         policy = self.policy
-        if policy.algorithm_id != MOG2_ALGORITHM_ID or policy.score_definition != FILL_RATIO_SCORE:
-            raise ValueError("MOG2 requires its algorithm and fill-ratio score definitions")
-        if not _positive(policy.minimum_component_area_px2) or (
-            policy.maximum_component_area_px2 is not None
-            and (
-                not _positive(policy.maximum_component_area_px2)
-                or policy.maximum_component_area_px2 < policy.minimum_component_area_px2
-            )
-        ):
-            raise ValueError("invalid component area limits")
-        warmup = policy.background_warmup_frame_count
+        validate_detection_policy(policy)
         history = policy.background_history_frame_count
         threshold = policy.background_variance_threshold
-        rate = policy.background_learning_rate
         shadows = policy.background_detect_shadows
-        if (
-            type(warmup) is not int
-            or warmup < 0
-            or type(history) is not int
-            or history <= 0
-            or threshold is None
-            or not _positive(threshold)
-            or rate is None
-            or isinstance(rate, bool)
-            or not math.isfinite(rate)
-            or not 0 <= rate <= 1
-            or not isinstance(shadows, bool)
-        ):
-            raise ValueError("MOG2 background parameters must all be explicitly configured")
+        assert history is not None and threshold is not None and shadows is not None
         return cv2.createBackgroundSubtractorMOG2(
             history=history, varThreshold=threshold, detectShadows=shadows
         )
@@ -254,17 +275,7 @@ class Tracking2DModule(ModuleShell):
         self._last_time_ns: int | None = None
 
     def _validate(self, batch: d.Candidate2DBatch) -> int:
-        policy = self.policy
-        if (
-            policy.algorithm_id != TRACKING_ALGORITHM_ID
-            or policy.quality_definition != TRACK_QUALITY_SCORE
-            or not _positive(policy.association_gate_px)
-            or type(policy.confirmation_frame_count) is not int
-            or policy.confirmation_frame_count <= 0
-            or type(policy.maximum_missing_duration_ns) is not int
-            or policy.maximum_missing_duration_ns <= 0
-        ):
-            raise ValueError("invalid local tracking policy or quality definition")
+        validate_tracking_policy(self.policy)
         ref = batch.main_frame_ref
         if (ref.station_id, ref.station_session_id, ref.camera_role) != (
             self.station_id,
