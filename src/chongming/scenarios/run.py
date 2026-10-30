@@ -161,9 +161,10 @@ def _packed_rgb(image: Any) -> bytes:
 def read_truth_records(directory: Path) -> list[dict[str, Any]]:
     """Read truth evidence and restore the complete per-step scene snapshot.
 
-    Version 2 stores the invariant world-object geometry in a sidecar.  The
-    returned records intentionally retain the legacy in-memory shape so
-    evaluators do not need to know how evidence was laid out on disk.
+    Version 2 stores invariant logical scene fields in a sidecar when they
+    remain constant throughout the run. The returned records intentionally
+    retain the legacy in-memory shape so evaluators do not need to know how
+    evidence was laid out on disk.
     """
     truth_path = directory / "truth.jsonl"
     static_path = directory / TRUTH_STATIC_FILE
@@ -175,20 +176,24 @@ def read_truth_records(directory: Path) -> list[dict[str, Any]]:
         raise ValueError(f"unsupported truth static format: {static.get('format')!r}")
     if static.get("truth_format") != TRUTH_FORMAT_VERSION:
         raise ValueError(f"unsupported truth format: {static.get('truth_format')!r}")
-    world_objects = static.get("world_objects")
-    digest = static.get("world_objects_sha256")
-    if digest != _json_digest(world_objects):
-        raise ValueError("truth static world_objects digest mismatch")
+    logical_scene_static = static.get("logical_scene_static")
+    digest = static.get("logical_scene_static_sha256")
+    if digest != _json_digest(logical_scene_static):
+        raise ValueError("truth static logical_scene digest mismatch")
     for record in records:
         reference = record.pop("logical_scene_static_ref", None)
+        if reference is None:
+            # Record contains inline static fields (degraded case)
+            continue
         if reference != digest:
             raise ValueError("truth record does not reference its static scene")
         logical_scene = record.get("logical_scene")
         if not isinstance(logical_scene, dict):
             raise TypeError("truth record logical_scene must be an object")
-        if "world_objects" in logical_scene:
-            raise ValueError("truth v2 record unexpectedly contains world_objects")
-        record["logical_scene"] = {**logical_scene, "world_objects": deepcopy(world_objects)}
+        for field in logical_scene_static:
+            if field in logical_scene:
+                raise ValueError(f"truth v2 record unexpectedly contains static field {field!r}")
+        record["logical_scene"] = {**logical_scene, **deepcopy(logical_scene_static)}
     return records
 
 
@@ -276,24 +281,44 @@ class SceneEvidenceWriter:
         logical_scene = truth.get("logical_scene")
         if not isinstance(logical_scene, dict):
             raise TypeError("encoded truth logical_scene must be an object")
-        world_objects = logical_scene.pop("world_objects", None)
-        if world_objects is None:
+
+        # Extract potentially-static fields
+        candidate_static_fields = (
+            "world_objects",
+            "vegetation",
+            "reference_landmarks",
+            "terrain",
+            "world_frame_id",
+        )
+        logical_scene_static = {}
+        for field in candidate_static_fields:
+            if field in logical_scene:
+                logical_scene_static[field] = logical_scene.pop(field)
+
+        if "world_objects" not in logical_scene_static:
             raise ValueError("encoded truth logical_scene is missing world_objects")
-        static_digest = _json_digest(world_objects)
+
+        static_digest = _json_digest(logical_scene_static)
+
         if self._truth_static_digest is None:
+            # First record: save static content
             self._truth_static_digest = static_digest
             self.document(
                 TRUTH_STATIC_FILE,
                 {
                     "format": "truth-static-v1",
                     "truth_format": TRUTH_FORMAT_VERSION,
-                    "world_objects": world_objects,
-                    "world_objects_sha256": static_digest,
+                    "logical_scene_static": logical_scene_static,
+                    "logical_scene_static_sha256": static_digest,
                 },
             )
         elif static_digest != self._truth_static_digest:
-            raise ValueError("truth logical_scene world_objects changed during a run")
-        truth["logical_scene_static_ref"] = self._truth_static_digest
+            # Static fields changed: put them back in the record (degrade to inline)
+            truth["logical_scene"].update(logical_scene_static)
+            logical_scene_static = {}
+
+        if logical_scene_static:
+            truth["logical_scene_static_ref"] = self._truth_static_digest
         frame_records = []
         for frame in step.video.frames:
             # Never use user-provided IDs as path components.
