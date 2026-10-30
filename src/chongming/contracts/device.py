@@ -30,6 +30,12 @@ class DetectionPolicy:
     score_definition: ScoreDefinition
     minimum_component_area_px2: float
     maximum_component_area_px2: float | None
+    # None means unconfigured; MOG2 execution requires every background parameter.
+    background_warmup_frame_count: int | None = None
+    background_history_frame_count: int | None = None
+    background_variance_threshold: float | None = None
+    background_learning_rate: float | None = None
+    background_detect_shadows: bool | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

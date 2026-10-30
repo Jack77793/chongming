@@ -269,9 +269,6 @@ class ArchitectureStructureTests(unittest.TestCase):
         module_directory = Path(inspect.getfile(base)).parent
         pending = {
             "device.py": {
-                "MotionDetectionModule": {"detect"},
-                "Tracking2DModule": {"update"},
-                "MainDetectionModule": {"process"},
                 "ReferenceRecognitionModule": {"recognize"},
                 "CalibrationEstimationModule": {"estimate"},
                 "CalibrationHistoryModule": {

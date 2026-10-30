@@ -1,4 +1,4 @@
-"""Device dependency declarations. Business methods deliberately remain unimplemented."""
+"""Device dependencies, with calibration and ray business methods still deferred."""
 
 from __future__ import annotations
 
@@ -9,14 +9,9 @@ from itertools import count
 from chongming.contracts.device import (
     CalibrationAttempt,
     CalibrationPolicy,
-    Candidate2DBatch,
-    DetectionPolicy,
     DeviceFrameResult,
-    MainDetectionResult,
     RayGenerationPolicy,
     ReferenceObservationBatch,
-    Tracking2DPolicy,
-    Tracking2DResult,
 )
 from chongming.contracts.model import (
     CalibrationSnapshot,
@@ -38,6 +33,11 @@ from chongming.contracts.model import (
     StationId,
 )
 from chongming.modules.base import ModuleShell
+from chongming.modules.detection import (
+    MainDetectionModule,
+    MotionDetectionModule,
+    Tracking2DModule,
+)
 from chongming.ports.device import (
     AuxiliaryCalibrator,
     CalibrationEstimator,
@@ -45,11 +45,23 @@ from chongming.ports.device import (
     CalibrationStateManager,
     EventSequencer,
     MainDetector,
-    MotionDetector,
     RayBuilder,
     ReferenceRecognizer,
-    Tracker2D,
 )
+
+__all__ = [
+    "AuxiliaryCalibrationModule",
+    "CalibrationEstimationModule",
+    "CalibrationHistoryModule",
+    "CalibrationStateModule",
+    "DeviceModule",
+    "EventSequencerModule",
+    "MainDetectionModule",
+    "MotionDetectionModule",
+    "RayGenerationModule",
+    "ReferenceRecognitionModule",
+    "Tracking2DModule",
+]
 
 _TODO = "TODO(stage-3): business logic is intentionally absent from the architecture skeleton"
 
@@ -75,33 +87,6 @@ class EventSequencerModule(ModuleShell):
             sequence_no=next(self._sequence),
             station_config_digest=config_digest,
         )
-
-
-@dataclass(frozen=True, kw_only=True)
-class MotionDetectionModule(ModuleShell):
-    policy: DetectionPolicy
-
-    def detect(self, frame: CameraFrame) -> Candidate2DBatch:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class Tracking2DModule(ModuleShell):
-    station_id: StationId
-    station_session_id: SessionId
-    policy: Tracking2DPolicy
-
-    def update(self, candidates: Candidate2DBatch) -> Tracking2DResult:
-        raise NotImplementedError(_TODO)
-
-
-@dataclass(frozen=True, kw_only=True)
-class MainDetectionModule(ModuleShell):
-    detector: MotionDetector
-    tracker: Tracker2D
-
-    def process(self, frame: CameraFrame) -> MainDetectionResult:
-        raise NotImplementedError(_TODO)
 
 
 @dataclass(frozen=True, kw_only=True)
