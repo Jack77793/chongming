@@ -4,7 +4,7 @@ extends Control
 ## into commands for the next UI exchange; it owns no experiment or edit state.
 
 const PANEL_WIDTH := 440
-const STATE_TEXT := {"playing": "播放中", "paused": "已暂停", "failed": "生成失败"}
+const STATE_TEXT := {"playing": "播放中", "paused": "已暂停", "running": "执行中", "complete": "已完成", "failed": "运行失败"}
 const EDIT_FIELDS := [
 	["E", "位置 E (m)"], ["N", "位置 N (m)"], ["U", "位置 U (m)"],
 	["yaw", "主相机偏航角 (°)"], ["elevation", "主相机俯仰角 (°)"],
@@ -425,12 +425,13 @@ func _show_controls() -> void:
 	var playback: Dictionary = _state.get("playback", {})
 	var editor: Dictionary = _state.get("editor", {})
 	var state := str(playback.get("state", ""))
-	var locked := state == "failed" or bool(editor.get("active", false))
+	var locked := int(_state.get("execution_mode", 1)) != 1 or state == "failed" or bool(editor.get("active", false))
 	_play.text = "播放" if state == "paused" else "暂停"
 	for button in [_play, _step, _restart]:
 		button.disabled = locked
 	var seeking := bool(playback.get("seeking", false))
 	_seek.disabled = locked or seeking
+	_seek_time.editable = not locked and not seeking
 	_seek_time.placeholder_text = "0–%.1f s" % float(playback.get("duration_s", 0.0))
 	if seeking:
 		_seek_hint.text = "跳转中…"
@@ -526,6 +527,9 @@ static func _vector(value: Variant, digits := 1) -> String:
 func _info_text() -> String:
 	var playback: Dictionary = _state.get("playback", {})
 	var lines := []
+	var mode := int(_state.get("execution_mode", 1))
+	if mode == 3:
+		lines.append("模式 3 · 中心测试（普通虚拟射线输入）\n同步执行，结束后退出；不支持编辑或时间跳转。\n体素显示尚未接入。\n")
 	if playback.get("error") != null:
 		lines.append("错误：%s" % playback.error)
 		lines.append("")
@@ -569,6 +573,12 @@ func _info_text() -> String:
 		lines.append("  %s (%s)  位置 %s m  速度 %.2f m/s  %s" % [item.display_name, item.truth_object_id,
 			_vector(item.state.position_enu_m), speed, capture])
 	lines.append("")
+	if mode == 3:
+		var last: Dictionary = playback.get("last", {}) if playback.get("last") is Dictionary else {}
+		lines.append("中心算法 %s ms · 本步测量 %d · 轨迹事件 %d" % [
+			last.get("center_ms", "—"), last.get("measurement_count", 0), last.get("track_event_count", 0)])
+		lines.append("虚拟校准状态与姿态差见“算法图层”。")
+		return "\n".join(lines)
 	lines.append("辅助相机标定")
 	var calibration: Dictionary = _frame.get("calibration", {})
 	if calibration.is_empty():
@@ -611,15 +621,16 @@ static func _set_text(view: TextEdit, text: String) -> void:
 
 func _show_editor() -> void:
 	var editor: Dictionary = _state.get("editor", {})
-	var active := bool(editor.get("active", false))
+	var run_mode := int(_state.get("execution_mode", 1)) != 1
+	var active := not run_mode and bool(editor.get("active", false))
 	var document := _document()
-	_edit_begin.disabled = active or document.is_empty()
+	_edit_begin.disabled = run_mode or active or document.is_empty()
 	for control in [_edit_cancel, _edit_commit, _edit_object, _edit_add_station,
 			_edit_add_target, _edit_delete, _edit_landscape, _edit_apply]:
 		control.disabled = not active
 	for edit in _edit_fields.values() + [_edit_new_id]:
 		edit.editable = active
-	_edit_state.text = "编辑中，实验已暂停" if active else "需要 --scenario 启动" if document.is_empty() else "未锁定"
+	_edit_state.text = "运行模式不支持编辑" if run_mode else "编辑中，实验已暂停" if active else "需要 --scenario 启动" if document.is_empty() else "未锁定"
 	var options := []
 	for pair in [["stations", "station", "相机站"], ["targets", "target", "飞行物"]]:
 		for item in document.get(pair[0], []):

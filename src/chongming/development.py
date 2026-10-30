@@ -16,6 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from chongming.center_ui import CenterRunUi
 from chongming.composition.development import development_run
 from chongming.composition.graph import declare_assembly
 from chongming.contracts.development import (
@@ -116,6 +117,7 @@ class CenterSession:
         self.error: str | None = None
         self.status = "paused"
         self._step_lock = threading.Lock()
+        self._ui: CenterRunUi | None = None
         self._algorithm_started = False
         self._started_bindings = []
         try:
@@ -274,6 +276,8 @@ class CenterSession:
                 "center_ms": center_ms,
                 "stages": asdict(step.truth.timing) if step and step.truth.timing else None,
             }
+            if self._ui is not None:
+                self._ui.publish(step, result)
             return self.snapshot()
         except BaseException as error:
             self.status = "failed"
@@ -283,6 +287,20 @@ class CenterSession:
             except Exception:
                 logger.exception("Cleanup after step failure failed")
             raise
+
+    def run_ui(self, *, tick_hz: float = 10) -> None:
+        """Run synchronously to completion or quit, then close this worker and run."""
+        if self.closed or self.step_count or self.ended or self._ui is not None:
+            raise RuntimeError("start a new session for each UI run")
+        try:
+            self._ui = CenterRunUi(self, default_renderer())
+            self._ui.run(tick_hz)
+        except BaseException as error:
+            self.status = "failed"
+            self.error = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            self.close()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -363,6 +381,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--check", action="store_true", help="只校验 JSON，不创建运行或输出")
     parser.add_argument("--run", action="store_true", help="连续运行至有限终点")
+    parser.add_argument(
+        "--ui", action="store_true", help="模式 3：Godot 显示与诊断，有限结束后退出"
+    )
+    parser.add_argument("--video", action="store_true", help="开启传感器图像与证据视频；默认关闭")
     parser.add_argument("--tick-hz", type=float, default=10)
     parser.add_argument("--algorithm", help="受信任的 Python module:factory；JSON 不加载代码")
     args = parser.parse_args()
@@ -379,13 +401,22 @@ def main() -> None:
     if not math.isfinite(args.tick_hz) or not 0 < args.tick_hz <= 240:
         parser.error("--tick-hz must be in (0, 240]")
     factory: Any = InputInspector
+    if args.ui:
+        from chongming.reference import create_algorithm
+
+        factory = create_algorithm
     if args.algorithm:
         module, sep, name = args.algorithm.partition(":")
         if not sep:
             parser.error("--algorithm must be module:factory")
         factory = getattr(importlib.import_module(module), name)
-    session = CenterSession(args.scenario, args.output, algorithm=factory())
+    session = CenterSession(
+        args.scenario, args.output, algorithm=factory(), video_enabled=args.video
+    )
     try:
+        if args.ui:
+            session.run_ui(tick_hz=args.tick_hz)
+            return
         if not args.run:
             print("已暂停。命令：step / run [步数] / video on|off / status / reset / quit")
         while True:
@@ -404,7 +435,9 @@ def main() -> None:
             elif parts[0] == "reset":
                 session.close()
                 path = args.output.with_name(f"{args.output.name}-reset-{time.time_ns()}")
-                session = CenterSession(args.scenario, path, algorithm=factory())
+                session = CenterSession(
+                    args.scenario, path, algorithm=factory(), video_enabled=args.video
+                )
             elif parts[0] == "run":
                 if len(parts) > 2 or (
                     len(parts) == 2 and (not parts[1].isdigit() or int(parts[1]) <= 0)
