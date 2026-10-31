@@ -103,9 +103,7 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(second.velocity_enu_mps, (2.0, 0.0, 0.0))
         matrix = np.asarray(second.conditional_state_covariance)
         for i in range(3):
-            self.assertGreaterEqual(
-                matrix[i, i], 25.0, f"Position variance [{i},{i}] below floor"
-            )
+            self.assertGreaterEqual(matrix[i, i], 25.0, f"Position variance [{i},{i}] below floor")
 
     def test_prediction_uses_actual_dt_and_discrete_acceleration_units(self) -> None:
         self.update(self.measurement(0, covariance=ZERO))
@@ -139,9 +137,7 @@ class TrackingTests(unittest.TestCase):
         )
         matrix = np.asarray(event.conditional_state_covariance)
         for i in range(3):
-            self.assertGreaterEqual(
-                matrix[i, i], 25.0, f"Position variance [{i},{i}] below floor"
-            )
+            self.assertGreaterEqual(matrix[i, i], 25.0, f"Position variance [{i},{i}] below floor")
         self.assertGreaterEqual(float(np.linalg.eigvalsh(matrix).min()), 0)
 
     def test_zero_covariance_is_exact_not_regularized_with_hidden_noise(self) -> None:
@@ -236,9 +232,7 @@ class TrackingTests(unittest.TestCase):
         )
         matrix = np.asarray(event.conditional_state_covariance)
         for i in range(3):
-            self.assertGreaterEqual(
-                matrix[i, i], 25.0, f"Position variance [{i},{i}] below floor"
-            )
+            self.assertGreaterEqual(matrix[i, i], 25.0, f"Position variance [{i},{i}] below floor")
         naive_gain = prior[:, :3] @ np.linalg.inv(prior[:3, :3] + total)
         self.assertGreater(float(np.linalg.norm(gain - naive_gain)), 0.01)
 
