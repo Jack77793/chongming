@@ -25,12 +25,12 @@ chongming-center --scenario scenarios/center_clean.json --check
 
 ## 命令
 
-| 命令                | 用途                                  |
-| ------------------- | ------------------------------------- |
-| `chongming-preview` | Godot 预览窗口与浏览器工作台          |
-| `chongming-center`  | 场景检查、中心算法同步分步开发        |
-| `chongming-scene`   | 有限虚拟场景及证据导出                |
-| `chongming-osm`     | 本地 OSM XML 清洗与地景导入           |
+| 命令                | 用途                           |
+| ------------------- | ------------------------------ |
+| `chongming-preview` | Godot 预览窗口与浏览器工作台   |
+| `chongming-center`  | 场景检查、中心算法同步分步开发 |
+| `chongming-scene`   | 有限虚拟场景及证据导出         |
+| `chongming-osm`     | 本地 OSM XML 清洗与地景导入    |
 
 各命令的完整参数见 `--help`。`chongming-center --check` 不启动渲染、不创建输出；实际运行即使关闭视频也会启动 Godot。运行输出目录必须尚不存在。
 

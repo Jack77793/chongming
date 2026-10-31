@@ -44,4 +44,4 @@ includes = ["*.py"]
 [formatter.prettier]
 command = "prettier"
 options = ["--write"]
-includes = ["*.json", "*.html", "*.js", "*.mjs", "*.cjs", "*.css", "*.md", "*.markdown"]
+includes = ["*.json", "*.html", "*.js", "*.mjs", "*.cjs", "*.css", "*.md", "*.markdown", "*.yml", "*.yaml"]
