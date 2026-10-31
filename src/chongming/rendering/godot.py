@@ -31,10 +31,12 @@ from chongming.contracts.scene import (
     CameraStateTruth,
     CylinderGeometry,
     ExternalAssetGeometry,
+    FlyingObjectSpec,
     GeometrySpec,
     GrassVisualSpec,
     KinematicState,
     LogicalSceneSnapshot,
+    SceneDefinition,
     ShrubVisualSpec,
     SphereGeometry,
     TreeVisualSpec,
@@ -361,8 +363,13 @@ def _request(
     }
 
 
-def _editor_markers(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
-    """Serialize only the non-sensor gizmos used by the Godot freeview."""
+def _editor_markers(
+    scene: LogicalSceneSnapshot,
+    flying_object_specs: tuple[FlyingObjectSpec, ...] | None = None,
+    current_time_ns: int | None = None,
+    duration_ns: int | None = None,
+) -> list[dict[str, Any]]:
+    """Serialize non-sensor gizmos and trajectory previews for Godot freeview."""
     markers: list[dict[str, Any]] = []
     for camera in scene.cameras:
         markers.append(
@@ -383,15 +390,69 @@ def _editor_markers(scene: LogicalSceneSnapshot) -> list[dict[str, Any]]:
             }
         )
     for item in scene.flying_objects:
-        markers.append(
-            {
-                "kind": "target",
-                "id": str(item.truth_object_id),
-                "position": list(item.state.position_enu_m),
-                "rotation": _rotation(item.state),
-            }
-        )
+        marker: dict[str, Any] = {
+            "kind": "target",
+            "id": str(item.truth_object_id),
+            "position": list(item.state.position_enu_m),
+            "rotation": _rotation(item.state),
+        }
+        # Add trajectory preview if specs are available
+        if (
+            flying_object_specs is not None
+            and current_time_ns is not None
+            and duration_ns is not None
+        ):
+            spec = next(
+                (s for s in flying_object_specs if s.truth_object_id == item.truth_object_id), None
+            )
+            if spec is not None and spec.behavior is not None:
+                trajectory_points = _sample_trajectory_preview(spec, current_time_ns, duration_ns)
+                if trajectory_points:
+                    marker["trajectory"] = trajectory_points
+        markers.append(marker)
     return markers
+
+
+def _sample_trajectory_preview(
+    spec: FlyingObjectSpec,
+    current_time_ns: int,
+    duration_ns: int,
+    sample_interval_s: float = 2.0,
+) -> list[list[float]]:
+    """Sample trajectory points for preview visualization.
+
+    Only evaluates the behavior model (motion kinematics), skipping all
+    occlusion, rendering, and truth computation for fast preview.
+    """
+    from chongming.scenarios.behaviors import sample_behavior
+
+    if spec.behavior is None:
+        return []
+
+    # Sample every 2 seconds by default
+    sample_interval_ns = int(sample_interval_s * 1e9)
+    points: list[list[float]] = []
+
+    # Get initial state from trajectory
+    if not spec.trajectory.knots:
+        return []
+    initial_state = spec.trajectory.knots[0].state
+    initial_time_ns = spec.trajectory.knots[0].time_ns
+
+    # Sample from current time to end of scenario
+    time_ns = current_time_ns
+    while time_ns <= duration_ns:
+        elapsed_ns = time_ns - initial_time_ns
+        if elapsed_ns >= 0:
+            try:
+                state = sample_behavior(spec.behavior, initial_state, elapsed_ns)
+                points.append(list(state.position_enu_m))
+            except (ValueError, RuntimeError):
+                # Skip failed samples (behavior validation errors, etc.)
+                break
+        time_ns += sample_interval_ns
+
+    return points
 
 
 def projected_footprints(
@@ -691,6 +752,9 @@ class GodotRenderer:
         enabled: bool = True,
         realtime: bool = True,
         reopen: bool = False,
+        scene_definition: SceneDefinition | None = None,
+        current_time_ns: int | None = None,
+        duration_ns: int | None = None,
     ) -> bool:
         """Push a scene snapshot to Godot's interactive freeview.
 
@@ -698,6 +762,9 @@ class GodotRenderer:
         no sensor pixels and therefore cannot be mistaken for an experiment
         exposure. During editing Godot draws at its own display cadence;
         otherwise the view only redraws on a scene update or navigation.
+
+        When scene_definition is provided, trajectory previews are computed
+        by sampling the behavior models, skipping all occlusion and rendering.
         """
         with self._lock:
             sock = self._socket
@@ -711,7 +778,12 @@ class GodotRenderer:
             request["editor_enabled"] = bool(enabled)
             request["editor_realtime"] = bool(realtime)
             request["editor_reopen"] = bool(reopen)
-            request["editor_markers"] = _editor_markers(scene)
+            request["editor_markers"] = _editor_markers(
+                scene,
+                flying_object_specs=scene_definition.flying_objects if scene_definition else None,
+                current_time_ns=current_time_ns,
+                duration_ns=duration_ns,
+            )
             request["resources"] = self._resources.definitions
             payload = json.dumps(request, separators=(",", ":")).encode()
             if len(payload) >= 2**32 or len(payload) > _MAX_REQUEST:

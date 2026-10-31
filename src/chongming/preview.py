@@ -713,6 +713,7 @@ class PreviewRuntime:
     def _push_editor(self, enabled: bool, *, reopen: bool = False) -> None:
         with self._condition:
             step = self._latest_step
+            spec = self.spec
         if step is None or not step.truth.logical_scene.cameras:
             return
         camera = step.truth.logical_scene.cameras[0]
@@ -724,6 +725,9 @@ class PreviewRuntime:
             enabled=enabled,
             realtime=editing,
             reopen=reopen or (editing and enabled),
+            scene_definition=spec.scene_definition,
+            current_time_ns=step.video.sample_time.time_ns,
+            duration_ns=spec.timeline.end_time_ns,
         )
         with self._condition:
             self._freeview_enabled = visible or (editing and enabled)

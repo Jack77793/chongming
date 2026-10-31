@@ -3,6 +3,7 @@
 import math
 from dataclasses import replace
 
+from chongming.contracts.model import Matrix3x3
 from chongming.contracts.scene import FlightBehaviorSpec, KinematicState
 
 REGISTRY = {
@@ -20,6 +21,50 @@ REGISTRY = {
         }
     ),
 }
+
+
+def _velocity_aligned_rotation(velocity: tuple[float, float, float]) -> Matrix3x3:
+    """Compute rotation matrix where body y-axis (nose) aligns with velocity direction.
+
+    Aircraft body frame: x right, y forward (nose), z up.
+    Returns rotation_enu_from_body such that body y points along velocity.
+    When velocity is near-vertical, keeps body x pointing east.
+    """
+    vx, vy, vz = velocity
+    speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+
+    if speed < 1e-6:
+        # Stationary or near-zero velocity: return identity (nose points north, wings level)
+        return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+    # Body y-axis (nose) in ENU frame: normalized velocity
+    forward = (vx / speed, vy / speed, vz / speed)
+
+    # Choose a reference "up" direction to construct right-handed frame
+    # When forward is near-vertical, use east as reference; otherwise use world up
+    if abs(forward[2]) > 0.99:
+        # Near-vertical: use east (1, 0, 0) as reference
+        ref_up = (1.0, 0.0, 0.0)
+    else:
+        # Use world up (0, 0, 1) as reference
+        ref_up = (0.0, 0.0, 1.0)
+
+    # Body x-axis (right wing): ref_up cross forward, normalized
+    rx = ref_up[1] * forward[2] - ref_up[2] * forward[1]
+    ry = ref_up[2] * forward[0] - ref_up[0] * forward[2]
+    rz = ref_up[0] * forward[1] - ref_up[1] * forward[0]
+    right_len = math.sqrt(rx * rx + ry * ry + rz * rz)
+    right = (rx / right_len, ry / right_len, rz / right_len)
+
+    # Body z-axis (up): forward cross right (already normalized)
+    up = (
+        forward[1] * right[2] - forward[2] * right[1],
+        forward[2] * right[0] - forward[0] * right[2],
+        forward[0] * right[1] - forward[1] * right[0],
+    )
+
+    # Rotation matrix: columns are body axes expressed in ENU
+    return (right, forward, up)
 
 
 def validate_behavior(spec: FlightBehaviorSpec) -> None:
@@ -79,6 +124,13 @@ def sample_behavior(
         )
     else:
         raise ValueError("registered behavior implementation is missing")
+
+    # Compute heading-aligned rotation: aircraft body y-axis (nose) points along velocity.
+    rotation = _velocity_aligned_rotation(velocity)
+
     return replace(
-        initial, position_enu_m=(position[0], position[1], position[2]), velocity_enu_mps=velocity
+        initial,
+        position_enu_m=(position[0], position[1], position[2]),
+        velocity_enu_mps=velocity,
+        rotation_enu_from_body=rotation,
     )
