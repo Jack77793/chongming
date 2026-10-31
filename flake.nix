@@ -16,15 +16,21 @@
 
       pkgsFor = system: nixpkgs.legacyPackages.${system};
 
-      runtimeEnv = pkgs: {
-        CHONGMING_GODOT = lib.getExe pkgs.godot_4_7;
-        CHONGMING_FFMPEG = lib.getExe pkgs.ffmpeg;
+      pythonEnv = pkgs: {
         LD_LIBRARY_PATH = lib.makeLibraryPath [
           pkgs.stdenv.cc.cc.lib
           pkgs.zlib
         ];
         UV_PYTHON_DOWNLOADS = "never";
       };
+
+      runtimeEnv =
+        pkgs:
+        pythonEnv pkgs
+        // {
+          CHONGMING_GODOT = lib.getExe pkgs.godot_4_7;
+          CHONGMING_FFMPEG = lib.getExe pkgs.ffmpeg;
+        };
 
       treefmtFor =
         pkgs:
@@ -118,6 +124,18 @@
         in
         {
           default = shellFor { };
+          ci = pkgs.mkShell (
+            {
+              packages = [
+                pkgs.python312
+                pkgs.uv
+                pkgs.ruff
+                pkgs.git
+                treefmt
+              ];
+            }
+            // pythonEnv pkgs
+          );
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           software = shellFor {
