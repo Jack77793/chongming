@@ -659,6 +659,32 @@ func _sync_editor_markers(markers: Array) -> void:
 			label.modulate = Color(0.15, 0.85, 0.95) if is_camera else Color(1.0, 0.7, 0.32)
 			anchor.add_child(label)
 		if not is_camera:
+			# Draw trajectory preview if available
+			if marker.has("trajectory") and marker.trajectory is Array and marker.trajectory.size() > 1:
+				var trajectory: Array = marker.trajectory
+				var mesh := ImmediateMesh.new()
+				mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
+				var point_count := trajectory.size()
+				for i in range(point_count):
+					var point: Array = trajectory[i]
+					if point.size() >= 3:
+						# Color gradient: hue cycles through rainbow (0.0 to 1.0)
+						# Each point gets a hue based on its position in trajectory
+						var hue := fmod(float(i) / float(point_count - 1), 1.0)
+						var color := Color.from_hsv(hue, 0.8, 1.0, 0.8)  # 80% saturation, full brightness, 80% alpha
+						mesh.surface_set_color(color)
+						mesh.surface_add_vertex(_enu([point[0], point[1], point[2]]))
+				mesh.surface_end()
+				var trail := MeshInstance3D.new()
+				trail.mesh = mesh
+				trail.layers = 2
+				trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				var trail_material := StandardMaterial3D.new()
+				trail_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				trail_material.vertex_color_use_as_albedo = true  # Use per-vertex colors
+				trail_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				trail.material_override = trail_material
+				_editor_gizmos.add_child(trail)
 			continue
 		var basis := _basis(marker.rotation) * Basis(Vector3.RIGHT, Vector3.DOWN, Vector3.FORWARD)
 		var focal: Array = marker.focal
